@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/evidence-review-pack.schema.json",
+  "title": "ADLC evidence review pack",
+  "description": "Sanitised, allowlisted input for the evidence-review agent. MUST NOT contain raw HAR, trace, console text, replay source or arbitrary HTML - all of that is attacker-controlled, leaks source, and is a prompt-injection vector.",
+  "type": "object",
+  "required": ["runId", "candidateSha", "collector", "requirements", "coverage"],
+  "additionalProperties": false,
+  "properties": {
+    "runId": { "type": "string" },
+    "candidateSha": { "type": "string" },
+    "workflowRunId": { "type": ["string", "null"] },
+    "collector": { "type": "string", "description": "Producer identity + version, e.g. adlc/0.1.0" },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "text"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["metricId", "value", "collector", "artifactSha256"],
+        "additionalProperties": false,
+        "properties": {
+          "metricId": { "type": "string" },
+          "value": { "type": "number" },
+          "budget": { "type": ["number", "null"] },
+          "passed": { "type": "boolean" },
+          "collector": { "type": "string" },
+          "artifactSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["requirementId", "present"],
+        "additionalProperties": false,
+        "properties": {
+          "requirementId": { "type": "string" },
+          "evidenceKinds": { "type": "array", "items": { "type": "string" } },
+          "artifactSha256": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          },
+          "present": { "type": "boolean" }
+        }
+      }
+    },
+    "screenshots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifactSha256", "redacted"],
+        "additionalProperties": false,
+        "properties": {
+          "artifactSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "caption": { "type": "string" },
+          "redacted": { "const": true }
+        }
+      }
+    }
+  }
+}

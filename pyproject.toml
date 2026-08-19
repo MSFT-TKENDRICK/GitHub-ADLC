@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adlc"
+version = "0.1.0"
+description = "Agentic Development Lifecycle framework — governed, evidence-producing agentic SDLC for any GitHub repo"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "jsonschema>=4.22",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+copilot = ["github-copilot-sdk>=0.1"]
+governance = ["agent-framework", "agent-governance-toolkit[full]"]
+evals = ["assert-ai"]
+azure = ["azure-ai-evaluation", "azure-monitor-opentelemetry"]
+flags = ["openfeature-sdk>=0.7", "launchdarkly-server-sdk>=9.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[project.scripts]
+adlc = "adlc.cli:app"
+
+# ---------------------------------------------------------------------------
+# Adapter registry. Leaves register here; the spine ships the defaults.
+# Every adapter implements a Protocol from adlc.ports and a static detect().
+# ---------------------------------------------------------------------------
+[project.entry-points."adlc.agents"]
+fake = "adlc.adapters.agents.fake:FakeAgentRunner"
+
+[project.entry-points."adlc.taskstore"]
+sqlite = "adlc.adapters.taskstore.sqlite:SqliteTaskStore"
+
+[project.entry-points."adlc.evals"]
+deterministic = "adlc.adapters.evals.deterministic:DeterministicRubricRunner"
+
+[project.entry-points."adlc.evidence"]
+playwright = "adlc.adapters.evidence.playwright:PlaywrightCollector"
+
+[project.entry-points."adlc.flags"]
+flagd-file = "adlc.adapters.flags.flagd_file:FlagdFileProvider"
+
+[project.entry-points."adlc.telemetry"]
+otel-file = "adlc.adapters.telemetry.otel_file:OtelFileTelemetry"
+
+[project.entry-points."adlc.gate"]
+tests = "adlc.adapters.gate.tests:TestsGate"
+secrets_local = "adlc.adapters.gate.secrets_local:SecretsLocalGate"
+deps_local = "adlc.adapters.gate.deps_local:DepsLocalGate"
+evidence_completeness = "adlc.adapters.gate.evidence_completeness:EvidenceCompletenessGate"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adlc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
