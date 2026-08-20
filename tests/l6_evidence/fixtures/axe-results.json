@@ -1,0 +1,75 @@
+{
+  "testEngine": { "name": "axe-core", "version": "4.10.2" },
+  "testRunner": { "name": "axe" },
+  "testEnvironment": {
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/129.0.0.0",
+    "windowWidth": 1280,
+    "windowHeight": 720
+  },
+  "url": "http://localhost:3000/checkout?session_token=s3cr3t-session-value",
+  "timestamp": "2026-08-19T12:00:00.000Z",
+  "toolOptions": { "runOnly": { "type": "tag", "values": ["wcag2a", "wcag2aa"] } },
+  "violations": [
+    {
+      "id": "color-contrast",
+      "impact": "serious",
+      "tags": ["cat.color", "wcag2aa", "wcag143"],
+      "description": "Ensures the contrast between foreground and background colors meets WCAG 2 AA",
+      "help": "Elements must meet minimum color contrast ratio thresholds",
+      "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/color-contrast",
+      "nodes": [
+        {
+          "html": "<span class=\"muted\">Order total</span>",
+          "target": [".muted"],
+          "failureSummary": "Fix any of the following: Element has insufficient color contrast"
+        },
+        { "html": "<a href=\"/terms\">Terms</a>", "target": ["a[href$=terms]"] }
+      ]
+    },
+    {
+      "id": "image-alt",
+      "impact": "critical",
+      "tags": ["cat.text-alternatives", "wcag2a", "wcag111"],
+      "help": "Images must have alternate text",
+      "nodes": [{ "html": "<img src=\"/logo.png\">", "target": ["img"] }]
+    },
+    {
+      "id": "region",
+      "impact": "moderate",
+      "tags": ["cat.keyboard", "best-practice"],
+      "help": "All page content should be contained by landmarks",
+      "nodes": [{ "html": "<div id=\"app\">", "target": ["#app"] }]
+    },
+    {
+      "id": "landmark-one-main",
+      "impact": null,
+      "tags": ["cat.semantics", "best-practice"],
+      "help": "Document should have one main landmark",
+      "nodes": [{ "html": "<body>", "target": ["body"] }]
+    },
+    {
+      "id": "autocomplete-valid",
+      "impact": "minor",
+      "tags": ["cat.forms", "wcag21aa"],
+      "help": "autocomplete attribute must be used correctly",
+      "nodes": [
+        {
+          "html": "<input type=\"hidden\" name=\"csrf_token\" value=\"9f8e7d6c5b4a3f2e1d0c\">",
+          "target": ["input[type=hidden]"]
+        }
+      ]
+    }
+  ],
+  "incomplete": [
+    {
+      "id": "color-contrast",
+      "impact": "serious",
+      "nodes": [{ "html": "<p style=\"color:#777\">Shipping</p>", "target": ["p"] }]
+    }
+  ],
+  "passes": [
+    { "id": "document-title", "impact": null, "nodes": [] },
+    { "id": "html-has-lang", "impact": null, "nodes": [] }
+  ],
+  "inapplicable": [{ "id": "video-caption", "nodes": [] }]
+}
