@@ -1,0 +1,81 @@
+{
+  "evalId": "eval-2026-08-19-a1b2",
+  "results": {
+    "version": 3,
+    "timestamp": "2026-08-19T18:00:00.000Z",
+    "stats": { "successes": 1, "failures": 2, "errors": 0 },
+    "results": [
+      {
+        "id": "res-1",
+        "testIdx": 0,
+        "promptIdx": 0,
+        "success": true,
+        "score": 1.0,
+        "testCase": {
+          "description": "R-contrast-01",
+          "metadata": { "criterionId": "R-contrast-01", "weight": 2 },
+          "vars": { "criterionId": "R-contrast-01" }
+        },
+        "response": { "output": "run context" },
+        "gradingResult": {
+          "pass": true,
+          "score": 1.0,
+          "reason": "All sampled text meets the 4.5:1 contrast floor.",
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1.0,
+              "reason": "Contrast floor satisfied in dark mode.",
+              "assertion": { "type": "llm-rubric", "value": "Dark mode keeps 4.5:1 contrast." }
+            }
+          ]
+        }
+      },
+      {
+        "id": "res-2",
+        "testIdx": 1,
+        "promptIdx": 0,
+        "success": false,
+        "score": 0.4,
+        "testCase": {
+          "description": "R-perf-01",
+          "metadata": { "criterionId": "R-perf-01", "weight": 1 },
+          "vars": { "criterionId": "R-perf-01" }
+        },
+        "response": { "output": "run context" },
+        "gradingResult": {
+          "pass": false,
+          "score": 0.4,
+          "reason": "Theme switch latency is not evidenced anywhere in the run.",
+          "componentResults": [
+            {
+              "pass": false,
+              "score": 0.4,
+              "reason": "No latency measurement was produced.",
+              "assertion": {
+                "type": "llm-rubric",
+                "value": "Theme switch completes within 250ms."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "res-3",
+        "testIdx": 2,
+        "promptIdx": 0,
+        "success": false,
+        "score": 0,
+        "testCase": {
+          "description": "R-a11y-01",
+          "metadata": { "criterionId": "R-a11y-01", "weight": 1 },
+          "vars": { "criterionId": "R-a11y-01" }
+        },
+        "error": "provider request failed: 503",
+        "gradingResult": null
+      }
+    ]
+  },
+  "config": { "description": "adlc rubric evaluation (generated)" },
+  "shareableUrl": null
+}
