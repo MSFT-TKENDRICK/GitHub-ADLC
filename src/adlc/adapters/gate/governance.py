@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from adlc.maf.middleware import resolve_policy_path
+from adlc.reduce import write_gate
+from adlc.runs import RunDir
 
 if TYPE_CHECKING:  # pragma: no cover
     from adlc.config import Config
@@ -68,14 +70,14 @@ class GovernanceGate:
     # -- evaluation -------------------------------------------------------
     def evaluate(self, run: Run, cfg: Config) -> GateResult:
         required = cfg.is_required(self.id)
-        run_dir = _run_dir(run, cfg)
-        gates_dir = run_dir / "gates"
-        evidence_path = run_dir / GATE_EVIDENCE
+        rd = _run_dir(run, cfg)
+        gates_dir = rd.gates_dir
+        evidence_path = rd.path / GATE_EVIDENCE
 
         available, reason = self.detect(cfg)
         if not available:
             return self._finish(
-                run_dir,
+                rd,
                 {
                     "id": self.id,
                     "required": required,
@@ -92,7 +94,7 @@ class GovernanceGate:
             gates_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             return self._finish(
-                run_dir,
+                rd,
                 {
                     "id": self.id,
                     "required": required,
@@ -130,7 +132,7 @@ class GovernanceGate:
         if attestation is not None:
             observed["attestation"] = attestation
 
-        runtime_decisions = _read_runtime_decisions(run_dir / RUNNER_DECISIONS)
+        runtime_decisions = _read_runtime_decisions(rd.path / RUNNER_DECISIONS)
         if runtime_decisions is not None:
             observed["runtimeDecisions"] = runtime_decisions
 
@@ -150,7 +152,7 @@ class GovernanceGate:
         status, severity, message = _classify(verify, lint, runtime_decisions)
 
         return self._finish(
-            run_dir,
+            rd,
             {
                 "id": self.id,
                 "required": required,
@@ -165,18 +167,19 @@ class GovernanceGate:
 
     # -- reporting --------------------------------------------------------
     @staticmethod
-    def _finish(run_dir: Path, result: GateResult, *, write_report: bool = True) -> GateResult:
+    def _finish(rd: RunDir, result: GateResult, *, write_report: bool = True) -> GateResult:
+        """Persist the sidecar so a direct `evaluate()` still leaves evidence.
+
+        ``adlc.stages.gates`` calls ``reduce.write_gate`` on the returned result
+        anyway, to the same path, so this is idempotent rather than a second
+        source of truth. Losing it must never change the verdict -- the
+        ``GateResult`` itself is what the reducer folds into ``run.json``, which
+        only ``adlc reduce`` ever writes.
+        """
         if write_report:
             try:
-                report = run_dir / GATE_REPORT
-                report.parent.mkdir(parents=True, exist_ok=True)
-                report.write_text(
-                    json.dumps(result, indent=2, sort_keys=True, default=str) + "\n",
-                    encoding="utf-8",
-                )
-            except OSError:
-                # Losing the sidecar must not change the verdict; the GateResult
-                # itself is what the aggregator reduces.
+                write_gate(rd, result)
+            except (OSError, KeyError, TypeError, ValueError):
                 pass
         return result
 
@@ -349,9 +352,9 @@ def _read_runtime_decisions(path: Path) -> dict[str, Any] | None:
     }
 
 
-def _run_dir(run: Run, cfg: Config) -> Path:
+def _run_dir(run: Run, cfg: Config) -> RunDir:
     run_id = (run or {}).get("runId") or "unknown"
-    return cfg.run_dir(str(run_id))
+    return RunDir(cfg, str(run_id))
 
 
 def _timeout(cfg: Config) -> int:
