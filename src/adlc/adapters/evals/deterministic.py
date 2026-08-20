@@ -118,6 +118,7 @@ class DeterministicRubricRunner:
         for criterion in rubric.get("criteria", []):
             weight = float(criterion.get("weight", 1.0))
             score, rationale = self._evaluate(criterion)
+            requires_judge = criterion.get("kind") == "llm-rubric"
             total_weight += weight
             weighted += score * weight
             criteria_out.append({
@@ -127,6 +128,7 @@ class DeterministicRubricRunner:
                 "passed": score >= 1.0,
                 "rationale": rationale,
                 "evidence": criterion.get("acceptanceRefs") or [],
+                "requiresJudge": requires_judge,
             })
 
         threshold = float(rubric.get("threshold", 0.7))

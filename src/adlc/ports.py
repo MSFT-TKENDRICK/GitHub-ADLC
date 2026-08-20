@@ -171,6 +171,18 @@ class RubricCriterion(TypedDict, total=False):
     passed: bool
     rationale: str
     evidence: list[str]
+    #: True when the backend could not actually judge this criterion -- typically
+    #: because it needs an LLM judge that was not configured, or the judge errored.
+    #:
+    #: This is the **structured** signal. It exists because the first version of
+    #: this contract inferred the same thing by grepping ``rationale`` for a
+    #: literal phrase, which silently coupled every eval backend, the eval stage
+    #: and the autoresearch feedback loop to one another's prose: a backend that
+    #: worded its message differently became invisible to the outer loop.
+    #:
+    #: A criterion that was not evaluated MUST set this to True and MUST score
+    #: 0.0, so it can only ever pull a verdict down, never prop one up.
+    requiresJudge: bool
 
 
 class RubricScore(TypedDict, total=False):
