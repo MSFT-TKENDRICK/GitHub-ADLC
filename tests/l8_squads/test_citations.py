@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from l8_fixtures import make_pack, make_run, sha, write_pack, write_review
 
 from adlc.adapters.gate.adversarial_review import (
     ARTIFACT_SHA_RE,
@@ -15,6 +14,8 @@ from adlc.adapters.gate.adversarial_review import (
 )
 from adlc.adapters.gate.evidence_review import EvidenceReviewGate
 from adlc.config import Config
+
+from .l8_fixtures import make_pack, make_run, sha, write_pack, write_precondition, write_review
 
 CITE = "src/api/documents.ts:L88-L104"
 
@@ -133,16 +134,16 @@ class TestAdversarialCitationEnforcement:
 
 
 class TestEvidenceCitationEnforcement:
-    def _sound_run(self, run_dir: Path) -> tuple[dict, dict]:
-        pack = make_pack()
-        write_pack(run_dir, pack)
-        run = make_run(artifact_hashes=[sha("US1-AC1"), sha("US1-AC2")])
-        return pack, run
+    def _sound_precondition(self, run_dir: Path) -> dict:
+        """Deterministic coverage already green, so only the advisory half is under test."""
+        write_precondition(run_dir, "pass")
+        write_pack(run_dir, make_pack())
+        return make_run(artifact_hashes=[sha("US1-AC1"), sha("US1-AC2")])
 
     def test_cited_concern_downgrades_to_warn_but_never_fails(
         self, cfg: Config, run_dir: Path
     ) -> None:
-        _, run = self._sound_run(run_dir)
+        run = self._sound_precondition(run_dir)
         write_review(
             run_dir,
             "requirements-auditor",
@@ -159,7 +160,7 @@ class TestEvidenceCitationEnforcement:
         assert result["observed"]["advisory"]["quorumMet"] is True
 
     def test_uncited_concern_is_discarded(self, cfg: Config, run_dir: Path) -> None:
-        _, run = self._sound_run(run_dir)
+        run = self._sound_precondition(run_dir)
         write_review(
             run_dir,
             "requirements-auditor",
@@ -178,7 +179,7 @@ class TestEvidenceCitationEnforcement:
     def test_hash_absent_from_the_pack_is_treated_as_fabricated(
         self, cfg: Config, run_dir: Path
     ) -> None:
-        _, run = self._sound_run(run_dir)
+        run = self._sound_precondition(run_dir)
         write_review(
             run_dir,
             "requirements-auditor",

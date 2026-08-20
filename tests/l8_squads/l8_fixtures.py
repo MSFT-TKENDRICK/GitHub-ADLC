@@ -1,11 +1,4 @@
-"""Builders shared by the L8 squad tests.
-
-Deliberately *not* named ``conftest`` — ``tests/conformance/conftest.py`` and
-this workstream's conftest would otherwise both be importable as the top-level
-module ``conftest``, and whichever landed in ``sys.modules`` first would win.
-``tests/l8_squads/conftest.py`` puts this directory on ``sys.path``, so
-``import l8_fixtures`` is unambiguous.
-"""
+"""Builders shared by the L8 squad tests."""
 
 from __future__ import annotations
 
@@ -20,6 +13,7 @@ __all__ = [
     "make_run",
     "sha",
     "write_pack",
+    "write_precondition",
     "write_review",
     "write_squads",
 ]
@@ -169,4 +163,43 @@ def make_pack(
 def write_pack(run_dir: Path, pack: dict[str, Any]) -> Path:
     path = run_dir / "evidence-review-pack.json"
     path.write_text(json.dumps(pack, indent=2), encoding="utf-8")
+    return path
+
+
+#: The message the spine's gate emits on success, reproduced verbatim so the
+#: fixture stays recognisable in failure output.
+PRECONDITION_PASS_MESSAGE = "all 2 requirement(s) backed by hash-verified evidence"
+
+
+def write_precondition(
+    run_dir: Path,
+    status: str = "pass",
+    message: str | None = None,
+    observed: dict[str, Any] | None = None,
+) -> Path:
+    """Write the `evidence_completeness` gate result that EvidenceReviewGate reads.
+
+    That gate is spine-owned (`adlc.adapters.gate.evidence_completeness`) and is
+    the *only* thing allowed to block on coverage. These tests fixture its
+    recorded verdict rather than reimplementing it, which is precisely the
+    boundary the L8 gate is supposed to respect.
+    """
+    default_message = {
+        "pass": PRECONDITION_PASS_MESSAGE,
+        "fail": "1 requirement(s) without evidence; 0 referenced hash(es) not found on disk",
+        "not_run": "evidence-review-pack.json not found - run `adlc evidence` first.",
+    }.get(status, "")
+    payload = {
+        "id": "evidence_completeness",
+        "required": True,
+        "status": status,
+        "severity": "high",
+        "observed": observed or {},
+        "expected": {"uncovered": [], "unverifiedHashes": []},
+        "message": message if message is not None else default_message,
+        "evidence": ["gates/evidence_completeness.json"],
+    }
+    path = run_dir / "gates" / "evidence_completeness.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path

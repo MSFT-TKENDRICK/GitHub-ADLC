@@ -27,7 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from adlc.ports import GateResult
+from adlc.ports import GateResult, Run
+from adlc.runs import RunDir
 
 if TYPE_CHECKING:  # pragma: no cover
     from adlc.config import Config
@@ -125,6 +126,10 @@ class Review:
     reviewed_sha: str = ""
     findings: list[Finding] = field(default_factory=list)
     parse_error: str = ""
+
+    @property
+    def path_obj(self) -> Path:
+        return Path(self.path)
 
     @property
     def cited_findings(self) -> list[Finding]:
@@ -426,7 +431,7 @@ class AdversarialReviewGate:
             return False, f"no squad configuration found (searched {searched})"
         return True, f"squad configuration at {path}"
 
-    def evaluate(self, run: dict[str, Any], cfg: Config) -> GateResult:
+    def evaluate(self, run: Run, cfg: Config) -> GateResult:
         required = cfg.is_required(self.id)
         run_id = str((run or {}).get("runId") or "")
         expected = {
@@ -435,7 +440,9 @@ class AdversarialReviewGate:
         }
 
         if not run_id:
-            return self._not_run(required, expected, "run has no runId, so no reviews directory can be located")
+            return self._not_run(
+                required, expected, "run has no runId, so no reviews directory can be located"
+            )
 
         squad = load_squads(cfg, self.squad_id)
         expected = {
@@ -447,21 +454,22 @@ class AdversarialReviewGate:
             "source": squad.source,
         }
 
-        reviews_dir = cfg.run_dir(run_id) / "reviews"
+        rd = RunDir(cfg, run_id)
+        reviews_dir = rd.reviews_dir
         reviews = iter_reviews(reviews_dir, self.squad_id, citation=squad.citation)
         if not reviews:
             return self._not_run(
                 required,
                 expected,
-                f"no {self.squad_id} verdict files in {reviews_dir}; "
+                f"no {self.squad_id} verdict files in {rd.rel(reviews_dir)}; "
                 "the adlc-adversarial workflow did not run or produced nothing",
-                observed={"reviewsDir": str(reviews_dir), "reviewsFound": 0},
+                observed={"reviewsDir": rd.rel(reviews_dir), "reviewsFound": 0},
             )
 
         tally = count_quorum(reviews, squad)
-        tally["reviewsDir"] = str(reviews_dir)
+        tally["reviewsDir"] = rd.rel(reviews_dir)
         tally["blocking"] = squad.blocking
-        evidence = [str(Path(r.path).as_posix()) for r in reviews]
+        evidence = [f"gates/{self.id}.json", *(rd.rel(r.path_obj) for r in reviews)]
 
         if squad.blocking and tally["quorumMet"]:
             return {
@@ -526,5 +534,5 @@ class AdversarialReviewGate:
             "observed": observed or {},
             "expected": expected,
             "message": reason,
-            "evidence": [],
+            "evidence": [f"gates/{self.id}.json"],
         }

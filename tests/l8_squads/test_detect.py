@@ -8,12 +8,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from l8_fixtures import make_run, write_squads
 
 from adlc.adapters.gate.adversarial_review import AdversarialReviewGate
 from adlc.adapters.gate.evidence_review import EvidenceReviewGate
 from adlc.config import Config
 from adlc.ports import GATE_IDS, GateRunner
+
+from .l8_fixtures import make_run, write_squads
 
 GATES = (AdversarialReviewGate, EvidenceReviewGate)
 
@@ -81,7 +82,8 @@ class TestCredentialFreeDegradation:
         assert result["status"] == "not_run"
         assert result["observed"]["reviewsFound"] == 0
         assert "no adversarial_review verdict files" in result["message"]
-        assert result["evidence"] == []
+        # `not_run` still points at its own gate file so the report can link it.
+        assert result["evidence"] == ["gates/adversarial_review.json"]
 
     def test_adversarial_reports_not_run_when_reviews_dir_is_absent(
         self, cfg: Config, repo: Path
@@ -92,11 +94,15 @@ class TestCredentialFreeDegradation:
 
         assert result["status"] == "not_run"
 
-    def test_evidence_reports_not_run_with_no_pack(self, cfg: Config, run_dir: Path) -> None:
+    def test_evidence_reports_not_run_without_the_deterministic_precondition(
+        self, cfg: Config, run_dir: Path
+    ) -> None:
+        # The blocking check is spine-owned. Without its recorded verdict there
+        # is nothing for the advisory half to sit on top of.
         result = EvidenceReviewGate().evaluate(make_run(), cfg)
 
         assert result["status"] == "not_run"
-        assert "not found" in result["message"]
+        assert "evidence_completeness" in result["message"]
 
     def test_adversarial_reports_not_run_without_a_run_id(self, cfg: Config) -> None:
         result = AdversarialReviewGate().evaluate({}, cfg)

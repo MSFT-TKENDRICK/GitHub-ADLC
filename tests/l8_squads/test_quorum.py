@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from l8_fixtures import make_run, write_review, write_squads
 
 from adlc.adapters.gate.adversarial_review import (
     AdversarialReviewGate,
@@ -13,6 +12,8 @@ from adlc.adapters.gate.adversarial_review import (
     quorum_threshold,
 )
 from adlc.config import Config
+
+from .l8_fixtures import make_run, write_review, write_squads
 
 CITE = "src/api/documents.ts:L88-L104"
 
@@ -98,7 +99,13 @@ class TestAdversarialQuorum:
             "security-adversary",
         ]
         assert result["observed"]["quorumMet"] is True
-        assert len(result["evidence"]) == 3
+        # gates/<id>.json plus one run-relative path per verdict file.
+        assert result["evidence"] == [
+            "gates/adversarial_review.json",
+            "reviews/adversarial_review.accessibility-adversary.md",
+            "reviews/adversarial_review.performance-adversary.md",
+            "reviews/adversarial_review.security-adversary.md",
+        ]
 
     def test_one_of_three_does_not_reach_quorum(self, cfg: Config, run_dir: Path) -> None:
         write_review(run_dir, "security-adversary", "block", [("critical", "IDOR", CITE)])

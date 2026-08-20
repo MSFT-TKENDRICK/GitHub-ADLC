@@ -133,13 +133,24 @@ pre-steps:
       # 2. Required members must be present.
       jq -e 'has("runId") and has("candidateSha") and has("collector")
              and has("requirements") and has("coverage")' "$p" > /dev/null
-      # 3. Belt and braces: refuse anything that smells like a raw evidence
-      #    payload smuggled through a string field. Raw HAR / console / trace /
-      #    HTML never reaches this agent -- that is the whole point of the pack.
-      if jq -e 'tostring | test("<html|<script|<iframe|HTTP/1\\.|\"entries\"[[:space:]]*:|\"log\"[[:space:]]*:[[:space:]]*\\{|data:text/html";"i")' "$p" > /dev/null; then
-        echo "::error::pack appears to embed a raw HAR/console/HTML payload; refusing to hand it to the reviewer"
-        exit 1
-      fi
+      # 3. Refuse anything shaped like a raw evidence payload smuggled through a
+      #    string field. This mirrors the spine's producer-side conformance test
+      #    `test_review_pack_leaks_no_raw_evidence`, deliberately tightened:
+      #    the header markers are matched WITH their colon, so a security
+      #    requirement whose prose mentions "the Authorization header" does not
+      #    hard-fail a real run. Literal (-F) matching, so no regex escaping bugs.
+      blob="$(jq -c . "$p")"
+      for forbidden in \
+        '<html' '<script' '<iframe' 'data:text/html' \
+        '#!/usr/bin/env' 'await page.' \
+        'HTTP/1.' '"entries":' '"log":{' '"headers":' \
+        'Set-Cookie:' 'Authorization:'
+      do
+        if printf '%s' "$blob" | grep -qF -- "$forbidden"; then
+          echo "::error::pack leaked ${forbidden} -- refusing to hand raw evidence to the reviewer"
+          exit 1
+        fi
+      done
       # 4. Every artifactSha256 must be a bare 64-hex digest and nothing else.
       if jq -e '[.. | objects | .artifactSha256? // empty] | flatten
                 | map(select(type != "string" or (test("^[a-f0-9]{64}$") | not))) | length > 0' "$p" > /dev/null; then
