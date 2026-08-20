@@ -13,6 +13,7 @@ Telemetry uses the *current* OpenTelemetry feature-flag semantic conventions:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,29 @@ class FlagdFileProvider:
     @staticmethod
     def detect(cfg: Config) -> tuple[bool, str]:
         return True, "built-in flagd file provider (no daemon or account required)"
+
+    def _resolve_output(self, run_id: str) -> Path:
+        """Decide where ``flags.flagd.json`` goes.
+
+        The frozen ``FlagProvider.materialize(run)`` signature carries no run
+        directory, so the provider has to resolve one. Order matters: an
+        explicit constructor argument wins, then ``ADLC_RUN_DIR`` (which is what
+        makes this work when the process cwd is not the repo root), then the
+        repo's configured run directory. This mirrors the convention the
+        LaunchDarkly provider settled on, so both behave identically.
+        """
+        if self.path is not None:
+            return self.path
+
+        if env_dir := os.environ.get("ADLC_RUN_DIR"):
+            return Path(env_dir) / "flags.flagd.json"
+
+        try:
+            from adlc.config import Config
+
+            return Config.load().run_dir(run_id) / "flags.flagd.json"
+        except Exception:  # noqa: BLE001 - fall back rather than fail materialisation
+            return Path(".adlc") / "runs" / run_id / "flags.flagd.json"
 
     # -- authoring ---------------------------------------------------------
     def materialize(self, run: Run) -> Path:
@@ -62,7 +86,7 @@ class FlagdFileProvider:
             "metadata": {"flagSetId": f"adlc/{run_id}"},
         }
 
-        target = self.path or Path(".adlc") / "runs" / run_id / "flags.flagd.json"
+        target = self._resolve_output(run_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         self.path = target

@@ -88,6 +88,8 @@ def test_broken_leaf_adapter_does_not_break_the_registry(cfg: Config) -> None:
     agents = load_adapters("agents")
     assert "fake" in agents, "the built-in runner must always resolve"
 
+
+def test_every_spine_default_is_credential_free(cfg: Config) -> None:
     """The default path must work with nothing configured and no secrets."""
     for name in ("GITHUB_TOKEN", "GH_TOKEN", "LAUNCHDARKLY_SDK_KEY"):
         os.environ.pop(name, None)
@@ -98,3 +100,28 @@ def test_broken_leaf_adapter_does_not_break_the_registry(cfg: Config) -> None:
         assert available, f"spine default for '{kind}' is unavailable: {reason}"
         if kind in EXPLICIT_ONLY_KINDS:
             assert adapter.name == expected
+
+def test_missing_default_fails_loudly_rather_than_returning_an_unusable_adapter(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last-resort fallback must not hand back an unavailable adapter.
+
+    Returning "whatever is registered" when nothing detected would produce an
+    adapter whose own detect() said it was unusable -- a silent fail-open in the
+    exact seam that is supposed to guarantee a working default.
+    """
+    import adlc.config as config_module
+
+    class Unusable:
+        name = "unusable"
+        kind = "flags"
+
+        @staticmethod
+        def detect(_cfg: Config) -> tuple[bool, str]:
+            return False, "deliberately unavailable"
+
+    monkeypatch.setattr(
+        config_module, "load_adapters", lambda kind: {"unusable": Unusable}, raising=True
+    )
+    with pytest.raises(LookupError, match="no usable adapter"):
+        select_adapter(cfg, "flags")

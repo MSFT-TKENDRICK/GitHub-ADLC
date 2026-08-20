@@ -270,7 +270,18 @@ def select_adapter(cfg: Config, kind: AdapterKind, override: str | None = None) 
 
     if default_name and default_name in adapters:
         return adapters[default_name]()
-    return next(iter(adapters.values()))()
+
+    # No configured choice, nothing detected, and the credential-free default is
+    # missing. Returning an arbitrary adapter here would hand back something
+    # whose own detect() said it was unusable -- a silent fail-open in the seam
+    # that is supposed to guarantee a working default. Fail loudly instead.
+    detail = ", ".join(sorted(adapters))
+    raise LookupError(
+        f"no usable adapter for kind '{kind}': the built-in default "
+        f"'{default_name or '<none>'}' is unavailable and nothing else detected. "
+        f"Registered: {detail}. This means the ADLC installation is incomplete -- "
+        f"set adapters.{kind} in .adlc/config.yaml to choose one explicitly."
+    )
 
 
 def capabilities(cfg: Config) -> dict[str, Any]:
