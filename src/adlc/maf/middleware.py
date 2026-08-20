@@ -37,7 +37,7 @@ import logging
 import os
 import sys
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -83,6 +83,11 @@ BLOCKING_DECISIONS: frozenset[str] = frozenset(
 MAF_INSTALL_HINT = 'agent_framework not installed — pip install "adlc[governance]"'
 AGT_INSTALL_HINT = (
     'agent-governance-toolkit not installed — pip install "adlc[governance]"'
+)
+#: `govern()` alone is not enough: see PolicyEngine.load for why.
+ACS_REQUIRED_HINT = (
+    "agent_control_specification not available — AGT's govern() wrapper cannot "
+    'produce a pre-execution verdict; pip install "agent-governance-toolkit[full]"'
 )
 
 #: Top-level module names probed by ``detect``. Deliberately top-level only:
@@ -260,8 +265,17 @@ def _first_attr(obj: Any, names: Sequence[str]) -> Any:
 
 
 def _as_text(value: Any) -> str:
-    """Flatten an enum/str/obj into a lowercase token."""
+    """Flatten an enum/str/mapping/object into a lowercase token."""
     if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        # A verdict serialized to JSON is a dict, so attribute lookup finds
+        # nothing. Reading the key is the difference between recognizing
+        # `transform` and silently degrading it to `allow`.
+        for key in ("value", "name", "decision", "effect", "action", "outcome"):
+            inner = value.get(key)
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip().lower()
         return ""
     for attr in ("value", "name"):
         inner = getattr(value, attr, None)
@@ -342,6 +356,12 @@ def normalize_verdict(raw: Any, *, tool: str, arguments: Mapping[str, Any], sour
     transformed = _as_mapping(
         _first_attr(node, ("transformed_args", "transformed_arguments", "transformed_input"))
     )
+    if transformed is None:
+        # Newer ACS builds expose the rewrite on the outer result rather than
+        # nested under the verdict.
+        transformed = _as_mapping(
+            _first_attr(raw, ("transformed_args", "transformed_arguments", "transformed_input"))
+        )
 
     return GovernanceDecision(
         tool=tool,
@@ -416,19 +436,16 @@ class PolicyEngine:
                 source=source,
             )
 
-        govern, denied = _load_govern_wrapper()
-        if govern is not None:
-            return cls(
-                policy_path=policy,
-                agent_id=agent_id,
-                session_id=session_id,
-                _govern=govern,
-                _denied_exc=denied,
-                source="agentmesh.governance.govern",
-            )
-
+        # `agentmesh.governance.govern()` deliberately does NOT qualify here.
+        # It decides at *call* time, by wrapping the callable it is given, so
+        # the only way to consult it before MAF dispatches is to run a stand-in
+        # — and a stand-in does not carry the real call's action type, so an
+        # allow-by-default policy would report "allowed" for a call it never
+        # actually saw. That is a fail-open, so this path refuses instead.
         if strict:
-            raise GovernanceUnavailable(AGT_INSTALL_HINT)
+            raise GovernanceUnavailable(
+                ACS_REQUIRED_HINT if _load_govern_wrapper()[0] else AGT_INSTALL_HINT
+            )
         return None
 
     # -- enforcement -----------------------------------------------------
@@ -463,29 +480,22 @@ class PolicyEngine:
         return decision
 
     def _evaluate(self, tool: str, args: dict[str, Any]) -> GovernanceDecision:
-        if self._runtime is not None:
-            raw = _acs_evaluate(
-                self._runtime,
-                tool=tool,
-                arguments=args,
-                agent_id=self.agent_id,
-                session_id=self.session_id,
-            )
-            return normalize_verdict(raw, tool=tool, arguments=args, source=self.source)
-
-        if self._govern is not None:
-            return _govern_probe(
-                self._govern,
-                self._denied_exc,
-                policy_path=self.policy_path,
-                tool=tool,
-                arguments=args,
-                source=self.source,
-            )
-
-        raise GovernanceUnavailable(AGT_INSTALL_HINT)
+        if self._runtime is None:
+            raise GovernanceUnavailable(ACS_REQUIRED_HINT)
+        raw = _acs_evaluate(
+            self._runtime,
+            tool=tool,
+            arguments=args,
+            agent_id=self.agent_id,
+            session_id=self.session_id,
+        )
+        return normalize_verdict(raw, tool=tool, arguments=args, source=self.source)
 
     # -- audit -----------------------------------------------------------
+    def record(self, decision: GovernanceDecision) -> None:
+        """Append a decision the middleware derived rather than the engine."""
+        self._records.append(DecisionRecord.of(decision))
+
     @property
     def records(self) -> tuple[DecisionRecord, ...]:
         return tuple(self._records)
@@ -599,74 +609,6 @@ def _load_host_session() -> Any:
     return getattr(module, "HostSession", None)
 
 
-def _govern_probe(
-    govern: Any,
-    denied_exc: type[BaseException] | None,
-    *,
-    policy_path: Path,
-    tool: str,
-    arguments: Mapping[str, Any],
-    source: str,
-) -> GovernanceDecision:
-    """Use ``govern()`` as a *probe* rather than as the executor.
-
-    ``govern()`` wraps a callable and raises ``GovernanceDenied`` at call time.
-    To keep the check strictly before execution we wrap a no-op sentinel that
-    records the arguments it was reached with: if the sentinel runs, policy
-    permitted the call; if ``GovernanceDenied`` is raised, it did not. The real
-    tool is then executed by MAF, exactly once.
-    """
-    reached: dict[str, Any] = {}
-
-    def _sentinel(**kwargs: Any) -> dict[str, Any]:
-        reached.update(kwargs)
-        return kwargs
-
-    _sentinel.__name__ = tool
-
-    guarded = govern(_sentinel, policy=str(policy_path))
-    try:
-        guarded(**dict(arguments))
-    except Exception as exc:
-        if denied_exc is not None and isinstance(exc, denied_exc):
-            return GovernanceDecision(
-                tool=tool,
-                decision="deny",
-                permits=False,
-                reason=str(exc),
-                source=source,
-                arguments=dict(arguments),
-            )
-        if type(exc).__name__ == "GovernanceDenied":
-            return GovernanceDecision(
-                tool=tool,
-                decision="deny",
-                permits=False,
-                reason=str(exc),
-                source=source,
-                arguments=dict(arguments),
-            )
-        raise
-
-    if not reached:
-        # The wrapper short-circuited without denying and without running.
-        return GovernanceDecision(
-            tool=tool,
-            decision="deny",
-            permits=False,
-            reason="govern() neither permitted nor denied the call — failing closed",
-            source=source,
-            arguments=dict(arguments),
-        )
-    return GovernanceDecision(
-        tool=tool,
-        decision="allow",
-        permits=True,
-        source=source,
-        arguments=dict(arguments),
-    )
-
-
 # ---------------------------------------------------------------------------
 # The MAF seam
 # ---------------------------------------------------------------------------
@@ -676,26 +618,30 @@ async def _call_next(call_next: Callable[..., Awaitable[None]], context: Any) ->
     """Invoke MAF's continuation across preview signature changes.
 
     Current MAF passes a zero-argument ``call_next``; earlier previews passed
-    ``next(context)``. Inspecting is cheaper than guessing wrong.
+    ``next(context)``. ``Signature.bind`` answers which one this actually is
+    instead of guessing from parameter counts, which mis-reads bound methods,
+    partials and keyword-only parameters.
+
+    If neither form binds, the ``TypeError`` propagates. That happens *after*
+    policy already permitted the call, so it aborts the node rather than
+    running anything ungoverned.
     """
     try:
         signature = inspect.signature(call_next)
-    except (TypeError, ValueError):  # pragma: no cover - builtins/partials
+    except (TypeError, ValueError):  # pragma: no cover - C-implemented callables
         signature = None
 
-    takes_context = False
-    if signature is not None:
-        positional = [
-            p
-            for p in signature.parameters.values()
-            if p.kind
-            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        takes_context = bool(positional) or any(
-            p.kind is inspect.Parameter.VAR_POSITIONAL for p in signature.parameters.values()
-        )
+    if signature is None:
+        result = call_next()
+    else:
+        try:
+            signature.bind()
+        except TypeError:
+            signature.bind(context)  # raises if this shape is unsupported
+            result = call_next(context)
+        else:
+            result = call_next()
 
-    result = call_next(context) if takes_context else call_next()
     if inspect.isawaitable(result):
         await result
 
@@ -755,7 +701,28 @@ class GovernanceMiddleware:
                 raise GovernanceBlocked(decision)
             return
 
-        if decision.transformed_arguments is not None:
+        # A `transform` verdict means "this call is only acceptable rewritten".
+        # If the rewrite is missing or cannot be installed, the original
+        # arguments are exactly what policy declined to permit, so we block.
+        if decision.decision == "transform":
+            if decision.transformed_arguments is None or not self._apply_transform(
+                context, decision
+            ):
+                blocked = replace(
+                    decision,
+                    decision="deny",
+                    permits=False,
+                    reason=(
+                        "policy returned `transform` but no usable transformed "
+                        "arguments were available; refusing the original call"
+                    ),
+                )
+                self.engine.record(blocked)
+                self._block(context, blocked)
+                if self.raise_on_deny:
+                    raise GovernanceBlocked(blocked)
+                return
+        elif decision.transformed_arguments is not None:
             self._apply_transform(context, decision)
 
         await _call_next(call_next, context)
@@ -777,17 +744,23 @@ class GovernanceMiddleware:
                 continue
 
     @staticmethod
-    def _apply_transform(context: Any, decision: GovernanceDecision) -> None:
+    def _apply_transform(context: Any, decision: GovernanceDecision) -> bool:
+        """Install the rewritten arguments. Returns whether it actually worked."""
+        transformed = decision.transformed_arguments
+        if not isinstance(transformed, Mapping):
+            return False
+        transformed = dict(transformed)
         target = getattr(context, "arguments", None)
-        transformed = dict(decision.transformed_arguments or {})
         if isinstance(target, dict):
             target.clear()
             target.update(transformed)
-            return
+            return True
         try:
             context.arguments = transformed
-        except Exception:  # noqa: BLE001 - best effort on preview contexts
+        except Exception:  # noqa: BLE001 - preview contexts may be read-only
             _log.debug("could not apply a transformed-argument verdict", exc_info=True)
+            return False
+        return True
 
 
 def governance_function_middleware(

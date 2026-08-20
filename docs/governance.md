@@ -81,18 +81,27 @@ deterministic application code before the call is dispatched is the only
 placement where a denial is a property of the system rather than of the model's
 mood.
 
-### Two AGT surfaces, probed in order
+### Two AGT surfaces, and why only one of them counts
 
-`PolicyEngine.load()` prefers the richer API because it yields a structured
-verdict we can file as gate evidence:
+`PolicyEngine.load()` requires the **Agent Control Specification** runtime,
+`agent_control_specification.AgentControl` — a stateless, fail-closed decision
+runtime whose verdicts are `allow | warn | deny | escalate | transform`.
 
-1. **Agent Control Specification** — `agent_control_specification.AgentControl`,
-   a stateless, fail-closed decision runtime. Verdicts are
-   `allow | warn | deny | escalate | transform`.
-2. **The `govern()` wrapper** — `agentmesh.governance.govern(tool, policy=...)`,
-   which raises `GovernanceDenied`. Used as a *probe* against a no-op sentinel
-   so the check still happens strictly before the real tool runs, and the real
-   tool is executed exactly once, by MAF.
+`agentmesh.governance.govern(tool, policy=...)` is deliberately **not** accepted
+as a verdict source for the middleware. It decides at *call* time, by wrapping
+the callable it is handed. The only way to consult it before MAF dispatches is
+to hand it a stand-in — and a stand-in does not carry the real call's action
+type, so on an allow-by-default policy it reports "allowed" for a call the
+policy never actually inspected. That is a fail-open, so the engine refuses and
+`detect()` says why:
+
+```
+agent_control_specification not available — AGT's govern() wrapper cannot
+produce a pre-execution verdict; pip install "agent-governance-toolkit[full]"
+```
+
+`govern()` remains the right tool for wrapping a real callable at its own call
+boundary, which is what AGT documents it for.
 
 ### Verdict mapping
 
@@ -100,14 +109,21 @@ verdict we can file as gate evidence:
 |---|---|---|
 | `allow` | yes | |
 | `warn` | yes | permitted, recorded |
-| `transform` | yes, with rewritten arguments | the runtime sanitized the call |
+| `transform` | **only** with the rewritten arguments installed | see below |
 | `deny` | **no** | |
 | `escalate` | **no** | "a human has not approved this yet" is not permission |
-| anything unrecognized | **no** | fail closed — see below |
+| anything unrecognized | **no** | fail closed |
 
 `decision.permits` is treated as authoritative whenever the runtime supplies it,
 and the name-based table is only the fallback. That way a vocabulary rename in a
 future preview cannot silently flip a deny into an allow.
+
+**`transform` is not a soft allow.** A transform verdict means the call is
+acceptable *only* rewritten. If the rewritten arguments are absent, or cannot be
+installed on the invocation context, the original arguments are precisely what
+policy declined to permit — so the call is blocked and a synthetic deny is
+recorded. Rewrites are read from both the nested verdict and the outer result,
+because ACS has moved that field between previews.
 
 **Unparseable verdicts deny.** If AGT returns a shape we do not recognize, or
 the policy engine raises, `check()` returns a deny whose reason says so. A
@@ -160,9 +176,14 @@ If an import path drifts again, fix the probe list in
 
 ## 4. The policy model
 
-`templates/.adlc/policy.yaml` is vendored to `.adlc/policy.yaml` by `adlc init`.
-Resolution order is `$ADLC_POLICY` → `<repo>/.adlc/policy.yaml` → the shipped
-template. **If none exists, governance is unavailable — never "allow".**
+`templates/.adlc/policy.yaml` is the L2 default policy. Resolution order is
+`$ADLC_POLICY` → `<repo>/.adlc/policy.yaml` → this template. **If none exists,
+governance is unavailable — never "allow".**
+
+Note that `adlc init` vendors the spine's own thinner placeholder from
+`adlc.templates_data.POLICY_YAML` to `.adlc/policy.yaml`, and repo-local config
+correctly wins over a framework default. Copy `templates/.adlc/policy.yaml` over
+it to adopt the fuller rule set below.
 
 ```yaml
 apiVersion: governance.toolkit/v1
@@ -253,24 +274,59 @@ our own confidence rather than about the repository.
 ## 6. The `maf` agent runner
 
 `adlc.adapters.agents.maf_governed:MafGovernedRunner`, entry point `maf`.
+Because `agents` is in `EXPLICIT_ONLY_KINDS`, it is never auto-selected — you
+opt in by name.
 
-Same frozen `AgentRunner` contract as every other runner: one node, one isolated
-worktree, a patch anchored to that worktree's base SHA, and no writes outside
-`node['writeSet']`. Governance adds:
+Same frozen `AgentRunner` contract as every other runner. Note the division of
+labour with the spine's executor, which this runner deliberately does not
+duplicate:
+
+* The **executor** creates and disposes the worktree, and calls
+  `Worktree.diff()` the instant `run_task` returns — it stages with
+  `core.autocrlf=false`, normalises, and writes `patches/<node>.patch`.
+* The **runner** therefore performs no `git add`, no `git diff`, no `git reset`.
+  Staging here would fill the index with line-ending-translated content and
+  reintroduce the `corrupt patch` failure the executor exists to prevent; a
+  reset would destroy evidence of what the agent actually did.
+
+Governance adds:
 
 1. Tools are confined to the worktree and to the write set *in code*, as defence
    in depth behind the policy — a policy misconfiguration still cannot escape.
 2. Every tool call goes through `GovernanceMiddleware` first.
 3. After the run, the working tree is re-checked against the write set and
-   `PROTECTED_PATHS`; a violation resets the worktree and fails the node.
+   `PROTECTED_PATHS`; a violation fails the node.
 4. If **any** call was blocked, the node fails. An agent that had to be stopped
    did not complete its task.
 5. If MAF or AGT is unavailable, `run_task` **fails** rather than running
    ungoverned.
 
+### Three path traps the tools close
+
+These are defence in depth, but each is a real escalation if left open:
+
+* **`.git` is never reachable**, whatever the write set says — not for reading,
+  not for writing, at any depth, in any letter case. The executor runs
+  `git add -A` on this worktree the moment the runner returns, so a writable
+  `.git/config` is arbitrary command execution via clean filters, `fsmonitor` or
+  an external diff command. `git status` never reports administrative files, so
+  a post-hoc check could not catch this.
+* **Symlinks are not traversed.** Policy sees the argument the model wrote;
+  `docs/notes.txt -> .env` is evaluated as `docs/notes.txt` and only becomes
+  `.env` when the filesystem resolves it. Rather than keep the lexical and
+  canonical views in sync, the tools refuse symlinked paths outright.
+* **Write-set entries match exactly.** Descendants are authorized only by
+  explicit directory syntax (`dir/**` or `dir/`), because nothing stops an agent
+  creating `new.py` as a directory and hiding files beneath it.
+
+A credential denylist (`.env*`, `.npmrc`, `.pypirc`, `id_rsa`, `~/.ssh`,
+`~/.aws`) is enforced in code as well as in policy, so a policy misconfiguration
+is not the only thing standing between an agent and a token.
+
 The `AgentRunner` signature carries no run id, so the runner reads
-`ADLC_RUN_DIR` or `ADLC_RUN_ID` to place `patches/<node>.patch` and the decision
-log; it falls back to `.adlc/runs/current/`.
+`ADLC_RUN_DIR` or `ADLC_RUN_ID` to place the governance decision log; it falls
+back to `.adlc/runs/current/`. Set one of those to have the log land where the
+`governance` gate reads it.
 
 ---
 
@@ -288,7 +344,7 @@ Vendor the policy and select the runner:
 # .adlc/config.yaml
 profile: full
 adapters:
-  agents: maf
+  agents: maf        # required: `agents` never auto-escalates
 gates:
   required: [tests, secrets_local, deps_local, evidence_completeness, governance]
 ```

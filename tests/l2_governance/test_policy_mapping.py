@@ -312,6 +312,60 @@ class TestMiddlewareSeam:
         assert seen == [context]
 
     @pytest.mark.asyncio
+    async def test_supports_a_bound_method_continuation(self) -> None:
+        class Continuation:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def __call__(self) -> None:
+                self.calls += 1
+
+        cont = Continuation()
+        await GovernanceMiddleware(StubEngine({}))(
+            FakeFunctionInvocationContext("read_file"), cont
+        )
+        assert cont.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_supports_a_partial_continuation(self) -> None:
+        import functools
+
+        seen: list[Any] = []
+
+        async def _next(tag: str, context: Any) -> None:
+            seen.append((tag, context))
+
+        context = FakeFunctionInvocationContext("read_file")
+        await GovernanceMiddleware(StubEngine({}))(
+            context, functools.partial(_next, "tagged")
+        )
+        assert seen == [("tagged", context)]
+
+    @pytest.mark.asyncio
+    async def test_supports_a_varargs_continuation(self) -> None:
+        seen: list[Any] = []
+
+        async def _next(*args: Any) -> None:
+            seen.append(args)
+
+        await GovernanceMiddleware(StubEngine({}))(
+            FakeFunctionInvocationContext("read_file"), _next
+        )
+        assert seen and len(seen[0]) == 0
+
+    @pytest.mark.asyncio
+    async def test_unsupported_continuation_aborts_rather_than_running_ungoverned(
+        self,
+    ) -> None:
+        async def _next(a: Any, b: Any) -> None:  # pragma: no cover - must not run
+            raise AssertionError("should not be reachable")
+
+        with pytest.raises(TypeError):
+            await GovernanceMiddleware(StubEngine({}))(
+                FakeFunctionInvocationContext("read_file"), _next
+            )
+
+    @pytest.mark.asyncio
     async def test_process_alias_for_class_based_middleware(self) -> None:
         calls: list[int] = []
         await GovernanceMiddleware(StubEngine({})).process(
@@ -340,6 +394,63 @@ class TestMiddlewareSeam:
         await GovernanceMiddleware(engine)(context, zero_arg_next(calls))
         assert calls == [1]
         assert context.arguments == {"path": "src/redacted.py"}
+
+    @pytest.mark.asyncio
+    async def test_transform_on_the_outer_result_is_also_found(self) -> None:
+        """Newer ACS builds put the rewrite beside the verdict, not inside it."""
+        raw = {
+            "verdict": {"decision": {"permits": True, "value": "transform"}},
+            "transformed_args": {"path": "src/redacted.py"},
+        }
+        context = FakeFunctionInvocationContext("write_file", {"path": "src/secret.py"})
+        calls: list[int] = []
+        await GovernanceMiddleware(StubEngine({"write_file": raw}))(
+            context, zero_arg_next(calls)
+        )
+        assert calls == [1]
+        assert context.arguments == {"path": "src/redacted.py"}
+
+    @pytest.mark.asyncio
+    async def test_transform_without_a_rewrite_blocks(self) -> None:
+        """The original arguments are exactly what policy declined to permit."""
+        raw = {"verdict": {"decision": {"permits": True, "value": "transform"}}}
+        engine = StubEngine({"write_file": raw})
+        context = FakeFunctionInvocationContext("write_file", {"path": "src/secret.py"})
+        calls: list[int] = []
+
+        await GovernanceMiddleware(engine)(context, zero_arg_next(calls))
+
+        assert calls == [], "untransformed arguments must not reach the tool"
+        assert context.terminate is True
+        assert context.arguments == {"path": "src/secret.py"}
+        assert engine.records[-1].permits is False
+
+    @pytest.mark.asyncio
+    async def test_transform_that_cannot_be_installed_blocks(self) -> None:
+        raw = {
+            "verdict": {
+                "decision": {"permits": True, "value": "transform"},
+                "transformed_args": {"path": "src/redacted.py"},
+            }
+        }
+
+        class ReadOnlyContext(FakeFunctionInvocationContext):
+            """A context whose ``arguments`` cannot be replaced."""
+
+            def __setattr__(self, name: str, value: Any) -> None:
+                if name == "arguments" and getattr(self, "_sealed", False):
+                    raise AttributeError("arguments is read-only")
+                object.__setattr__(self, name, value)
+
+        context = ReadOnlyContext("write_file", {"path": "src/secret.py"})
+        object.__setattr__(context, "arguments", "not-a-mapping")
+        object.__setattr__(context, "_sealed", True)
+
+        calls: list[int] = []
+        await GovernanceMiddleware(StubEngine({"write_file": raw}))(
+            context, zero_arg_next(calls)
+        )
+        assert calls == [], "a transform that could not be applied must block"
 
     @pytest.mark.asyncio
     async def test_on_decision_callback_sees_every_decision(self) -> None:
