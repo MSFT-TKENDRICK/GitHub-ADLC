@@ -102,7 +102,7 @@ occur when a diagram is assembled from prose:
 | --- | --- |
 | Non-empty, not comments-only | An empty `.mmd` renders as nothing at all |
 | Known diagram header (`MERMAID_HEADERS`) | A typo like `flowchat TB` is a silent no-render |
-| `flowchart`/`graph` has a direction | `flowchart` alone does not parse |
+| `flowchart`/`graph` direction, **if present**, is one of `TB TD BT RL LR` | `flowchart XY` is a lexical error. A *missing* direction is legal — mermaid defaults it — so it is not rejected |
 | Balanced `[]`, `()`, `{}` and `"` | The single most common generation bug |
 | Balanced `subgraph` / `end` | An unclosed subgraph swallows the rest of the diagram |
 | No `\|` inside node labels | `\|` delimits edge labels; a pipe in a label ends the node |
@@ -111,7 +111,10 @@ occur when a diagram is assembled from prose:
 | No dangling edge (`a -->` at EOL) | Parse error |
 | No reserved node id (`end`, `graph`, `subgraph`, …) | `end` as a node id is a classic Mermaid trap |
 | ER relationship cardinality grammar | Only `\|\|`, `\|o`, `}\|`, `}o` on the left and `\|\|`, `o\|`, `\|{`, `o{` on the right are legal |
-| ER attribute blocks are `type name` and closed | A malformed attribute kills the whole diagram |
+| ER attribute blocks are `type name [PK\|FK\|UK] ["comment"]` and closed | A malformed attribute kills the whole diagram |
+
+Entity names may be bare words or quoted strings in both relationships and
+attribute blocks, because mermaid accepts both.
 
 Two carve-outs worth knowing about:
 
@@ -120,6 +123,24 @@ Two carve-outs worth knowing about:
   `_validate_er` balances the attribute blocks instead.
 * The label scan peels nested shape delimiters before judging quoting, so
   `svc1(["Theme Service"])` and `db1[("Reader")]` are accepted.
+
+#### The validator was checked against the real parser
+
+A linter that is *stricter* than Mermaid is its own bug: it makes the generator
+silently drop a diagram that would have rendered. So the corpora in
+`tests/l9_enrich/test_diagrams.py` (`VALID` and `INVALID`) were cross-checked
+against **mermaid 11's own `mermaid.parse()`**, run headlessly under jsdom, and
+`validate_mermaid` agrees with it on every case — plus the three generated
+artifacts, which mermaid parses.
+
+That cross-check caught a real defect: the validator originally required a
+direction after `flowchart`/`graph`, but mermaid accepts `flowchart` bare and
+defaults it. Only a *present but unrecognised* direction (`flowchart XY`) is an
+error. That check is now behaviour-matched rather than assumed.
+
+The cross-check is a **development-time** tool, not part of the suite: it needs
+npm and a mermaid install, and `tests/l9_enrich` must pass with no network. Re-run
+it by hand if you change the validator or the diagram builders.
 
 Generated labels are pushed through `sanitize_label()`, which strips everything
 outside `[\w \-.,:/'&+%?!]`, collapses whitespace and truncates. Node ids come
@@ -293,9 +314,15 @@ fails loudly here instead of producing a file nobody can open.
 
 Run the suite with:
 
-```bash
+```powershell
+# All ten leaves share one system Python, so never `pip install -e .` --
+# whoever ran it last wins and every other session imports the wrong code.
+$env:PYTHONPATH = "<your worktree>\src"
 python -m pytest tests/l9_enrich -q
 ruff check src/adlc/stages/
 ```
+
+(`tests/l9_enrich/conftest.py` also prepends the worktree's `src` to
+`sys.path`, so the suite is correct even without `PYTHONPATH` set.)
 
 Both must pass with **no credentials and no network**.

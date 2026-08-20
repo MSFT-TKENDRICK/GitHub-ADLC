@@ -21,12 +21,24 @@ VALID = [
     ),
     pytest.param('flowchart LR\n    a1(["Service"]) --> d1[("Store")]\n', id="nested-shapes"),
     pytest.param('flowchart LR\n    a -->|"yes"| b\n', id="edge-label"),
+    # mermaid defaults the direction when it is omitted -- verified against the
+    # mermaid 11 parser, so the validator must not reject these.
+    pytest.param('flowchart\n    a["A"] --> b["B"]\n', id="bare-flowchart"),
+    pytest.param('graph\n    a["A"] --> b["B"]\n', id="bare-graph"),
+    pytest.param('flowchart TB;\n    a["A"] --> b["B"]\n', id="direction-semicolon"),
     pytest.param(
         "erDiagram\n    READER ||--o{ PREFERENCE : has_many\n"
         "    READER {\n        uuid id\n        string email\n    }\n",
         id="erdiagram",
     ),
     pytest.param("erDiagram\n    READER\n    PREFERENCE\n", id="erdiagram-no-rels"),
+    pytest.param(
+        'erDiagram\n    "Reader Two" ||--o{ PREF : has\n', id="er-quoted-entity"
+    ),
+    pytest.param(
+        'erDiagram\n    R {\n        uuid id PK\n        string e "note"\n    }\n',
+        id="er-attribute-keys",
+    ),
     pytest.param("%% a comment\nflowchart TB\n    a --> b\n", id="leading-comment"),
 ]
 
@@ -35,7 +47,8 @@ INVALID = [
     pytest.param("   \n\n", id="whitespace"),
     pytest.param("%% only a comment\n", id="comment-only"),
     pytest.param("flowchat TB\n    a --> b\n", id="typo-header"),
-    pytest.param("flowchart\n    a --> b\n", id="missing-direction"),
+    pytest.param('flowchart XY\n    a["A"] --> b["B"]\n', id="bad-direction"),
+    pytest.param('graph XY\n    a["A"] --> b["B"]\n', id="bad-direction-graph"),
     pytest.param('flowchart TB\n    a["unclosed\n', id="unterminated-quote"),
     pytest.param('flowchart TB\n    a["label"\n', id="unclosed-bracket"),
     pytest.param('flowchart TB\n    a["one"} --> b\n', id="mismatched-bracket"),

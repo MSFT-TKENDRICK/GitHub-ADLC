@@ -50,13 +50,14 @@ FLOW_DIRECTIONS: frozenset[str] = frozenset({"TB", "TD", "BT", "RL", "LR"})
 #: Node ids that collide with Mermaid grammar keywords.
 RESERVED_IDS: frozenset[str] = frozenset({"end", "graph", "subgraph", "class", "click", "style"})
 
-#: Left/right cardinality tokens of the ER relationship grammar.
+#: Left/right cardinality tokens of the ER relationship grammar. Entity names
+#: may be bare words or quoted strings -- mermaid 11 accepts both.
 _ER_REL = re.compile(
-    r"^(?P<left>[A-Za-z_][\w-]*)\s+"
+    r"^(?P<left>[A-Za-z_][\w-]*|\"[^\"]+\")\s+"
     r"(?P<lcard>\|\||\|o|\}\||\}o)"
     r"(?P<line>--|\.\.)"
     r"(?P<rcard>\|\||o\||\|\{|o\{)\s+"
-    r"(?P<right>[A-Za-z_][\w-]*)\s*:\s*(?P<label>\S.*)$"
+    r"(?P<right>[A-Za-z_][\w-]*|\"[^\"]+\")\s*:\s*(?P<label>\S.*)$"
 )
 
 _ER_ATTRIBUTE = re.compile(r'^[A-Za-z_][\w\[\]]*\s+[A-Za-z_]\w*(\s+(PK|FK|UK))?(\s+".*")?\s*$')
@@ -200,9 +201,12 @@ def validate_mermaid(source: str) -> tuple[bool, list[str]]:
         return False, [f"line {first_no}: unknown diagram type {header!r}"]
     if header in {"flowchart", "graph"}:
         parts = first.split()
-        if len(parts) < 2 or parts[1].rstrip(";") not in FLOW_DIRECTIONS:
+        # Mermaid defaults the direction when it is omitted, so only a
+        # present-but-unrecognised token is an error. Verified against the
+        # mermaid 11 parser: `flowchart` parses, `flowchart XY` does not.
+        if len(parts) > 1 and parts[1].rstrip(";") not in FLOW_DIRECTIONS:
             errors.append(
-                f"line {first_no}: {header} needs a direction "
+                f"line {first_no}: {parts[1]!r} is not a {header} direction "
                 f"({', '.join(sorted(FLOW_DIRECTIONS))})"
             )
 
@@ -260,7 +264,7 @@ def _validate_er(lines: list[tuple[int, str]]) -> list[str]:
             if not _ER_REL.match(line):
                 errors.append(f"line {line_no}: bad ER relationship {line!r}")
             continue
-        if not re.match(r"^[A-Za-z_][\w-]*$", line):
+        if not re.match(r'^([A-Za-z_][\w-]*|"[^"]+")$', line):
             errors.append(f"line {line_no}: unrecognised erDiagram statement {line!r}")
     if in_block:
         errors.append("ER attribute block never closed with '}'")
