@@ -1,0 +1,56 @@
+{
+  "_comment": "Recorded shape of GET /repos/{owner}/{repo}/code-scanning/analyses (sort=created, direction=desc). NOTE the ORDERING: the NEWEST analysis is for a different commit on the default branch. A naive gate that reads analyses[0], or that calls /code-scanning/alerts without pinning to a commit, would evaluate THAT analysis and report a false green for the PR head. find_matching_analysis() must skip it.",
+  "analyses": [
+    {
+      "id": 900300,
+      "ref": "refs/heads/main",
+      "commit_sha": "1111111111111111111111111111111111111111",
+      "analysis_key": ".github/workflows/codeql.yml:analyze",
+      "environment": "{\"language\":\"python\"}",
+      "category": ".github/workflows/codeql.yml:analyze/language:python",
+      "error": "",
+      "created_at": "2026-08-19T10:05:00Z",
+      "results_count": 0,
+      "rules_count": 212,
+      "url": "https://api.github.com/repos/acme/widget/code-scanning/analyses/900300",
+      "sarif_id": "aaaaaaaa-1111-2222-3333-444444444444",
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "deletable": true,
+      "warning": ""
+    },
+    {
+      "id": 900299,
+      "ref": "refs/pull/42/merge",
+      "commit_sha": "d3c4b5a69788e1f2a3b4c5d6e7f8091a2b3c4d5e",
+      "analysis_key": ".github/workflows/codeql.yml:analyze",
+      "environment": "{\"language\":\"python\"}",
+      "category": ".github/workflows/codeql.yml:analyze/language:python",
+      "error": "",
+      "created_at": "2026-08-19T10:03:00Z",
+      "results_count": 3,
+      "rules_count": 212,
+      "url": "https://api.github.com/repos/acme/widget/code-scanning/analyses/900299",
+      "sarif_id": "bbbbbbbb-1111-2222-3333-444444444444",
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "deletable": true,
+      "warning": ""
+    },
+    {
+      "id": 900280,
+      "ref": "refs/pull/42/merge",
+      "commit_sha": "2222222222222222222222222222222222222222",
+      "analysis_key": ".github/workflows/codeql.yml:analyze",
+      "environment": "{\"language\":\"python\"}",
+      "category": ".github/workflows/codeql.yml:analyze/language:python",
+      "error": "",
+      "created_at": "2026-08-19T09:41:00Z",
+      "results_count": 9,
+      "rules_count": 212,
+      "url": "https://api.github.com/repos/acme/widget/code-scanning/analyses/900280",
+      "sarif_id": "cccccccc-1111-2222-3333-444444444444",
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "deletable": true,
+      "warning": ""
+    }
+  ]
+}

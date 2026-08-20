@@ -1,0 +1,89 @@
+{
+  "_comment": "Recorded shapes for the /repos/{owner}/{repo}/code-quality/ namespace (GA 2026-07-20). NOTE: finding objects carry NO commit_sha / ref / analysis_key -- there is no commit linkage in the published schema, and the list endpoint accepts no ref/sha/pr parameter. rule.category (none|maintainability|reliability) exists ONLY here and is the clean discriminator from code-scanning alerts.",
+  "setup_configured": {
+    "state": "configured",
+    "languages": ["python", "javascript-typescript"],
+    "runner_type": "standard",
+    "runner_label": null,
+    "updated_at": "2026-08-01T12:00:00Z",
+    "schedule": "weekly",
+    "ai_findings_option": "on_push"
+  },
+  "setup_not_configured": {
+    "state": "not-configured",
+    "languages": [],
+    "runner_type": null,
+    "runner_label": null,
+    "updated_at": null,
+    "schedule": null,
+    "ai_findings_option": null
+  },
+  "findings_clean": [
+    {
+      "number": 5,
+      "state": "open",
+      "url": "https://api.github.com/repos/acme/widget/code-quality/findings/5",
+      "rule": {
+        "id": "py/long-function",
+        "title": "Function is too long",
+        "description": "This function exceeds the recommended length.",
+        "help": "Split the function into smaller units.",
+        "severity": "note",
+        "category": "maintainability"
+      },
+      "location": { "path": "src/widget/core.py", "start_line": 40, "end_line": 190 },
+      "message": { "text": "Function 'build' is 150 lines long.", "markdown": "Function `build` is 150 lines long." },
+      "created_at": "2026-08-19T10:04:00Z"
+    },
+    {
+      "number": 6,
+      "state": "open",
+      "url": "https://api.github.com/repos/acme/widget/code-quality/findings/6",
+      "rule": {
+        "id": "py/duplicate-branches",
+        "title": "Duplicate branches",
+        "description": "Two branches of this conditional are identical.",
+        "help": "Merge the duplicated branches.",
+        "severity": "warning",
+        "category": "reliability"
+      },
+      "location": { "path": "src/widget/parse.py", "start_line": 88, "end_line": 96 },
+      "message": { "text": "Identical branches.", "markdown": "Identical branches." },
+      "created_at": "2026-08-19T10:04:01Z"
+    }
+  ],
+  "findings_breaching": [
+    {
+      "number": 7,
+      "state": "open",
+      "url": "https://api.github.com/repos/acme/widget/code-quality/findings/7",
+      "rule": {
+        "id": "py/unreachable-code",
+        "title": "Unreachable code",
+        "description": "This statement can never be executed.",
+        "help": "Remove the unreachable statement.",
+        "severity": "error",
+        "category": "reliability"
+      },
+      "location": { "path": "src/widget/core.py", "start_line": 210, "end_line": 212 },
+      "message": { "text": "Unreachable statement.", "markdown": "Unreachable statement." },
+      "created_at": "2026-08-19T10:04:02Z"
+    },
+    {
+      "number": 8,
+      "state": "open",
+      "url": "https://api.github.com/repos/acme/widget/code-quality/findings/8",
+      "rule": {
+        "id": "py/complex-condition",
+        "title": "Overly complex condition",
+        "description": "This condition is hard to read.",
+        "help": "Extract named predicates.",
+        "severity": "warning",
+        "category": "maintainability"
+      },
+      "location": { "path": "src/widget/parse.py", "start_line": 12, "end_line": 18 },
+      "message": { "text": "Complex condition.", "markdown": "Complex condition." },
+      "created_at": "2026-08-19T10:04:03Z"
+    }
+  ]
+}

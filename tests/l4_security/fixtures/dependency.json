@@ -1,0 +1,88 @@
+{
+  "_comment": "Recorded shape of GET /repos/{owner}/{repo}/dependency-graph/compare/{base}...{head} (the dependency review API) and GET /repos/{owner}/{repo}/dependabot/alerts. NOTE the severity vocabularies differ: dependency review says 'moderate' where Dependabot says 'medium'.",
+  "dependency_review": [
+    {
+      "change_type": "added",
+      "manifest": "requirements.txt",
+      "ecosystem": "pip",
+      "name": "requests",
+      "version": "2.19.0",
+      "package_url": "pkg:pypi/requests@2.19.0",
+      "license": "Apache-2.0",
+      "scope": "runtime",
+      "vulnerabilities": [
+        {
+          "severity": "high",
+          "advisory_ghsa_id": "GHSA-j8r2-6x86-q33q",
+          "advisory_summary": "Unintended leak of Proxy-Authorization header",
+          "advisory_url": "https://github.com/advisories/GHSA-j8r2-6x86-q33q"
+        },
+        {
+          "severity": "moderate",
+          "advisory_ghsa_id": "GHSA-9wx4-h78v-vm56",
+          "advisory_summary": "Requests leaks cookies on redirect",
+          "advisory_url": "https://github.com/advisories/GHSA-9wx4-h78v-vm56"
+        }
+      ]
+    },
+    {
+      "change_type": "added",
+      "manifest": "requirements.txt",
+      "ecosystem": "pip",
+      "name": "attrs",
+      "version": "23.2.0",
+      "package_url": "pkg:pypi/attrs@23.2.0",
+      "license": "MIT",
+      "scope": "runtime",
+      "vulnerabilities": []
+    },
+    {
+      "change_type": "removed",
+      "manifest": "requirements.txt",
+      "ecosystem": "pip",
+      "name": "pyyaml",
+      "version": "5.1",
+      "package_url": "pkg:pypi/pyyaml@5.1",
+      "license": "MIT",
+      "scope": "runtime",
+      "vulnerabilities": [
+        {
+          "severity": "critical",
+          "advisory_ghsa_id": "GHSA-8q59-q68h-6hv4",
+          "advisory_summary": "Arbitrary code execution in PyYAML",
+          "advisory_url": "https://github.com/advisories/GHSA-8q59-q68h-6hv4"
+        }
+      ]
+    }
+  ],
+  "dependabot_alerts": [
+    {
+      "number": 3,
+      "state": "open",
+      "security_advisory": {
+        "ghsa_id": "GHSA-j8r2-6x86-q33q",
+        "severity": "high",
+        "summary": "Unintended leak of Proxy-Authorization header"
+      },
+      "security_vulnerability": {
+        "package": { "ecosystem": "pip", "name": "requests" },
+        "severity": "high",
+        "vulnerable_version_range": "< 2.31.0"
+      }
+    },
+    {
+      "number": 4,
+      "state": "open",
+      "security_advisory": {
+        "ghsa_id": "GHSA-9wx4-h78v-vm56",
+        "severity": "medium",
+        "summary": "Requests leaks cookies on redirect"
+      },
+      "security_vulnerability": {
+        "package": { "ecosystem": "pip", "name": "requests" },
+        "severity": "medium",
+        "vulnerable_version_range": "< 2.32.0"
+      }
+    }
+  ]
+}
