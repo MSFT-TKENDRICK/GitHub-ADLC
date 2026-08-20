@@ -220,7 +220,18 @@ class TestEvidenceReviewSandbox:
     def test_the_pre_step_rejects_non_allowlisted_pack_keys(self) -> None:
         body = (WORKFLOWS / "adlc-evidence-review.md").read_text(encoding="utf-8")
         assert "non-allowlisted top-level keys" in body
-        assert "raw HAR/console/HTML payload" in body
+        assert "refusing to hand raw evidence to the reviewer" in body
+
+    def test_the_pre_step_screens_the_same_leak_markers_as_the_spine(self) -> None:
+        # Kept in lockstep with the spine's producer-side conformance test
+        # `tests/conformance/test_pipeline.py::test_review_pack_leaks_no_raw_evidence`.
+        # The two header markers are matched WITH a colon here on purpose: this
+        # runs against real packs, and a security requirement whose prose says
+        # "the Authorization header" must not hard-fail the workflow.
+        body = (WORKFLOWS / "adlc-evidence-review.md").read_text(encoding="utf-8")
+        for marker in ("'<html'", "'#!/usr/bin/env'", "'await page.'",
+                       "'Set-Cookie:'", "'Authorization:'", "'\"headers\":'"):
+            assert marker in body, f"consumer-side screen does not cover {marker}"
 
     def test_the_only_write_path_is_one_comment(self, evidence_fm: dict) -> None:
         safe = evidence_fm["safe-outputs"]

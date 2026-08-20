@@ -48,7 +48,7 @@ at the pinned tag:
 `pull_requests`, `actions`, `code_security`, …). That enum is the whole basis of
 the evidence squad's sandbox — see §4.
 
-### Two things the spine should own
+### Three things the spine should own
 
 1. **`.gitattributes` and `.github/aw/actions-lock.json`.** `gh aw compile`
    creates both: the first adds
@@ -57,11 +57,22 @@ the evidence squad's sandbox — see §4.
    action SHAs. Both sit outside this workstream's exclusive paths, so they are
    deliberately **not** committed here. Neither is needed at runtime — the
    `.lock.yml` files already carry every action pinned to a full SHA inline. The
-   spine should adopt both, and add a `.gitignore` covering `__pycache__/`.
-2. **The `evidence-review-pack` artifact.** `adlc-evidence-review.md` downloads
+   spine should adopt both, and add a `.gitignore` covering `__pycache__/` and
+   `.venv*/`.
+2. **A repo-root `conftest.py` that prepends `src/`.** See §9: parallel
+   worktrees share one editable install, so any suite can silently end up
+   testing a sibling's code. One three-line root conftest fixes it for all ten
+   leaves at once.
+3. **The `evidence-review-pack` artifact.** `adlc-evidence-review.md` downloads
    an artifact named `evidence-review-pack` containing
    `evidence-review-pack.json` from the most recent completed workflow run named
-   `ADLC` for the PR's head SHA. That is the contract; see §4.2.
+   `ADLC` — which is `adlc.yml`, the spine-owned reusable workflow — for the
+   PR's head SHA. `adlc.yml` currently uploads the whole run directory as
+   `adlc-<run-id>`; it needs to additionally publish the pack under that fixed
+   name, or this workflow degrades to `not_run`. Symmetrically, the spine needs
+   to unpack the `adlc-reviews-adversarial` artifact into `runs/<run>/reviews/`
+   and harvest the evidence squad's PR comment into
+   `runs/<run>/reviews/evidence_review.requirements-auditor.md`.
 
 ---
 
@@ -377,46 +388,47 @@ carries on. An invalid `verdict:` value degrades to `abstain`. Neither raises.
 
 ### 8.2 `EvidenceReviewGate` (`id="evidence_review"`)
 
-Two halves, and **only one of them can fail a build**.
+Two halves, and **only one of them can fail a build** — but this gate implements
+only the second. The deterministic half is the spine's `evidence_completeness`
+gate, and **it is not duplicated here**. This gate reads its recorded verdict
+from `gates/evidence_completeness.json` (falling back to `run.json`'s `gates[]`)
+and layers the advisory squad verdict on top.
 
 ```mermaid
 flowchart TB
-    P{{"evidence-review-pack.json"}} --> C
-    R{{"run.json artifacts[]"}} --> C
-    C["deterministic coverage check<br/>no LLM involved"]
-    C -->|"incomplete"| F["FAIL · severity high"]
-    C -->|"complete"| L["advisory squad verdicts<br/>reviews/evidence_review.*.md"]
+    EC["gate evidence_completeness (spine)<br/>hash-verifies every requirement<br/>REQUIRED — this is what blocks"]
+    EC --> P{status?}
+    P -->|"absent / not_run"| NR["evidence_review · NOT_RUN<br/>+ reason naming evidence_completeness"]
+    P -->|"fail"| F["evidence_review · FAIL<br/>points at the owning gate"]
+    P -->|"pass"| L["advisory squad verdicts<br/>reviews/evidence_review.*.md"]
     L -->|"no verdicts"| P1["PASS · advisory not_run"]
     L -->|"quorum met, cited"| W["PASS · WARN · severity medium"]
     L -->|"quorum not met"| P2["PASS"]
 ```
 
-**The blocking half** (`check_coverage`) is deterministic and offline. Every
-requirement must have at least `minArtifactsPerRequirement` artifact hashes that
-are:
+Why delegate rather than recompute? Because two implementations of the same
+rule is one implementation and one liability. `evidence_completeness` hashes
+every file under `evidence/` and compares against the pack; if this gate did the
+same thing slightly differently, the disagreement would surface as a flaky
+build, and whichever one was laxer would silently become the real policy.
+`tests/l8_squads/test_delegation.py::TestNoDuplication` asserts the separation
+by scanning this module's source for `sha256_file` and `evidence_dir`.
 
-- listed in a `coverage[]` entry with `present: true`, **and**
-- well-formed 64-hex, **and**
-- **hash-verified** — the digest must match a `sha256` actually recorded in
-  `run.json`'s `artifacts[]`. The pack is not self-certifying; a pack claiming
-  evidence the run never produced fails.
-
-Plus: the pack must declare a `collector`, and its `candidateSha` must equal the
-run's `headSha` — a pack from a previous commit is stale, not evidence. Orphan
-coverage rows, malformed digests, and an **empty requirements list** all fail.
-(Verifying nothing must never look like verifying everything.)
-
-**The advisory half** is capped by construction. The LLM squad can downgrade a
-passing coverage result to a warning — `status` stays `pass`, `severity` rises to
-`medium`, and the message is prefixed `WARN:`. It can do nothing else:
+The advisory half is capped by construction:
 
 - it can never turn green red, because an LLM judgement is not a fact;
-- it can never turn red green, because coverage is evaluated **first** and
-  independently, and the gate returns before the squad is even read.
+- it can never turn red green, because the precondition is read **first** and
+  the gate returns before the squad verdicts are even loaded
+  (`test_squad_verdicts_are_not_even_read_when_the_precondition_failed`).
 
-`GateStatus` is `pass | fail | not_run`, so "warn" is carried in
-`severity` + the `WARN:` message prefix + `observed.advisory`, not as a fourth
-status. That keeps the aggregator's fail-closed rule intact.
+`GateStatus` is `pass | fail | not_run`, so "warn" is carried in `severity` +
+the `WARN:` message prefix + `observed.advisory`, not as a fourth status. That
+keeps the aggregator's fail-closed rule intact.
+
+The pack is still read here, but **only to screen citations** — to confirm a
+cited digest actually exists. If the pack is missing or unparseable while the
+precondition passed, the advisory verdict is discarded rather than trusted: an
+unscreenable claim is an uncited claim.
 
 ### 8.3 Fail-closed
 
@@ -430,20 +442,42 @@ verdict files, no pack, unparseable pack, no `runId`. Neither gate ever returns
 
 ## 9. Tests
 
+This repository is checked out as several parallel git worktrees that share one
+system Python, and `pip install -e .` writes a **single** editable pointer — so
+whichever worktree ran it last wins, and every other one silently imports *that*
+worktree's source. Results obtained that way are meaningless. Concurrent `pip`
+runs are worse: a half-removed `adlc` dist-info makes `entry_points()` return
+nothing, which fails adapter tests for reasons that have nothing to do with the
+code.
+
+Verify in an isolated environment that no sibling can clobber:
+
 ```bash
-python -m pytest tests/l8_squads -q     # 163 tests, no credentials, no network
-ruff check src/adlc/adapters/gate/
+python -m venv --system-site-packages .venv-l8
+.venv-l8/bin/python -m pip install -e . --no-deps
+.venv-l8/bin/python -m pytest tests/conformance -q   # 41 passed
+.venv-l8/bin/python -m pytest tests/l8_squads  -q    # 176 passed
+ruff check src/adlc/adapters/gate/adversarial_review.py \
+           src/adlc/adapters/gate/evidence_review.py tests/l8_squads/
 ```
+
+Confirm the binding first — it must print *your* worktree:
+
+```bash
+.venv-l8/bin/python -c "import adlc.executor as e; print(e.__file__)"
+```
+
+`tests/l8_squads/conftest.py` also self-defends: it prepends this worktree's
+`src/` and, if `adlc` was already imported from elsewhere, re-binds it and emits
+a `RuntimeWarning` naming the offending path. The durable fix belongs to the
+spine — a repo-root `conftest.py` doing the same prepend would fix every
+workstream at once.
 
 | File | Covers |
 |---|---|
 | `test_quorum.py` | quorum arithmetic including every degenerate input; blocking vs non-blocking squads; missing members; malformed and invalid verdicts |
 | `test_citations.py` | citation regex shape for both kinds; uncited findings discarded; one cited finding rescuing a vote; fabricated hashes |
-| `test_coverage.py` | deterministic coverage in isolation and through the gate; that an LLM `pass` cannot rescue missing coverage and an LLM `warn` cannot fail a build |
+| `test_delegation.py` | that the blocking check is **delegated, not duplicated** (including a source scan for `sha256_file`/`evidence_dir`); precondition absent/`not_run`/`fail`/`pass`; that an LLM `pass` cannot rescue a red precondition and an LLM `warn` cannot fail a build |
 | `test_detect.py` | `detect()` contract, `GateRunner` protocol conformance, `GateResult` shape, every `not_run` degrade path, profile-driven `required` |
-| `test_workflows.py` | frontmatter of all four workflows; cost caps; read-only permissions; **the evidence sandbox asserted against the compiled `.lock.yml`**; agent profiles; `squads.yaml` |
-
-`tests/l8_squads/conftest.py` prepends this worktree's `src/` to `sys.path` so
-the suite tests this checkout rather than an editable install elsewhere, and
-prepends its own directory so `import l8_fixtures` cannot collide with another
-workstream's `conftest`.
+| `test_spine_integration.py` | the spine's real `run_gates` driving both gates over a real run directory, against a **real** `evidence_completeness` verdict — including a genuinely hash-mismatched pack — plus entry-point registration and hostile-input degradation |
+| `test_workflows.py` | frontmatter of all four workflows; cost caps; read-only permissions; **the evidence sandbox asserted against the compiled `.lock.yml`**; the leak-marker screen kept in lockstep with the spine's conformance test; agent profiles; `squads.yaml` |

@@ -1,34 +1,34 @@
-"""Evidence-review squad gate (L8).
+"""Evidence-review squad gate (L8) -- the **advisory** half of evidence review.
 
-This gate has two halves, and only one of them is allowed to fail a build.
+The deterministic half already exists and already blocks: the spine's
+``evidence_completeness`` gate verifies that every requirement has at least one
+hash-verified artifact from the declared collector at the declared candidate
+SHA. That logic is **not** duplicated here. This gate *delegates* to it by
+reading its recorded result, and layers the LLM squad verdict on top.
 
-**The blocking half is deterministic.** Every requirement in
-``evidence-review-pack.json`` must have at least one artifact hash that
-(a) is declared present in ``coverage[]``, (b) matches a ``sha256`` actually
-recorded in ``run.json``'s ``artifacts[]``, and (c) belongs to a pack whose
-``candidateSha`` equals the run's ``headSha`` and whose ``collector`` is
-declared. No language model is involved in that decision, so it is reproducible
-and arguable.
+The split is the whole point, and the direction of the arrow matters:
 
-**The advisory half is the LLM squad**, whose verdicts arrive as
-``runs/<run>/reviews/evidence_review.*.md``. Its power is deliberately capped:
-a squad verdict can downgrade a passing coverage result to a *warning*, and
-nothing more. It can never turn a green build red, because an LLM judgement is
-not a fact — and it can never turn a red build green, because coverage is
-evaluated first and independently.
+* ``evidence_completeness`` is a hash comparison. It either matches or it does
+  not, and no amount of clever text can change that. It blocks.
+* This gate is a language model reading a sanitised pack. It can be wrong, and
+  it can be argued with. So its power is capped: it may downgrade a passing
+  deterministic result to a **warning**, and nothing more.
 
-Claims that cite no ``artifactSha256`` present in the pack are discarded before
-the verdict is counted, exactly as in the adversarial squad.
+  - It can never turn green red, because an LLM judgement is not a fact.
+  - It can never turn red green, because the deterministic precondition is read
+    first and this gate returns before the squad verdicts are even loaded.
+
+Claims citing an ``artifactSha256`` that does not appear in the pack are
+discarded before the verdict is counted -- a fabricated digest is worse than no
+citation, because it looks checkable.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from adlc.adapters.gate.adversarial_review import (
-    ARTIFACT_SHA_RE,
     SQUADS_CANDIDATES,
     Review,
     SquadConfig,
@@ -37,155 +37,41 @@ from adlc.adapters.gate.adversarial_review import (
     iter_reviews,
     load_squads,
 )
-from adlc.ports import GateResult
+from adlc.ports import GateResult, Run
+from adlc.runs import RunDir
 
 if TYPE_CHECKING:  # pragma: no cover
     from adlc.config import Config
 
-__all__ = ["CoverageReport", "EvidenceReviewGate", "check_coverage", "load_pack"]
+__all__ = ["DETERMINISTIC_GATE_ID", "EvidenceReviewGate", "read_precondition"]
 
-PACK_FILENAME = "evidence-review-pack.json"
-
-
-class CoverageReport(dict):
-    """Deterministic coverage result. A plain dict so it drops into ``observed``."""
-
-    @property
-    def ok(self) -> bool:
-        return bool(self.get("ok"))
+#: The spine gate that owns the deterministic coverage check. Single source of
+#: truth -- see ``adlc.adapters.gate.evidence_completeness``.
+DETERMINISTIC_GATE_ID = "evidence_completeness"
 
 
-def load_pack(run_dir: Path) -> tuple[dict[str, Any] | None, str]:
-    """Read ``evidence-review-pack.json``. Returns ``(pack, reason)``; never raises."""
-    path = run_dir / PACK_FILENAME
-    if not path.is_file():
-        return None, f"{path} not found"
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return None, f"{path} is unreadable or not valid JSON: {exc}"
-    if not isinstance(loaded, dict):
-        return None, f"{path} does not contain a JSON object"
-    return loaded, str(path)
+def read_precondition(rd: RunDir, run: Run) -> GateResult | None:
+    """Return the recorded ``evidence_completeness`` result, or ``None``.
 
-
-def check_coverage(
-    pack: dict[str, Any],
-    run: dict[str, Any],
-    rules: dict[str, Any] | None = None,
-) -> CoverageReport:
-    """The blocking half. Deterministic, offline, no LLM.
-
-    Every requirement must be covered by at least ``minArtifactsPerRequirement``
-    artifact hashes that are hash-verified against ``run['artifacts']``.
+    Prefers the gate file on disk (freshest -- written by ``run_gates`` in the
+    same invocation) and falls back to the reduced ``run.json``. Never raises.
     """
-    rules = rules or {}
-    min_artifacts = int(rules.get("minArtifactsPerRequirement", 1) or 1)
-    require_sha_match = bool(rules.get("requireShaMatch", True))
-    require_hash_verification = bool(rules.get("requireHashVerification", True))
-
-    known_hashes = {
-        str(a.get("sha256", "")).lower()
-        for a in (run.get("artifacts") or [])
-        if isinstance(a, dict) and a.get("sha256")
-    }
-
-    requirements = [r for r in (pack.get("requirements") or []) if isinstance(r, dict)]
-    coverage_rows = [c for c in (pack.get("coverage") or []) if isinstance(c, dict)]
-    by_requirement: dict[str, dict[str, Any]] = {}
-    for row in coverage_rows:
-        req_id = str(row.get("requirementId") or "")
-        if req_id:
-            by_requirement.setdefault(req_id, row)
-
-    collector = str(pack.get("collector") or "").strip()
-    candidate_sha = str(pack.get("candidateSha") or "").strip()
-    head_sha = str(run.get("headSha") or "").strip()
-
-    problems: list[dict[str, str]] = []
-    satisfied: list[str] = []
-
-    if not collector:
-        problems.append({"scope": "pack", "reason": "pack declares no collector"})
-    if require_sha_match and head_sha and candidate_sha and candidate_sha != head_sha:
-        problems.append(
-            {
-                "scope": "pack",
-                "reason": f"pack candidateSha {candidate_sha} does not match run headSha {head_sha}",
-            }
-        )
-    if require_sha_match and not candidate_sha:
-        problems.append({"scope": "pack", "reason": "pack declares no candidateSha"})
-
-    for requirement in requirements:
-        req_id = str(requirement.get("id") or "")
-        if not req_id:
-            problems.append({"scope": "requirement", "reason": "requirement with no id"})
-            continue
-        row = by_requirement.get(req_id)
-        if row is None:
-            problems.append({"scope": req_id, "reason": "no coverage entry"})
-            continue
-        if not row.get("present"):
-            problems.append({"scope": req_id, "reason": "coverage entry marked present: false"})
-            continue
-
-        hashes = [str(h).lower() for h in (row.get("artifactSha256") or []) if isinstance(h, str)]
-        malformed = [h for h in hashes if not ARTIFACT_SHA_RE.fullmatch(h)]
-        if malformed:
-            problems.append(
-                {"scope": req_id, "reason": f"malformed artifactSha256: {', '.join(sorted(malformed))}"}
-            )
-        well_formed = [h for h in hashes if h not in malformed]
-
-        if require_hash_verification:
-            verified = [h for h in well_formed if h in known_hashes]
-            unverified = [h for h in well_formed if h not in known_hashes]
-            if unverified:
-                problems.append(
-                    {
-                        "scope": req_id,
-                        "reason": (
-                            "artifactSha256 not present in run.json artifacts[]: "
-                            + ", ".join(sorted(unverified))
-                        ),
-                    }
-                )
-        else:
-            verified = well_formed
-
-        if len(verified) < min_artifacts:
-            problems.append(
-                {
-                    "scope": req_id,
-                    "reason": (
-                        f"{len(verified)} hash-verified artifact(s), {min_artifacts} required"
-                    ),
-                }
-            )
-            continue
-        satisfied.append(req_id)
-
-    orphans = sorted(set(by_requirement) - {str(r.get("id") or "") for r in requirements})
-    for orphan in orphans:
-        problems.append({"scope": orphan, "reason": "coverage entry for an unknown requirementId"})
-
-    return CoverageReport(
-        ok=not problems and bool(requirements),
-        collector=collector,
-        candidateSha=candidate_sha,
-        headSha=head_sha,
-        requirements=len(requirements),
-        requirementsSatisfied=sorted(satisfied),
-        requirementsFailed=sorted({p["scope"] for p in problems if p["scope"] not in ("pack", "requirement")}),
-        minArtifactsPerRequirement=min_artifacts,
-        knownArtifactHashes=len(known_hashes),
-        problems=problems,
-    )
+    path = rd.gates_dir / f"{DETERMINISTIC_GATE_ID}.json"
+    try:
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                return loaded  # type: ignore[return-value]
+    except (OSError, ValueError):
+        pass
+    for gate in (run or {}).get("gates") or []:
+        if isinstance(gate, dict) and gate.get("id") == DETERMINISTIC_GATE_ID:
+            return gate  # type: ignore[return-value]
+    return None
 
 
 def _pack_hashes(pack: dict[str, Any]) -> set[str]:
-    """Every artifactSha256 that legitimately appears anywhere in the pack."""
+    """Every ``artifactSha256`` that legitimately appears anywhere in the pack."""
     found: set[str] = set()
 
     def walk(node: Any) -> None:
@@ -207,11 +93,11 @@ def _pack_hashes(pack: dict[str, Any]) -> set[str]:
 
 
 def _screen_citations(reviews: list[Review], pack_hashes: set[str]) -> dict[str, Any]:
-    """Drop findings whose cited hashes are not in the pack.
+    """Drop cited hashes that are not in the pack.
 
     A hallucinated 64-hex digest is *worse* than no citation, because it looks
-    checkable. So a finding survives only if at least one of its citations is a
-    hash that genuinely appears in the pack.
+    checkable. A finding survives only if at least one of its citations is a
+    digest that genuinely appears in the pack.
     """
     fabricated: list[dict[str, str]] = []
     for review in reviews:
@@ -222,7 +108,7 @@ def _screen_citations(reviews: list[Review], pack_hashes: set[str]) -> dict[str,
             if invented:
                 fabricated.append(
                     {
-                        "member": review.member or Path(review.path).stem,
+                        "member": review.member or "?",
                         "title": finding.title,
                         "hashes": ", ".join(sorted(invented)),
                     }
@@ -240,7 +126,7 @@ def _screen_citations(reviews: list[Review], pack_hashes: set[str]) -> dict[str,
 
 
 class EvidenceReviewGate:
-    """Deterministic coverage blocks; the LLM squad can only warn."""
+    """Advisory squad verdict layered on the deterministic coverage check."""
 
     id = "evidence_review"
     name = "evidence-review"
@@ -257,117 +143,140 @@ class EvidenceReviewGate:
             return False, f"no squad configuration found (searched {searched})"
         return True, f"squad configuration at {path}"
 
-    def evaluate(self, run: dict[str, Any], cfg: Config) -> GateResult:
+    def evaluate(self, run: Run, cfg: Config) -> GateResult:
         required = cfg.is_required(self.id)
         run_id = str((run or {}).get("runId") or "")
+        base: dict[str, Any] = {
+            "id": self.id,
+            "required": required,
+            "evidence": [f"gates/{self.id}.json"],
+        }
 
         if not run_id:
-            return self._result(
-                required,
-                "not_run",
-                "high",
-                {},
-                {"pack": PACK_FILENAME},
-                "run has no runId, so the evidence review pack cannot be located",
-            )
+            return {
+                **base, "status": "not_run", "severity": "high",
+                "observed": {}, "expected": {"runId": "required to locate the run directory"},
+                "message": "run has no runId, so the review directory cannot be located",
+            }
 
         squad: SquadConfig = load_squads(cfg, self.squad_id)
-        rules = squad.coverage or {}
-        run_dir = cfg.run_dir(run_id)
+        rd = RunDir(cfg, run_id)
         expected: dict[str, Any] = {
-            "blocking": "every requirement has >= 1 hash-verified artifact from the declared collector at the declared SHA",
+            "blocking": (
+                f"delegated to gate `{DETERMINISTIC_GATE_ID}`: every requirement has >= 1 "
+                "hash-verified artifact from the declared collector at the declared SHA"
+            ),
             "advisory": f"LLM squad quorum {squad.quorum} may downgrade to warn, never to fail",
             "members": list(squad.members),
             "citation": squad.citation,
             "source": squad.source,
-            "minArtifactsPerRequirement": int(rules.get("minArtifactsPerRequirement", 1) or 1),
         }
 
-        pack, pack_reason = load_pack(run_dir)
-        if pack is None:
-            return self._result(
-                required,
-                "not_run",
-                "high",
-                {"packPath": str(run_dir / PACK_FILENAME)},
-                expected,
-                f"evidence review pack unavailable: {pack_reason}",
-            )
+        # -- blocking half: delegated, never recomputed ---------------------
+        precondition = read_precondition(rd, run)
+        if precondition is None:
+            return {
+                **base, "status": "not_run", "severity": "high",
+                "observed": {"precondition": DETERMINISTIC_GATE_ID, "preconditionStatus": None},
+                "expected": expected,
+                "message": (
+                    f"deterministic evidence coverage has not been evaluated -- no "
+                    f"gates/{DETERMINISTIC_GATE_ID}.json. Run the `{DETERMINISTIC_GATE_ID}` "
+                    "gate first; an advisory review of unverified evidence means nothing."
+                ),
+            }
 
-        coverage = check_coverage(pack, run or {}, rules)
+        precondition_status = precondition.get("status")
+        observed: dict[str, Any] = {
+            "precondition": DETERMINISTIC_GATE_ID,
+            "preconditionStatus": precondition_status,
+            "preconditionMessage": precondition.get("message", ""),
+            "preconditionObserved": precondition.get("observed", {}),
+            "reviewsDir": rd.rel(rd.reviews_dir),
+        }
 
-        # --- blocking half -------------------------------------------------
-        if not coverage.ok:
-            reasons = "; ".join(f"{p['scope']}: {p['reason']}" for p in coverage["problems"][:6])
-            more = len(coverage["problems"]) - 6
-            if more > 0:
-                reasons += f"; (+{more} more)"
-            if not coverage["requirements"]:
-                reasons = "pack declares no requirements, so nothing could be verified"
-            return self._result(
-                required,
-                "fail",
-                "high",
-                dict(coverage),
-                expected,
-                f"deterministic evidence coverage failed -- {reasons}",
-                evidence=[str((run_dir / PACK_FILENAME).as_posix())],
-            )
+        if precondition_status == "not_run":
+            return {
+                **base, "status": "not_run", "severity": "high",
+                "observed": observed, "expected": expected,
+                "message": (
+                    f"deterministic evidence coverage did not run (gate "
+                    f"`{DETERMINISTIC_GATE_ID}`: {precondition.get('message', 'no reason given')})"
+                ),
+            }
 
-        # --- advisory half -------------------------------------------------
-        reviews_dir = run_dir / "reviews"
-        reviews = iter_reviews(reviews_dir, self.squad_id, citation=squad.citation)
-        observed: dict[str, Any] = dict(coverage)
-        observed["reviewsDir"] = str(reviews_dir)
-        evidence = [str((run_dir / PACK_FILENAME).as_posix())]
+        if precondition_status != "pass":
+            # Fail closed, and point at the gate that actually owns the check so
+            # nobody debugs this one instead.
+            return {
+                **base, "status": "fail", "severity": "high",
+                "observed": observed, "expected": expected,
+                "message": (
+                    f"deterministic evidence coverage failed -- see gate "
+                    f"`{DETERMINISTIC_GATE_ID}`: {precondition.get('message', 'no reason given')}. "
+                    "Advisory review is not meaningful without hash-verified evidence."
+                ),
+            }
 
+        # -- advisory half: capped at `warn` --------------------------------
+        reviews = iter_reviews(rd.reviews_dir, self.squad_id, citation=squad.citation)
         if not reviews:
             observed["advisory"] = {
                 "verdict": "not_run",
                 "reason": (
-                    f"no {self.squad_id} verdict files in {reviews_dir}; "
+                    f"no {self.squad_id} verdict files in {rd.rel(rd.reviews_dir)}; "
                     "the adlc-evidence-review workflow did not run or produced nothing"
                 ),
             }
-            return self._result(
-                required,
-                "pass",
-                "low",
-                observed,
-                expected,
-                (
-                    f"evidence coverage verified for {len(coverage['requirementsSatisfied'])} requirement(s) "
-                    f"from collector {coverage['collector']}; advisory squad did not run "
-                    f"(no verdict files in {reviews_dir})"
+            return {
+                **base, "status": "pass", "severity": "low",
+                "observed": observed, "expected": expected,
+                "message": (
+                    f"deterministic evidence coverage passed (gate `{DETERMINISTIC_GATE_ID}`); "
+                    f"advisory squad did not run (no verdict files in {rd.rel(rd.reviews_dir)})"
                 ),
-                evidence=evidence,
-            )
+            }
 
-        evidence.extend(str(Path(r.path).as_posix()) for r in reviews)
+        evidence = [*base["evidence"], *(rd.rel(r.path_obj) for r in reviews)]
+
+        pack, pack_note = self._load_pack(rd)
+        if pack is None:
+            observed["packNote"] = pack_note
+            observed["advisory"] = {
+                "verdict": "not_run",
+                "reason": f"citations cannot be screened: {pack_note}",
+            }
+            return {
+                **base, "status": "pass", "severity": "medium",
+                "observed": observed, "expected": expected, "evidence": evidence,
+                "message": (
+                    "deterministic evidence coverage passed, but the advisory verdict was "
+                    f"discarded because its citations could not be screened ({pack_note})"
+                ),
+            }
+
         screening = _screen_citations(reviews, _pack_hashes(pack))
         tally = count_quorum(reviews, squad)
         tally.update(screening)
         observed["advisory"] = tally
 
         if tally["quorumMet"]:
-            return self._result(
-                required,
-                "pass",
-                "medium",
-                observed,
-                expected,
-                (
-                    f"WARN: evidence coverage is complete, but the advisory squad reached quorum "
-                    f"({len(tally['blockingVotes'])}/{tally['quorumThreshold']}) on cited concerns from "
-                    f"{', '.join(tally['blockingVotes'])}. Advisory only -- coverage is the blocking check."
+            return {
+                **base, "status": "pass", "severity": "medium",
+                "observed": observed, "expected": expected, "evidence": evidence,
+                "message": (
+                    "WARN: deterministic evidence coverage passed, but the advisory squad "
+                    f"reached quorum ({len(tally['blockingVotes'])}/{tally['quorumThreshold']}) "
+                    f"on cited concerns from {', '.join(tally['blockingVotes'])}. Advisory only "
+                    f"-- gate `{DETERMINISTIC_GATE_ID}` is the blocking check."
                 ),
-                evidence=evidence,
-            )
+            }
 
         notes = []
         if tally["unsupportedBlockVerdicts"]:
             notes.append(
-                f"{len(tally['unsupportedBlockVerdicts'])} verdict(s) downgraded for lack of a cited concern"
+                f"{len(tally['unsupportedBlockVerdicts'])} verdict(s) downgraded for lack of a "
+                "cited concern"
             )
         if tally["discardedFindings"]:
             notes.append(f"{len(tally['discardedFindings'])} uncited claim(s) discarded")
@@ -376,36 +285,29 @@ class EvidenceReviewGate:
                 f"{len(screening['fabricatedCitations'])} claim(s) cited a hash absent from the pack"
             )
         suffix = f" ({'; '.join(notes)})" if notes else ""
-        return self._result(
-            required,
-            "pass",
-            "low",
-            observed,
-            expected,
-            (
-                f"evidence coverage verified for {len(coverage['requirementsSatisfied'])} requirement(s) "
-                f"from collector {coverage['collector']}; advisory squad raised no quorum concern{suffix}"
-            ),
-            evidence=evidence,
-        )
-
-    def _result(
-        self,
-        required: bool,
-        status: str,
-        severity: str,
-        observed: dict[str, Any],
-        expected: dict[str, Any],
-        message: str,
-        evidence: list[str] | None = None,
-    ) -> GateResult:
         return {
-            "id": self.id,
-            "required": required,
-            "status": status,  # type: ignore[typeddict-item]
-            "severity": severity,  # type: ignore[typeddict-item]
-            "observed": observed,
-            "expected": expected,
-            "message": message,
-            "evidence": evidence or [],
+            **base, "status": "pass", "severity": "low",
+            "observed": observed, "expected": expected, "evidence": evidence,
+            "message": (
+                f"deterministic evidence coverage passed (gate `{DETERMINISTIC_GATE_ID}`); "
+                f"advisory squad raised no quorum concern{suffix}"
+            ),
         }
+
+    @staticmethod
+    def _load_pack(rd: RunDir) -> tuple[dict[str, Any] | None, str]:
+        """Load the pack for **citation screening only**. Never raises.
+
+        This is not the coverage check -- that belongs to
+        ``evidence_completeness``. The pack is read here purely to confirm that
+        the digests a reviewer cited actually exist.
+        """
+        if not rd.review_pack.is_file():
+            return None, f"{rd.rel(rd.review_pack)} not found"
+        try:
+            loaded = json.loads(rd.review_pack.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return None, f"{rd.rel(rd.review_pack)} is unreadable or not valid JSON: {exc}"
+        if not isinstance(loaded, dict):
+            return None, f"{rd.rel(rd.review_pack)} does not contain a JSON object"
+        return loaded, ""
