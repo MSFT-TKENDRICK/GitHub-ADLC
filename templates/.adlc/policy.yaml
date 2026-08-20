@@ -1,0 +1,129 @@
+# Agent Governance Toolkit policy for an ADLC SDLC agent.
+#
+# Vendored into a consumer repo by `adlc init` as `.adlc/policy.yaml`, and used
+# by:
+#   * `adlc.maf.middleware` — evaluated before every MAF tool call
+#   * `adlc.adapters.gate.governance` — linted by `agt lint-policy`
+#
+# Rules are evaluated in order; the first match wins. `default_action` applies
+# only when nothing matched. See docs/governance.md.
+#
+# Schema note: verified against agent-governance-toolkit public preview
+# (`apiVersion: governance.toolkit/v1`). AGT is preview software — run
+# `agt lint-policy .adlc/` after upgrading it.
+
+apiVersion: governance.toolkit/v1
+name: adlc-default
+description: >-
+  Default guardrails for an agent authoring code inside an ADLC run. The agent
+  works in an isolated git worktree and may only write paths its task node
+  declared. Everything the framework itself depends on is off limits.
+
+# Deny-by-default is tempting but wrong here: an SDLC agent legitimately makes
+# many small reads and edits, and an unenumerable allowlist becomes a rubber
+# stamp. We allow by default and make the dangerous set explicit and closed.
+default_action: allow
+
+rules:
+  # -- Destructive operations ------------------------------------------------
+  - name: block-destructive
+    description: >-
+      Destructive data and infrastructure operations are never part of authoring
+      a patch. Structurally impossible, not merely discouraged.
+    condition: "action.type in ['drop', 'delete', 'truncate', 'destroy', 'purge', 'wipe']"
+    action: deny
+
+  - name: block-destructive-shell
+    description: Recursive deletes, disk writes and privilege escalation in shell tools.
+    condition: >-
+      action.type in ['shell_exec', 'run_command', 'bash', 'powershell'] and
+      matches(action.params.command,
+      '(rm\s+-rf|\bmkfs\b|\bdd\s+if=|shutdown|reboot|chmod\s+777|\bsudo\b)')
+    action: deny
+
+  - name: block-history-rewrite
+    description: >-
+      A run's audit history is append-only. Rewriting git history or force
+      pushing would destroy the evidence chain the framework exists to produce.
+    condition: >-
+      action.type in ['shell_exec', 'run_command', 'git'] and
+      matches(action.params.command,
+      '(git\s+push\s+.*--force|git\s+reset\s+--hard\s+origin|filter-branch|reflog\s+expire)')
+    action: deny
+
+  - name: block-secret-exfiltration
+    description: Reading credential material is denied regardless of path allowlists.
+    condition: >-
+      action.type in ['read_file', 'write_file', 'open', 'cat'] and
+      matches(action.params.path,
+      '(^|/)(\.env|\.npmrc|\.pypirc|id_rsa|id_ed25519|\.aws/credentials|\.ssh/)')
+    action: deny
+
+  # -- Framework-protected paths --------------------------------------------
+  # Mirrors adlc.ports.PROTECTED_PATHS. A candidate patch touching these is
+  # rejected at the merge barrier anyway (PLAN §4.8); denying at the tool-call
+  # boundary means the agent never wastes a turn on work that cannot land.
+  - name: require-approval-protected-paths
+    description: >-
+      .github/**, .adlc/**, schemas/** and docs/decisions/** are the framework's
+      own control surface. An agent editing its own governance is the failure
+      mode this toolkit exists to prevent.
+    condition: >-
+      action.type in ['write_file', 'edit_file', 'create_file', 'delete_file', 'move_file'] and
+      matches(action.params.path,
+      '^(\.github/|\.adlc/|schemas/|docs/decisions/|pyproject\.toml$)')
+    action: require_approval
+    approvers: ["repo-maintainers"]
+
+  - name: deny-write-outside-write-set
+    description: >-
+      Task nodes declare `writeSet` up front (PLAN §4.3). Writing outside it
+      makes level-barrier patch application non-deterministic.
+    condition: >-
+      action.type in ['write_file', 'edit_file', 'create_file'] and
+      not action.params.path in envelope.context.write_set
+    action: deny
+
+  # -- Network egress --------------------------------------------------------
+  # Agent-authored code runs untrusted (PLAN §4.8), so egress is a closed
+  # allowlist that mirrors the gh-aw firewall.
+  - name: allow-network-allowlist
+    description: Package registries and the GitHub API the build genuinely needs.
+    condition: >-
+      action.type in ['http_request', 'fetch', 'web_search', 'network'] and
+      action.params.host in [
+      'github.com',
+      'api.github.com',
+      'raw.githubusercontent.com',
+      'objects.githubusercontent.com',
+      'pypi.org',
+      'files.pythonhosted.org',
+      'registry.npmjs.org',
+      'crates.io',
+      'static.crates.io',
+      'proxy.golang.org'
+      ]
+    action: allow
+
+  - name: block-network-egress
+    description: >-
+      Everything not on the allowlist above is denied. This is the anti-
+      exfiltration control; it must stay last among the network rules.
+    condition: "action.type in ['http_request', 'fetch', 'web_search', 'network']"
+    action: deny
+
+  # -- Delegation ------------------------------------------------------------
+  - name: require-approval-subagent-spawn
+    description: >-
+      An agent spawning further agents escapes this policy's accounting unless a
+      human is in the loop. Bounded loops are a framework invariant.
+    condition: "action.type in ['spawn_agent', 'delegate', 'create_agent']"
+    action: require_approval
+    approvers: ["repo-maintainers"]
+
+audit:
+  # Tamper-evident decision log. `adlc gate --ids governance` reads the
+  # equivalent record out of the run directory and hands it to `agt verify`.
+  enabled: true
+  sink: .adlc/audit/governance.jsonl
+  include_arguments: false   # tool arguments can carry source; keep them out of the log
