@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/benchmarks.schema.json",
+  "title": "ADLC performance, load and accessibility budgets",
+  "description": "Schema for runs/<run-id>/enrichment/benchmarks.yaml. Declares, per metric, which evidence collector produces it, the budget it must respect, and whether lower or higher is better. Consumed by the L6 evidence collectors (lighthouse, k6, axe), which emit <collector>-measurements.json next to the raw tool output. A metric declared here but not produced by its collector is reported as not_run - never as a default value and never as a silent pass.",
+  "type": "object",
+  "required": ["metrics"],
+  "properties": {
+    "version": {
+      "description": "Schema revision of this document.",
+      "type": "integer",
+      "enum": [1],
+      "default": 1
+    },
+    "target": {
+      "description": "Defaults shared by every collector. Individual collectors may override.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "Base URL of the running candidate build. May be overridden by the ADLC_TARGET_URL environment variable.",
+          "type": "string",
+          "format": "uri"
+        },
+        "timeoutSeconds": {
+          "description": "Wall-clock cap applied to each collector subprocess. Exceeding it yields not_run, never a fabricated value.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 600
+        }
+      }
+    },
+    "collectors": {
+      "description": "Per-collector execution options. Every key is optional; omitted collectors fall back to target.url plus documented defaults.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lighthouse": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "urls": {
+              "description": "Pages to audit. The first URL produces lighthouse.json; subsequent URLs produce lighthouse-1.json, lighthouse-2.json, ...",
+              "type": "array",
+              "items": { "type": "string", "format": "uri" },
+              "minItems": 1
+            },
+            "numberOfRuns": { "type": "integer", "minimum": 1, "maximum": 10, "default": 1 },
+            "preset": { "type": "string", "enum": ["desktop", "mobile"], "default": "desktop" },
+            "chromeFlags": {
+              "type": "string",
+              "default": "--headless=new --no-sandbox --disable-gpu"
+            },
+            "timeoutSeconds": { "type": "integer", "minimum": 1 },
+            "extraArgs": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "k6": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "script": {
+              "description": "Path to an existing k6 script, resolved against the run directory then the repo root. When absent a minimal constant-VU GET script is generated into the evidence directory as k6-script.js.",
+              "type": "string"
+            },
+            "url": {
+              "description": "Endpoint exercised by the generated script. Defaults to target.url.",
+              "type": "string",
+              "format": "uri"
+            },
+            "vus": { "type": "integer", "minimum": 1, "default": 5 },
+            "duration": {
+              "description": "k6 duration string, e.g. 30s or 2m.",
+              "type": "string",
+              "pattern": "^[0-9]+(ms|s|m|h)$",
+              "default": "30s"
+            },
+            "timeoutSeconds": { "type": "integer", "minimum": 1 },
+            "env": {
+              "description": "Non-secret values forwarded as k6 --env KEY=VALUE. Never put credentials here: benchmarks.yaml is committed to the run directory.",
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "extraArgs": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "axe": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "urls": {
+              "description": "Pages to scan. The first URL produces axe.json; subsequent URLs produce axe-1.json, axe-2.json, ...",
+              "type": "array",
+              "items": { "type": "string", "format": "uri" },
+              "minItems": 1
+            },
+            "tags": {
+              "description": "axe-core rule tags to run, e.g. wcag2a, wcag2aa, wcag21aa, best-practice.",
+              "type": "array",
+              "items": { "type": "string" },
+              "default": ["wcag2a", "wcag2aa"]
+            },
+            "disableRules": { "type": "array", "items": { "type": "string" } },
+            "browser": {
+              "type": "string",
+              "enum": ["chromium", "firefox", "webkit"],
+              "default": "chromium"
+            },
+            "waitUntil": {
+              "type": "string",
+              "enum": ["load", "domcontentloaded", "networkidle", "commit"],
+              "default": "load"
+            },
+            "timeoutSeconds": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "metrics": {
+      "description": "The budgets. Each entry becomes at most one normalised measurement.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "collector", "budget", "direction"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Stable metric identifier. Well-known ids (lcp_ms, cls, tbt_ms, performance_score, p95_latency_ms, error_rate, a11y_critical_violations, ...) are extracted automatically; anything else MUST declare `source`.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "collector": {
+            "description": "Which evidence collector produces this metric. Known values: lighthouse, k6, axe (workstream L6), playwright and local (spine defaults). Deliberately a pattern rather than an enum so a new evidence adapter does not invalidate an existing benchmarks.yaml.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$"
+          },
+          "budget": {
+            "description": "Threshold the measured value is compared against.",
+            "type": "number"
+          },
+          "direction": {
+            "description": "Comparison direction. lower_is_better passes when value <= budget; higher_is_better passes when value >= budget. Required - there is no safe default.",
+            "type": "string",
+            "enum": ["lower_is_better", "higher_is_better"]
+          },
+          "unit": {
+            "description": "Human-readable unit for reports, e.g. ms, %, count, score, KiB.",
+            "type": "string"
+          },
+          "description": { "type": "string" },
+          "source": {
+            "description": "RFC 6901 JSON Pointer into the collector's raw output, e.g. /audits/largest-contentful-paint/numericValue or /metrics/http_req_duration/p(95). Required for ids outside the built-in catalogue; overrides the catalogue when present.",
+            "type": "string",
+            "pattern": "^/"
+          },
+          "scale": {
+            "description": "Multiplier applied to the raw value before comparison. Used with `source` to convert units, e.g. 100 to turn a 0-1 Lighthouse score into 0-100.",
+            "type": "number",
+            "default": 1
+          },
+          "aggregate": {
+            "description": "How to combine values when a collector audits several URLs. `worst` is max for lower_is_better and min for higher_is_better.",
+            "type": "string",
+            "enum": ["worst", "best", "mean", "sum", "first"],
+            "default": "worst"
+          },
+          "optional": {
+            "description": "Advisory only. A failing optional metric is reported but is not intended to block the evidence gate. Absence still yields not_run, never a pass.",
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    }
+  }
+}

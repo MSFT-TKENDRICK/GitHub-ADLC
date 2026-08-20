@@ -1,0 +1,137 @@
+# Example runs/<run-id>/enrichment/benchmarks.yaml.
+# Validated against schemas/benchmarks.schema.json by tests/l6_evidence.
+version: 1
+
+target:
+  url: http://localhost:3000/
+  timeoutSeconds: 300
+
+collectors:
+  lighthouse:
+    urls:
+      - http://localhost:3000/
+      - http://localhost:3000/checkout
+    numberOfRuns: 1
+    preset: desktop
+    chromeFlags: "--headless=new --no-sandbox --disable-gpu"
+  k6:
+    url: http://localhost:3000/api/health
+    vus: 5
+    duration: 30s
+  axe:
+    urls:
+      - http://localhost:3000/checkout
+    tags: [wcag2a, wcag2aa]
+
+metrics:
+  # -- lighthouse ----------------------------------------------------------
+  - id: lcp_ms
+    collector: lighthouse
+    budget: 2500
+    direction: lower_is_better
+    unit: ms
+    description: Largest Contentful Paint
+  - id: cls
+    collector: lighthouse
+    budget: 0.1
+    direction: lower_is_better
+    unit: score
+  - id: tbt_ms
+    collector: lighthouse
+    budget: 200
+    direction: lower_is_better
+    unit: ms
+  - id: performance_score
+    collector: lighthouse
+    budget: 90
+    direction: higher_is_better
+    unit: score
+  - id: accessibility_score
+    collector: lighthouse
+    budget: 95
+    direction: higher_is_better
+    unit: score
+  - id: best_practices_score
+    collector: lighthouse
+    budget: 90
+    direction: higher_is_better
+    unit: score
+  - id: total_byte_weight_kb
+    collector: lighthouse
+    budget: 1536
+    direction: lower_is_better
+    unit: KiB
+  - id: pwa_score
+    collector: lighthouse
+    budget: 50
+    direction: higher_is_better
+    unit: score
+    optional: true
+  - id: dom_nodes
+    collector: lighthouse
+    budget: 1500
+    direction: lower_is_better
+    unit: count
+    source: /audits/dom-size/numericValue
+  - id: made_up_lighthouse_metric
+    collector: lighthouse
+    budget: 1
+    direction: lower_is_better
+
+  # -- k6 ------------------------------------------------------------------
+  - id: p95_latency_ms
+    collector: k6
+    budget: 400
+    direction: lower_is_better
+    unit: ms
+  - id: p99_latency_ms
+    collector: k6
+    budget: 600
+    direction: lower_is_better
+    unit: ms
+  - id: rps
+    collector: k6
+    budget: 25
+    direction: higher_is_better
+    unit: req/s
+  - id: error_rate
+    collector: k6
+    budget: 0.01
+    direction: lower_is_better
+    unit: ratio
+  - id: checks_failed
+    collector: k6
+    budget: 0
+    direction: lower_is_better
+    unit: count
+  - id: made_up_k6_metric
+    collector: k6
+    budget: 1
+    direction: lower_is_better
+
+  # -- axe -----------------------------------------------------------------
+  - id: a11y_critical_violations
+    collector: axe
+    budget: 0
+    direction: lower_is_better
+    unit: count
+  - id: a11y_serious_violations
+    collector: axe
+    budget: 0
+    direction: lower_is_better
+    unit: count
+  - id: a11y_total_violations
+    collector: axe
+    budget: 10
+    direction: lower_is_better
+    unit: count
+  - id: a11y_incomplete
+    collector: axe
+    budget: 5
+    direction: lower_is_better
+    unit: count
+    optional: true
+  - id: made_up_axe_metric
+    collector: axe
+    budget: 1
+    direction: lower_is_better

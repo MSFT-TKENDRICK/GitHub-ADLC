@@ -1,0 +1,71 @@
+{
+  "lighthouseVersion": "12.2.1",
+  "requestedUrl": "http://localhost:3000/?access_token=super-secret-token-value",
+  "finalUrl": "http://localhost:3000/?access_token=super-secret-token-value&page=1",
+  "fetchTime": "2026-08-19T12:00:00.000Z",
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/129.0.0.0",
+  "configSettings": {
+    "formFactor": "desktop",
+    "extraHeaders": {
+      "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+      "Cookie": "session=abc123; theme=dark"
+    }
+  },
+  "categories": {
+    "performance": { "id": "performance", "title": "Performance", "score": 0.94 },
+    "accessibility": { "id": "accessibility", "title": "Accessibility", "score": 0.98 },
+    "best-practices": { "id": "best-practices", "title": "Best Practices", "score": 0.83 },
+    "seo": { "id": "seo", "title": "SEO", "score": 1.0 }
+  },
+  "audits": {
+    "first-contentful-paint": {
+      "id": "first-contentful-paint",
+      "title": "First Contentful Paint",
+      "score": 0.99,
+      "numericValue": 812.5,
+      "numericUnit": "millisecond"
+    },
+    "largest-contentful-paint": {
+      "id": "largest-contentful-paint",
+      "score": 0.93,
+      "numericValue": 1820.4,
+      "numericUnit": "millisecond"
+    },
+    "speed-index": { "id": "speed-index", "score": 0.97, "numericValue": 1502.0 },
+    "interactive": { "id": "interactive", "score": 0.91, "numericValue": 2410.0 },
+    "total-blocking-time": { "id": "total-blocking-time", "score": 0.96, "numericValue": 137.0 },
+    "cumulative-layout-shift": {
+      "id": "cumulative-layout-shift",
+      "score": 1.0,
+      "numericValue": 0.042
+    },
+    "server-response-time": { "id": "server-response-time", "score": 1.0, "numericValue": 88.0 },
+    "total-byte-weight": { "id": "total-byte-weight", "score": 0.7, "numericValue": 2097152 },
+    "dom-size": { "id": "dom-size", "score": 1.0, "numericValue": 1210 },
+    "network-requests": {
+      "id": "network-requests",
+      "details": {
+        "type": "table",
+        "items": [
+          {
+            "url": "http://localhost:3000/api/me?access_token=abcdef1234567890",
+            "resourceType": "XHR",
+            "statusCode": 200
+          },
+          {
+            "url": "http://localhost:3000/static/app.js",
+            "resourceType": "Script",
+            "statusCode": 200
+          }
+        ]
+      }
+    },
+    "final-screenshot": {
+      "id": "final-screenshot",
+      "details": {
+        "type": "screenshot",
+        "data": "data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4H"
+      }
+    }
+  }
+}
