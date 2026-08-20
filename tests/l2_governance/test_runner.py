@@ -17,7 +17,6 @@ from adlc.adapters.agents.maf_governed import (
     MafGovernedRunner,
     _compile_glob,
     _resolve_run_dir,
-    _write_patch,
     _write_set_violations,
     build_prompt,
     build_worktree_tools,
@@ -82,7 +81,13 @@ class TestGlobCompilation:
             ("docs/decisions/**", "docs/other.md", False),
             ("pyproject.toml", "pyproject.toml", True),
             ("pyproject.toml", "sub/pyproject.toml", False),
-            ("src/theme", "src/theme/index.ts", True),
+            # An exact entry must NOT authorize descendants: nothing stops an
+            # agent creating `theme` as a directory and hiding files under it.
+            ("src/theme", "src/theme/index.ts", False),
+            ("src/theme", "src/theme", True),
+            ("src/theme/", "src/theme/index.ts", True),
+            ("src/theme/**", "src/theme/index.ts", True),
+            ("src/new.py", "src/new.py/extra.txt", False),
         ],
     )
     def test_matching(self, pattern: str, path: str, matches: bool) -> None:
@@ -138,43 +143,80 @@ class TestWriteSetEnforcement:
 # ---------------------------------------------------------------------------
 
 
-class TestPatchProduction:
-    def test_patch_is_anchored_to_the_base_sha(self, repo: Path, tmp_path: Path) -> None:
-        base = head(repo)
-        (repo / "src" / "app.py").write_text("print('changed')\n", encoding="utf-8")
-        out = tmp_path / "patches" / "T001.patch"
+class TestPatchProductionIsTheSpinesJob:
+    """The runner must not stage, diff, reset or write patches.
 
-        assert _write_patch(repo, base, out) is True
+    ``executor.Worktree.diff()`` does that immediately after ``run_task``
+    returns, with ``core.autocrlf=false``. A ``git add`` here would populate the
+    index with translated line endings and reintroduce "corrupt patch".
+    """
 
-        patch = out.read_text(encoding="utf-8")
-        assert "diff --git a/src/app.py b/src/app.py" in patch
-        assert "+print('changed')" in patch
+    def test_runner_module_never_stages_or_resets(self) -> None:
+        source = Path(maf_governed.__file__).read_text(encoding="utf-8")
+        for forbidden in ('"add"', '"reset"', '"clean"', '"commit"', '"checkout"'):
+            assert forbidden not in source, f"runner must not run git {forbidden}"
 
-    def test_patch_applies_cleanly_onto_the_base_sha(self, repo: Path, tmp_path: Path) -> None:
-        base = head(repo)
-        (repo / "src" / "app.py").write_text("print('changed')\n", encoding="utf-8")
-        (repo / "src" / "new.py").write_text("VALUE = 2\n", encoding="utf-8")
-        out = tmp_path / "T001.patch"
-        _write_patch(repo, base, out)
+    @pytest.mark.asyncio
+    async def test_worktree_is_left_untouched_by_a_write_set_violation(
+        self, monkeypatch, repo: Path, cfg: Config
+    ) -> None:
+        """A violation must not reset the worktree — that would destroy evidence."""
+        monkeypatch.setattr(MafGovernedRunner, "detect", staticmethod(lambda cfg: (True, "ok")))
 
-        # Reset to base and replay the patch — the merge-barrier operation.
-        subprocess.run(["git", "-C", str(repo), "reset", "-q", "--hard", base], check=True)
-        subprocess.run(["git", "-C", str(repo), "clean", "-qfd"], check=True)
-        applied = subprocess.run(
-            ["git", "-C", str(repo), "apply", "--check", str(out)],
+        async def _invoke(self, node, worktree, cfg, engine, write_set):
+            (worktree / "sneaky.py").write_text("x = 1\n", encoding="utf-8")
+            return "did a bad thing", {}
+
+        monkeypatch.setattr(MafGovernedRunner, "_invoke", _invoke)
+        monkeypatch.setattr(
+            maf_governed.PolicyEngine, "load", classmethod(lambda cls, *a, **k: _NullEngine())
+        )
+
+        outcome = await MafGovernedRunner().run_task(
+            {"id": "T1", "writeSet": ["src/app.py"]}, repo, cfg
+        )
+        assert outcome["status"] == "fail"
+        assert "outside writeSet" in outcome["log"]
+        assert (repo / "sneaky.py").is_file(), "the runner reset the worktree"
+
+    @pytest.mark.asyncio
+    async def test_index_is_left_clean_for_the_executor(
+        self, monkeypatch, repo: Path, cfg: Config
+    ) -> None:
+        monkeypatch.setattr(MafGovernedRunner, "detect", staticmethod(lambda cfg: (True, "ok")))
+
+        async def _invoke(self, node, worktree, cfg, engine, write_set):
+            (worktree / "src" / "app.py").write_text("print('changed')\n", encoding="utf-8")
+            return "ok", {}
+
+        monkeypatch.setattr(MafGovernedRunner, "_invoke", _invoke)
+        monkeypatch.setattr(
+            maf_governed.PolicyEngine, "load", classmethod(lambda cls, *a, **k: _NullEngine())
+        )
+
+        outcome = await MafGovernedRunner().run_task(
+            {"id": "T1", "writeSet": ["src/app.py"]}, repo, cfg
+        )
+        assert outcome["status"] == "ok"
+        staged = subprocess.run(  # noqa: ASYNC221 - a fast, bounded git read
+            ["git", "-C", str(repo), "diff", "--cached", "--name-only"],
             capture_output=True,
             text=True,
-            check=False,
-        )
-        assert applied.returncode == 0, applied.stderr
+            check=True,
+        ).stdout.strip()
+        assert staged == "", "the runner staged files; the executor must own the index"
 
-    def test_no_changes_yields_an_empty_patch(self, repo: Path, tmp_path: Path) -> None:
-        out = tmp_path / "T001.patch"
-        assert _write_patch(repo, head(repo), out) is False
-        assert out.read_text(encoding="utf-8").strip() == ""
 
-    def test_failure_returns_none(self, tmp_path: Path) -> None:
-        assert _write_patch(tmp_path / "nope", "deadbeef", tmp_path / "x.patch") is None
+class _NullEngine:
+    """A PolicyEngine stand-in that permits nothing and records nothing."""
+
+    records: tuple = ()
+
+    def evidence(self) -> dict:
+        return {"engine": "null", "policy": "", "total": 0, "denied": 0, "decisions": []}
+
+    def close(self) -> None:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +268,139 @@ class TestWorktreeTools:
         listing = list_files("**/*")
         assert "src/app.py" in listing
         assert ".git/" not in listing
+
+    def test_list_files_refuses_traversal_patterns(self, repo: Path) -> None:
+        """`../**/*` would enumerate sibling worktrees."""
+        _, _, list_files = self.tools(repo, ["src/app.py"])
+        assert list_files("../**/*").startswith("ERROR")
+        assert list_files("/etc/*").startswith("ERROR")
+
+
+class TestGitDirectoryIsUnreachable:
+    """`.git` is never reachable, whatever the write set says.
+
+    The spine runs `git add -A` on this worktree the instant run_task returns,
+    so a writable `.git/config` is arbitrary code execution via clean filters
+    or an external diff command.
+    """
+
+    def tools(self, repo: Path, write_set: list[str]):
+        return build_worktree_tools(repo, write_set)
+
+    def test_write_into_git_is_refused_even_with_a_wildcard_write_set(
+        self, repo: Path
+    ) -> None:
+        _, write_file, _ = self.tools(repo, ["**"])
+        result = write_file(".git/config", "[core]\n\tfsmonitor = calc.exe\n")
+        assert result.startswith("ERROR")
+        # A real .git/config always has a [core] section; assert the *injected*
+        # setting never landed. fsmonitor is arbitrary command execution.
+        assert "fsmonitor" not in (repo / ".git" / "config").read_text(encoding="utf-8")
+
+    def test_write_into_git_hooks_is_refused(self, repo: Path) -> None:
+        _, write_file, _ = self.tools(repo, [".git/**"])
+        assert write_file(".git/hooks/pre-commit", "#!/bin/sh\n").startswith("ERROR")
+
+    def test_reading_git_config_is_refused(self, repo: Path) -> None:
+        read_file, _, _ = self.tools(repo, ["**"])
+        assert read_file(".git/config").startswith("ERROR")
+
+    def test_case_variants_are_refused_too(self, repo: Path) -> None:
+        _, write_file, _ = self.tools(repo, ["**"])
+        assert write_file(".GIT/config", "x").startswith("ERROR")
+
+    def test_git_changes_count_as_violations(self, repo: Path) -> None:
+        (repo / ".git" / "adlc-marker").write_text("x\n", encoding="utf-8")
+        # git status never reports administrative files, so assert the guard
+        # directly rather than relying on porcelain output.
+        assert maf_governed._has_git_component(".git/config") is True
+        assert maf_governed._has_git_component("src/.git/config") is True
+        assert maf_governed._has_git_component("src/app.py") is False
+
+
+class TestSensitiveFilesAndSymlinks:
+    def tools(self, repo: Path, write_set: list[str]):
+        return build_worktree_tools(repo, write_set)
+
+    @pytest.mark.parametrize(
+        "path",
+        [".env", ".env.production", "sub/.npmrc", ".ssh/id_rsa", "deploy/.aws/credentials"],
+    )
+    def test_credential_files_are_refused(self, repo: Path, path: str) -> None:
+        read_file, _, _ = self.tools(repo, ["**"])
+        assert read_file(path).startswith("ERROR")
+        assert maf_governed._is_sensitive(path) is True
+
+    def test_ordinary_files_are_not_flagged_sensitive(self) -> None:
+        for path in ("src/app.py", "docs/env.md", "environment.yml"):
+            assert maf_governed._is_sensitive(path) is False
+
+    def test_symlink_to_a_sensitive_file_is_refused(self, repo: Path) -> None:
+        """Policy sees `docs/notes.txt`; only the filesystem knows it is `.env`."""
+        (repo / ".env").write_text("TOKEN=hunter2\n", encoding="utf-8")
+        (repo / "docs").mkdir()
+        try:
+            (repo / "docs" / "notes.txt").symlink_to(repo / ".env")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation not permitted on this machine")
+
+        read_file, _, _ = self.tools(repo, ["**"])
+        result = read_file("docs/notes.txt")
+        assert result.startswith("ERROR")
+        assert "hunter2" not in result
+
+    def test_symlinked_directory_is_refused(self, repo: Path) -> None:
+        (repo / "secrets").mkdir()
+        (repo / "secrets" / "key.txt").write_text("k\n", encoding="utf-8")
+        try:
+            (repo / "link").symlink_to(repo / "secrets", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation not permitted on this machine")
+
+        read_file, _, _ = self.tools(repo, ["**"])
+        assert read_file("link/key.txt").startswith("ERROR")
+
+    def test_symlink_guard_is_consulted_even_without_real_symlinks(
+        self, repo: Path, monkeypatch
+    ) -> None:
+        """Windows often forbids symlink creation, so assert the wiring directly."""
+        (repo / "docs").mkdir()
+        (repo / "docs" / "notes.txt").write_text("plain\n", encoding="utf-8")
+
+        real_is_symlink = Path.is_symlink
+
+        def _fake(self: Path) -> bool:
+            if self.name == "notes.txt":
+                return True
+            return real_is_symlink(self)
+
+        monkeypatch.setattr(Path, "is_symlink", _fake)
+        read_file, _, _ = self.tools(repo, ["**"])
+        result = read_file("docs/notes.txt")
+        assert result.startswith("ERROR")
+        assert "symlink" in result
+        assert "plain" not in result
+
+    def test_symlink_guard_walks_every_ancestor(self, repo: Path, monkeypatch) -> None:
+        real_is_symlink = Path.is_symlink
+
+        def _fake(self: Path) -> bool:
+            if self.name == "link":
+                return True
+            return real_is_symlink(self)
+
+        monkeypatch.setattr(Path, "is_symlink", _fake)
+        assert maf_governed._traverses_symlink(repo, Path("link/deep/file.txt")) is True
+        assert maf_governed._traverses_symlink(repo, Path("src/app.py")) is False
+
+    def test_parent_traversal_is_refused_lexically(self, repo: Path) -> None:
+        read_file, write_file, _ = self.tools(repo, ["**"])
+        assert read_file("../outside.txt").startswith("ERROR")
+        assert write_file("../outside.txt", "x").startswith("ERROR")
+
+    def test_absolute_paths_are_refused(self, repo: Path) -> None:
+        read_file, _, _ = self.tools(repo, ["**"])
+        assert read_file(str(Path(repo).anchor or "/")).startswith("ERROR")
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +466,7 @@ class TestRunTaskGuards:
         outcome = await MafGovernedRunner().run_task(
             {"id": "T1", "writeSet": ["src/app.py"]}, repo, cfg
         )
-        assert set(outcome) == {"status", "patchPath", "log", "tokensIn", "tokensOut", "cost"}
+        assert set(outcome) <= {"status", "patchPath", "log", "tokensIn", "tokensOut", "cost"}
         assert outcome["status"] in {"ok", "fail", "skipped"}
         assert isinstance(outcome["tokensIn"], int)
         assert isinstance(outcome["cost"], float)

@@ -112,7 +112,9 @@ class TestRunnerDegradation:
         outcome = await MafGovernedRunner().run_task(node, tmp_path, cfg)
         assert outcome["status"] == "fail"
         assert "governance unavailable" in outcome["log"]
-        assert outcome["patchPath"] == ""
+        # Patch production belongs to the spine's executor, so a runner outcome
+        # never carries one.
+        assert "patchPath" not in outcome
 
     def test_is_registered_as_an_agent_adapter(self) -> None:
         assert MafGovernedRunner.kind == "agents"
@@ -166,3 +168,32 @@ class TestNoCredentialsAnywhere:
     def test_engine_load_non_strict_returns_none(self, bare_cfg: Config, monkeypatch) -> None:
         monkeypatch.setattr(middleware, "TEMPLATE_POLICY", bare_cfg.root / "nope.yaml")
         assert middleware.PolicyEngine.load(bare_cfg, strict=False) is None
+
+
+class TestGovernWrapperIsNotAnAllowSource:
+    """`govern()` alone must never be accepted as a pre-execution verdict.
+
+    It decides at call time by wrapping the callable it is handed, so probing
+    it with a stand-in asks about an action the policy never actually saw. On
+    an allow-by-default policy that reports "allowed" for a call nobody
+    inspected — a fail-open. The engine refuses instead.
+    """
+
+    def test_load_refuses_when_only_the_wrapper_is_present(
+        self, monkeypatch, cfg: Config
+    ) -> None:
+        monkeypatch.setattr(middleware, "_load_acs_runtime", lambda policy: (None, ""))
+        monkeypatch.setattr(
+            middleware, "_load_govern_wrapper", lambda: (lambda fn, **kw: fn, RuntimeError)
+        )
+        with pytest.raises(middleware.GovernanceUnavailable) as excinfo:
+            middleware.PolicyEngine.load(cfg, strict=True)
+        assert "agent_control_specification" in str(excinfo.value)
+
+    def test_engine_without_a_runtime_denies_rather_than_permits(self, cfg: Config) -> None:
+        engine = middleware.PolicyEngine(policy_path=cfg.adlc_dir / "policy.yaml")
+        decision = engine.check("write_file", {"path": "src/a.py"})
+        assert decision.permits is False
+
+    def test_no_probe_helper_remains(self) -> None:
+        assert not hasattr(middleware, "_govern_probe")
