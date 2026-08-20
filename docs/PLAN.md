@@ -79,13 +79,25 @@ Copilot/ASSERT/CodeQL integration. The first is never called an agent proof.
 | Rubric evals | **promptfoo** `llm-rubric` | GA | Optional; default is a deterministic rubric runner |
 | Evidence | **Playwright** (trace/video/HAR/console), Lighthouse CI, k6, axe | GA | Playwright is the spine default |
 | Telemetry | **OpenTelemetry** GenAI + `feature_flag.*` semconv | Experimental/RC | `feature_flag.result.variant`, `.context.id`, `.set.id` |
-| Day-2 | **Azure SRE Agent** | Preview | Cannot open code PRs; **can dispatch Actions workflows** → `repository_dispatch` |
+| Day-2 | **Azure SRE Agent** | Preview | Documented: creates issues, comments, reads Dependabot alerts, **triggers and tracks Actions workflows**. Whether it authors code diffs is **undocumented either way** — ADLC does not depend on it doing so |
 | ADR | **MADR v4** | Stable | |
 
-**Designed-around gaps:** no Foundry SWE-agent SKU (substitute: hosted agent running
-`adlc hotfix`); no SRE-Agent CLI/Bicep provisioning; issue-dependency creation API
-unverified (sub-issues + `taskgraph.json` are authoritative); LD experiment-results read
-API unverified.
+**Designed-around gaps.** Each of these is a thing we could not confirm, not a thing
+we confirmed to be absent. The distinction matters: a negative claim about a preview
+product is rarely checkable, so ADLC is built to be correct either way.
+
+- **Foundry SWE-agent**: we found no such product and nothing asserting its absence.
+  We substitute a hosted agent (or plain container job) running `adlc hotfix`. That
+  substitution is checkable; the negative is not.
+- **Azure SRE Agent authoring code diffs**: undocumented either way. Our
+  `repository_dispatch` receiver is justified independently — a pull request authored
+  outside ADLC arrives with no run directory, no evidence, no gates and no ADR
+  lineage, so routing incidents through dispatch is correct regardless.
+- **SRE Agent provisioning**: portal onboarding is documented; no `az`/Bicep path found.
+- **Issue-dependency creation API**: unverified, so `taskgraph.json` stays authoritative
+  and sub-issues provide the GitHub-native tree.
+- **LaunchDarkly experiment-results read API**: unverified, so LD delivers flags and
+  emits metrics but is never a gate authority.
 
 ---
 
@@ -492,9 +504,14 @@ real PR; one gh-aw squad review posting via `safe-outputs`. Skipped — and repo
 ## 10. Explicitly NOT doing
 
 No custom flag service, eval framework, task tracker, orchestrator or report SPA. No
-control plane, database, web service or auth. No LaunchDarkly-results gating. No Foundry
-SWE-agent product claim. No AKS/Terraform estate. No YAML-fence command protocol. No more
-than 2 variants. No mutation of historical runs.
+control plane, database, web service or auth. No LaunchDarkly-results gating. No claim
+that a Foundry SWE-agent SKU does or does not exist. No AKS/Terraform estate. No
+YAML-fence command protocol. No more than 2 variants. No mutation of historical runs.
+
+**And no unverified negatives stated as fact.** "We found no X" is checkable; "X does
+not exist" usually is not, especially for a preview product. Where this document or the
+code asserts an absence, it is because absence was demonstrated — otherwise it says what
+was searched and what was found.
 
 ---
 

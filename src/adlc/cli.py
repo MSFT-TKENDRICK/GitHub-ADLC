@@ -494,6 +494,39 @@ def autoresearch(as_json: bool = typer.Option(False, "--json")) -> None:
     _emit(result, as_json, result.get("summary", "no proposal"))
 
 
+@app.command()
+def hotfix(
+    incident: Path = typer.Option(..., "--incident", help="Incident payload (JSON or markdown)."),
+    plan_only: bool = typer.Option(False, "--plan-only", help="Stop after planning the run."),
+    runner: str | None = typer.Option(None, "--runner"),
+    max_parallel: int | None = typer.Option(None, "--max-parallel"),
+    allow_unqualified: bool = typer.Option(
+        False, "--allow-unqualified", help="Proceed even if the incident scores below threshold."
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Turn a production incident into a narrow, fully gated ADLC run.
+
+    The day-2 entry point. It deliberately reuses the day-1 intake path, so a
+    hotfix is specced, gated and recorded exactly like any other change rather
+    than becoming an unaudited side channel.
+    """
+    from adlc.stages.hotfix import run_hotfix
+
+    cfg = _cfg()
+    result = run_hotfix(
+        incident,
+        cfg=cfg,
+        plan_only=plan_only,
+        runner_name=runner,
+        max_parallel=max_parallel,
+        allow_unqualified=allow_unqualified,
+    )
+    _emit(result, as_json, f"hotfix: {result.get('message', '')}")
+    if result.get("status") == "fail":
+        raise typer.Exit(1)
+
+
 def main() -> None:  # pragma: no cover
     try:
         app()
