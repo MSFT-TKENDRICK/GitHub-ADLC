@@ -1,11 +1,24 @@
 """``AgentRunner`` that executes a task node through a governed MAF agent.
 
 The contract is identical to every other runner (``adlc.ports.AgentRunner``):
-one task node, one isolated worktree, one patch anchored to that worktree's base
-SHA, and **no writes outside ``node['writeSet']``**. The only thing that is
-different is *how* the agent is allowed to act: every tool call it makes passes
-through Agent Governance Toolkit policy enforcement first, via Microsoft Agent
-Framework's function middleware (``adlc.maf.middleware``).
+mutate an isolated worktree so that the spine's executor can diff it into a
+patch anchored to that worktree's base SHA, and **write nothing outside
+``node['writeSet']``**. The only thing that is different is *how* the agent is
+allowed to act: every tool call it makes passes through Agent Governance
+Toolkit policy enforcement first, via Microsoft Agent Framework's function
+middleware (``adlc.maf.middleware``).
+
+Division of labour with the spine, which this module must not duplicate:
+
+* The executor creates and disposes the worktree, and calls ``Worktree.diff()``
+  right after ``run_task`` returns. **It** stages and writes
+  ``patches/<node>.patch``. This runner therefore performs no ``git add``, no
+  ``git diff`` and no ``git reset`` -- doing so would corrupt the patch on
+  Windows (``core.autocrlf``) and destroy evidence of what the agent did.
+* The executor also re-checks the produced patch against the write set. The
+  check here is additive: it runs *before* the patch exists, covers
+  ``PROTECTED_PATHS`` (which the executor validates at graph-compile time
+  rather than per patch), and produces a governance-flavoured failure message.
 
 MAF is not scheduling anything here. The spine's topological executor already
 decided this node should run; this module just runs it under policy.
@@ -145,22 +158,15 @@ class MafGovernedRunner:
 
         violations = _write_set_violations(worktree, write_set)
         if violations:
-            _git(worktree, "reset", "--hard", base_sha)
-            _git(worktree, "clean", "-fd")
+            # Leave the worktree exactly as the agent left it: the spine's
+            # executor disposes of it, and resetting here would destroy
+            # evidence of what the agent actually did.
             return _fail(
                 f"agent wrote outside writeSet: {', '.join(sorted(violations)[:10])}", log
             )
 
-        patch_path = run_dir / "patches" / f"{node_id}.patch"
-        written = _write_patch(worktree, base_sha, patch_path)
-        if written is None:
-            return _fail("could not produce a patch anchored to the base SHA", log)
-        if not written:
-            log.append("agent produced no changes")
-
         return {
             "status": "ok",
-            "patchPath": str(patch_path),
             "log": "\n".join(log),
             "tokensIn": usage.get("tokensIn", 0),
             "tokensOut": usage.get("tokensOut", 0),
@@ -246,21 +252,42 @@ def build_worktree_tools(
 
     The AGT policy is the authoritative control; these checks are defence in
     depth so a policy misconfiguration still cannot escape the worktree.
+
+    Two subtleties that a naive path check gets wrong:
+
+    * **Symlinks.** Policy sees the argument the model wrote. A link like
+      ``docs/notes.txt -> .env`` is evaluated as ``docs/notes.txt`` and only
+      becomes ``.env`` once the filesystem resolves it. We refuse to traverse
+      symlinks at all rather than try to keep the two views in sync.
+    * **``.git``.** The spine runs ``git add -A`` on this worktree the moment
+      we return. A writable ``.git`` means a writable ``config``, which means
+      clean filters and external diff commands -- arbitrary execution by way of
+      the executor. It is never reachable, whatever the write set says.
     """
     root = Path(worktree).resolve()
     allowed = [_compile_glob(pattern) for pattern in write_set]
     protected = [_compile_glob(pattern) for pattern in PROTECTED_PATHS]
 
     def _resolve(path: str) -> tuple[Path | None, str]:
+        candidate = Path(path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return None, f"path must be relative to the worktree: {path!r}"
+        if _has_git_component(candidate.as_posix()):
+            return None, "the git directory is never readable or writable"
+        if _traverses_symlink(root, candidate):
+            return None, f"path traverses a symlink: {path!r}"
         try:
-            target = (root / path).resolve()
+            target = (root / candidate).resolve()
         except (OSError, ValueError):
             return None, f"invalid path: {path!r}"
         try:
             rel = target.relative_to(root)
         except ValueError:
             return None, f"path escapes the worktree: {path!r}"
-        return target, rel.as_posix()
+        posix = rel.as_posix()
+        if _has_git_component(posix) or _is_sensitive(posix):
+            return None, f"{posix} is never readable or writable"
+        return target, posix
 
     def read_file(path: str) -> str:
         """Read a UTF-8 text file from the worktree."""
@@ -295,17 +322,68 @@ def build_worktree_tools(
 
     def list_files(pattern: str = "*") -> str:
         """List worktree files matching a glob, excluding .git."""
+        as_posix = pattern.replace("\\", "/")
+        if (
+            as_posix.startswith("/")
+            or PurePosixPath(as_posix).is_absolute()
+            or Path(pattern).is_absolute()
+            or ".." in PurePosixPath(as_posix).parts
+        ):
+            return "ERROR: pattern must be relative to the worktree"
         try:
             matches = sorted(
                 p.relative_to(root).as_posix()
-                for p in root.glob(pattern)
-                if p.is_file() and ".git" not in p.parts
+                for p in root.glob(as_posix)
+                if p.is_file() and _contained(root, p) and ".git" not in p.parts
             )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, NotImplementedError) as exc:
             return f"ERROR: {exc}"
         return "\n".join(matches[:500]) or "(no matches)"
 
     return [read_file, write_file, list_files]
+
+
+#: Credential material an SDLC agent has no business reading, regardless of the
+#: write set. Mirrors the `block-secret-exfiltration` policy rule so a policy
+#: misconfiguration is not the only thing standing in the way.
+_SENSITIVE_NAMES = frozenset(
+    {".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials"}
+)
+_SENSITIVE_DIRS = frozenset({".ssh", ".aws", ".gnupg"})
+
+
+def _has_git_component(posix_path: str) -> bool:
+    return any(part.lower() == ".git" for part in posix_path.split("/") if part)
+
+
+def _is_sensitive(posix_path: str) -> bool:
+    parts = [part.lower() for part in posix_path.split("/") if part]
+    if any(part in _SENSITIVE_DIRS for part in parts):
+        return True
+    return bool(parts) and (
+        parts[-1] in _SENSITIVE_NAMES or parts[-1].startswith(".env.")
+    )
+
+
+def _contained(root: Path, candidate: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _traverses_symlink(root: Path, relative: Path) -> bool:
+    """True if ``relative`` or any of its ancestors under ``root`` is a symlink."""
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:  # pragma: no cover - defensive
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +397,17 @@ def _compile_glob(pattern: str) -> re.Pattern[str]:
     ``fnmatch`` alone is wrong here: its ``*`` crosses ``/``, which would let
     ``src/*`` authorize ``src/a/b/c.ts``. ``**`` crosses separators, ``*`` and
     ``?`` do not.
+
+    Descendants are authorized **only** by explicit directory syntax
+    (``dir/**`` or a trailing ``/``). An exact entry like ``src/new.py`` must
+    not also authorize ``src/new.py/extra.txt`` -- nothing stops an agent from
+    creating ``new.py`` as a directory and hiding files under it.
     """
-    normalized = PurePosixPath(pattern.replace("\\", "/")).as_posix()
-    # A trailing `/**` is covered by the "everything under this path" suffix
-    # appended below, which also makes the directory entry itself match --
-    # what we want when guarding `.github/**`.
-    normalized = normalized.removesuffix("/**")
+    raw_pattern = pattern.replace("\\", "/")
+    # Check the raw string: PurePosixPath drops a trailing slash, which is
+    # exactly the character that distinguishes `src/theme/` from `src/theme`.
+    descendants = raw_pattern.endswith(("/**", "/"))
+    normalized = PurePosixPath(raw_pattern).as_posix().removesuffix("/**")
     out: list[str] = []
     i = 0
     while i < len(normalized):
@@ -353,7 +436,8 @@ def _compile_glob(pattern: str) -> re.Pattern[str]:
             out.append(re.escape(char))
         i += 1
     # A bare directory pattern (`src/foo`) also authorizes everything under it.
-    return re.compile(rf"(?s:{''.join(out)})(?:/.*)?\Z")
+    suffix = "(?:/.*)?" if descendants else ""
+    return re.compile(rf"(?s:{''.join(out)}){suffix}\Z")
 
 
 def _write_set_violations(worktree: Path, write_set: Sequence[str]) -> set[str]:
@@ -362,7 +446,12 @@ def _write_set_violations(worktree: Path, write_set: Sequence[str]) -> set[str]:
     protected = [_compile_glob(pattern) for pattern in PROTECTED_PATHS]
     violations: set[str] = set()
     for path in changed_paths(worktree):
-        if any(pattern.match(path) for pattern in protected) or not any(pattern.match(path) for pattern in allowed):
+        if (
+            _has_git_component(path)
+            or _is_sensitive(path)
+            or any(pattern.match(path) for pattern in protected)
+            or not any(pattern.match(path) for pattern in allowed)
+        ):
             violations.add(path)
     return violations
 
@@ -390,27 +479,14 @@ def changed_paths(worktree: Path) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Patch production
+# git plumbing (read-only)
 # ---------------------------------------------------------------------------
-
-
-def _write_patch(worktree: Path, base_sha: str, out: Path) -> bool | None:
-    """Stage everything and write a patch anchored to ``base_sha``.
-
-    Returns ``True`` when a non-empty patch was written, ``False`` when the
-    agent changed nothing, and ``None`` on failure.
-    """
-    if _git(worktree, "add", "--all") is None:
-        return None
-    diff = _git_output(worktree, "diff", "--cached", "--binary", base_sha)
-    if diff is None:
-        return None
-    try:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(diff + ("\n" if diff and not diff.endswith("\n") else ""), encoding="utf-8")
-    except OSError:
-        return None
-    return bool(diff.strip())
+#
+# Deliberately read-only. The spine's executor owns patch production: it calls
+# ``Worktree.diff()`` immediately after ``run_task`` returns, which stages with
+# ``core.autocrlf=false`` and normalises the result. A runner that ran its own
+# ``git add`` would populate the index with line-ending-translated content and
+# reintroduce the "corrupt patch" failure the executor exists to prevent.
 
 
 def _git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -543,7 +619,6 @@ def _emit_decisions(run_dir: Path, engine: PolicyEngine) -> None:
 def _fail(message: str, log: Iterable[str]) -> TaskOutcome:
     return {
         "status": "fail",
-        "patchPath": "",
         "log": "\n".join([*log, message]),
         "tokensIn": 0,
         "tokensOut": 0,
