@@ -203,3 +203,72 @@ def test_malformed_run_is_rejected_by_the_schema() -> None:
     valid, errors = is_valid("adlc-run", {"schemaVersion": "adlc-run/v1"})
     assert valid is False
     assert errors
+
+
+def test_degraded_gates_still_reduce_into_a_valid_run(cfg: Config, brief_file: Path) -> None:
+    """A run full of `not_run` gates must still produce a schema-valid record.
+
+    This is the case you hit precisely when something is already wrong, which is
+    the worst possible moment to discover the audit record is malformed. The
+    happy path is well covered elsewhere; this pins the degraded path.
+    """
+    from adlc.reduce import reduce_run
+    from adlc.schemas import is_valid
+    from adlc.stages.gates import run_gates
+    from adlc.stages.intake import run_intake
+
+    rd = RunDir(cfg, new_run_id())
+    rd.create(profile=cfg.profile, brief_text=brief_file.read_text(encoding="utf-8"))
+    run_intake(cfg, rd, str(brief_file))
+
+    # No spec, no build, no evidence: every required gate should degrade.
+    result = run_gates(cfg, rd)
+    assert result["passed"] is False, "gates cannot pass with nothing to check"
+
+    run = reduce_run(cfg, rd)
+    valid, errors = is_valid("adlc-run", run)
+    assert valid, errors
+
+    statuses = {g["id"]: g["status"] for g in run["gates"]}
+    assert set(cfg.required_gates()) <= set(statuses)
+    assert any(s == "not_run" for s in statuses.values()), statuses
+
+    # Every gate, degraded or not, must carry a usable explanation.
+    for gate in run["gates"]:
+        assert gate.get("message"), f"gate {gate['id']} degraded without a reason"
+
+
+def test_every_gate_result_shape_is_schema_valid(cfg: Config, brief_file: Path) -> None:
+    """Each individual gates/<id>.json must satisfy the run schema's gate shape.
+
+    Validating only the reduced document would let a malformed individual result
+    slip through whenever the reducer happens to overwrite it.
+    """
+    import json
+
+    from adlc.schemas import is_valid
+    from adlc.stages.gates import run_gates
+    from adlc.stages.intake import run_intake
+
+    rd = RunDir(cfg, new_run_id())
+    rd.create(profile=cfg.profile, brief_text=brief_file.read_text(encoding="utf-8"))
+    run_intake(cfg, rd, str(brief_file))
+    run_gates(cfg, rd)
+
+    written = sorted(rd.gates_dir.glob("*.json"))
+    assert written, "no gate results were persisted"
+
+    for path in written:
+        gate = json.loads(path.read_text(encoding="utf-8"))
+        probe = {
+            "schemaVersion": "adlc-run/v1",
+            "runId": rd.run_id,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "repo": "owner/repo",
+            "status": "gated",
+            "profile": cfg.profile,
+            "stages": [],
+            "gates": [gate],
+        }
+        valid, errors = is_valid("adlc-run", probe)
+        assert valid, f"{path.name}: {errors}"
