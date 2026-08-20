@@ -60,7 +60,34 @@ def test_observational_kinds_may_auto_detect(cfg: Config) -> None:
     assert collector.name in {"local", "playwright"}
 
 
-def test_every_spine_default_is_credential_free(cfg: Config) -> None:
+def test_builtins_resolve_without_package_metadata(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spine must work from a source checkout with no dist-info.
+
+    Entry points are the *extension* mechanism, not a dependency of the
+    framework's own defaults.
+    """
+    import adlc.config as config_module
+
+    monkeypatch.setattr(
+        config_module, "entry_points", lambda **_: (), raising=True
+    )
+    for kind in SPINE_DEFAULTS:
+        adapter = select_adapter(cfg, kind)  # type: ignore[arg-type]
+        assert adapter is not None, f"no built-in resolvable for '{kind}'"
+
+    gates = config_module.load_adapters("gate")
+    assert {"tests", "secrets_local", "deps_local", "evidence_completeness"} <= set(gates)
+
+
+def test_broken_leaf_adapter_does_not_break_the_registry(cfg: Config) -> None:
+    """A leaf whose module does not exist is undiscoverable, not fatal."""
+    from adlc.config import load_adapters
+
+    agents = load_adapters("agents")
+    assert "fake" in agents, "the built-in runner must always resolve"
+
     """The default path must work with nothing configured and no secrets."""
     for name in ("GITHUB_TOKEN", "GH_TOKEN", "LAUNCHDARKLY_SDK_KEY"):
         os.environ.pop(name, None)

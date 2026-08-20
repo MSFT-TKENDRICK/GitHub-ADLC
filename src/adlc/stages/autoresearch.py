@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from adlc.config import Config
-from adlc.runs import RunDir, read_json
+from adlc.runs import read_json
 
 _TODO_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b")
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".adlc"}
@@ -94,51 +94,64 @@ def propose(cfg: Config) -> dict[str, Any]:
 
     candidates: list[tuple[int, str, str]] = []
 
+    def add(score: int, title: str, body: str) -> None:
+        candidates.append((score, title, body))
+
     for gate_id, count in runs["failingGates"]:
-        candidates.append((
+        add(
             100 + count * 10,
             f"Make the '{gate_id}' gate pass reliably",
-            f"The required gate `{gate_id}` failed or did not run in {count} previous run(s). "
-            f"A required gate that cannot run fails the build by design, so this blocks delivery.\n\n"
-            f"**Problem**: `{gate_id}` is not producing a trustworthy signal.\n"
-            f"**Outcome**: every run yields a definitive pass or fail for `{gate_id}`.\n"
-            f"**Acceptance criteria**: the gate returns `pass` or `fail` (never `not_run`) "
-            f"on three consecutive runs, and its message names the evidence it used.",
-        ))
+            (
+                f"The required gate `{gate_id}` failed or did not run in {count} previous "
+                f"run(s). A required gate that cannot run fails the build by design, so this "
+                f"blocks delivery.\n\n"
+                f"**Problem**: `{gate_id}` is not producing a trustworthy signal.\n"
+                f"**Outcome**: every run yields a definitive pass or fail for `{gate_id}`.\n"
+                f"**Acceptance criteria**: the gate returns `pass` or `fail` (never `not_run`) "
+                f"on three consecutive runs, and its message names the evidence it used."
+            ),
+        )
 
     for criterion, count in runs["unevaluatedCriteria"]:
-        candidates.append((
+        add(
             80 + count * 5,
             f"Make rubric criterion '{criterion}' machine-checkable",
-            f"Criterion `{criterion}` needed an LLM judge in {count} run(s), so it was scored 0 "
-            f"by the deterministic runner.\n\n"
-            f"**Problem**: a criterion we cannot check cheaply drags every score down.\n"
-            f"**Outcome**: the criterion is evaluated deterministically, or is explicitly "
-            f"delegated to a configured judge.\n"
-            f"**Acceptance criteria**: `adlc eval` reports a non-zero score for `{criterion}` "
-            f"with a rationale naming the check performed.",
-        ))
+            (
+                f"Criterion `{criterion}` needed an LLM judge in {count} run(s), so it was "
+                f"scored 0 by the deterministic runner.\n\n"
+                f"**Problem**: a criterion we cannot check cheaply drags every score down.\n"
+                f"**Outcome**: the criterion is evaluated deterministically, or is explicitly "
+                f"delegated to a configured judge.\n"
+                f"**Acceptance criteria**: `adlc eval` reports a non-zero score for "
+                f"`{criterion}` with a rationale naming the check performed."
+            ),
+        )
 
     for path, count in repo["todoHotspots"]:
-        candidates.append((
+        add(
             40 + count,
             f"Resolve {count} deferred item(s) in {path}",
-            f"`{path}` carries {count} TODO/FIXME marker(s).\n\n"
-            f"**Problem**: deferred work in `{path}` is invisible to planning.\n"
-            f"**Outcome**: each marker is resolved or promoted to a tracked task.\n"
-            f"**Acceptance criteria**: no TODO/FIXME remains in `{path}`, and any deferred "
-            f"item exists as an issue.",
-        ))
+            (
+                f"`{path}` carries {count} TODO/FIXME marker(s).\n\n"
+                f"**Problem**: deferred work in `{path}` is invisible to planning.\n"
+                f"**Outcome**: each marker is resolved or promoted to a tracked task.\n"
+                f"**Acceptance criteria**: no TODO/FIXME remains in `{path}`, and any deferred "
+                f"item exists as an issue."
+            ),
+        )
 
     for name in repo["missingFiles"]:
-        candidates.append((
+        add(
             30,
             f"Add {name}",
-            f"`{name}` is absent, which weakens the context available to both humans and agents.\n\n"
-            f"**Problem**: contributors and agents lack `{name}`.\n"
-            f"**Outcome**: `{name}` exists and is accurate.\n"
-            f"**Acceptance criteria**: `{name}` is present and referenced from the README.",
-        ))
+            (
+                f"`{name}` is absent, which weakens the context available to both humans and "
+                f"agents.\n\n"
+                f"**Problem**: contributors and agents lack `{name}`.\n"
+                f"**Outcome**: `{name}` exists and is accurate.\n"
+                f"**Acceptance criteria**: `{name}` is present and referenced from the README."
+            ),
+        )
 
     if not candidates:
         return {

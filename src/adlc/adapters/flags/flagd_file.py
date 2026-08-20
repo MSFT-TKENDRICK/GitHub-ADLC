@@ -107,5 +107,5 @@ class FlagdFileProvider:
             "feature_flag.result.value": result.get("value"),
             "feature_flag.result.reason": (result.get("reason") or "").lower(),
             "feature_flag.context.id": ctx.get("targetingKey") or ctx.get("id"),
-            "feature_flag.set.id": (self._flags and f"adlc") or None,
+            "feature_flag.set.id": (self._flags and "adlc") or None,
         }

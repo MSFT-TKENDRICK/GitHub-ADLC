@@ -35,18 +35,18 @@ _TASK_RE = re.compile(
     r"^\s*-\s*\[[ xX]\]\s*(?P<id>T\d{3,})\s*(?P<parallel>\[P\])?\s*"
     r"(?:\[(?P<story>US\d+)\])?\s*(?P<desc>.+?)\s*$"
 )
-_DEPENDS_RE = re.compile(r"\(depends on\s+(?P<deps>[^)]+)\)", re.I)
+_DEPENDS_RE = re.compile(r"\(depends on\s+(?P<deps>[^)]+)\)", re.IGNORECASE)
 _PATH_RE = re.compile(r"(?<![\w/.])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,6})(?![\w/])")
 _SYMBOL_RE = re.compile(
     r"^\s*(?:def|class|function|const|let|var|export\s+(?:const|function|class)|async\s+def)\s+"
     r"([A-Za-z_][\w]*)",
-    re.M,
+    re.MULTILINE,
 )
 
 _KIND_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("test", re.compile(r"\btest|spec\b", re.I)),
-    ("doc", re.compile(r"\bdoc|readme|guide\b", re.I)),
-    ("infra", re.compile(r"\bci\b|workflow|pipeline|docker|infra", re.I)),
+    ("test", re.compile(r"\btest|spec\b", re.IGNORECASE)),
+    ("doc", re.compile(r"\bdoc|readme|guide\b", re.IGNORECASE)),
+    ("infra", re.compile(r"\bci\b|workflow|pipeline|docker|infra", re.IGNORECASE)),
 )
 
 _BINARY_SUFFIXES = {
@@ -246,7 +246,7 @@ def compile_graph(cfg: Config, rd: RunDir) -> TaskGraph:
     rubric_ids: list[str] = []
     rubric_path = rd.enrichment_dir / "rubric.yaml"
     if rubric_path.is_file():
-        rubric_ids = re.findall(r"^\s*-\s*id:\s*(\S+)", rubric_path.read_text(encoding="utf-8"), re.M)
+        rubric_ids = re.findall(r"^\s*-\s*id:\s*(\S+)", rubric_path.read_text(encoding="utf-8"), re.MULTILINE)
 
     nodes: list[TaskNode] = []
     for task in parsed:

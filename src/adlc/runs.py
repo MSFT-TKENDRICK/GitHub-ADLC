@@ -69,7 +69,7 @@ def read_json(path: Path) -> Any:
 
 
 def git(*args: str, cwd: Path | None = None, check: bool = True) -> str:
-    proc = subprocess.run(  # noqa: S603
+    proc = subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
         capture_output=True,

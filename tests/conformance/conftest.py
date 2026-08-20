@@ -60,7 +60,7 @@ qualify:
 
 
 def _git(*args: str, cwd: Path) -> str:
-    proc = subprocess.run(  # noqa: S603
+    proc = subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:

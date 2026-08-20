@@ -144,8 +144,8 @@ def list_adrs(cfg: Config) -> list[Adr]:
     found: list[Adr] = []
     for path in sorted(directory.glob("[0-9][0-9][0-9][0-9]-*.md")):
         text = path.read_text(encoding="utf-8")
-        status_match = re.search(r"^status:\s*(\S+)", text, re.M)
-        title_match = re.search(r"^#\s+(.+)$", text, re.M)
+        status_match = re.search(r"^status:\s*(\S+)", text, re.MULTILINE)
+        title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
         found.append(Adr(
             number=path.name[:4],
             path=path,
@@ -164,11 +164,11 @@ def set_status(cfg: Config, number: str, status: str, *, review_sha: str = "") -
 
     adr = matches[0]
     text = adr.path.read_text(encoding="utf-8")
-    text = re.sub(r"^status:\s*\S+", f"status: {status}", text, count=1, flags=re.M)
+    text = re.sub(r"^status:\s*\S+", f"status: {status}", text, count=1, flags=re.MULTILINE)
     if review_sha:
-        if re.search(r"^adlc-review-sha:", text, re.M):
+        if re.search(r"^adlc-review-sha:", text, re.MULTILINE):
             text = re.sub(
-                r"^adlc-review-sha:.*$", f"adlc-review-sha: {review_sha}", text, count=1, flags=re.M
+                r"^adlc-review-sha:.*$", f"adlc-review-sha: {review_sha}", text, count=1, flags=re.MULTILINE
             )
         else:
             text = text.replace("---\n\n#", f"adlc-review-sha: {review_sha}\n---\n\n#", 1)

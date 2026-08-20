@@ -98,7 +98,7 @@ def _run_script(path: Path, *args: str, cwd: Path) -> dict[str, Any]:
         cmd = ["pwsh", "-File", str(path), *args]
     else:
         cmd = ["bash", str(path), *args]
-    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, check=False)  # noqa: S603
+    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(f"{path.name} failed: {proc.stderr.strip()}")
     try:

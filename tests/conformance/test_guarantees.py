@@ -6,7 +6,6 @@ prove the failure paths, not the happy path.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -14,10 +13,9 @@ import pytest
 from adlc.config import Config
 from adlc.executor import GraphError, validate_graph, violated_write_set
 from adlc.ports import TaskGraph
-from adlc.reduce import aggregate_passed, collect_gates, reduce_run
-from adlc.runs import RunDir, new_run_id, write_json
+from adlc.reduce import aggregate_passed, collect_gates
+from adlc.runs import RunDir, new_run_id
 from adlc.stages.graph import compile_graph, parse_tasks_md
-
 
 # -- criterion 6: fail closed ----------------------------------------------
 

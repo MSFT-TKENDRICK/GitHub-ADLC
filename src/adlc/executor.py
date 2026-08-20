@@ -210,7 +210,7 @@ class Worktree:
         binary hunks do not survive decoding at all.
         """
         git(*self.GIT_OPTS, "add", "-A", cwd=self.path, check=False)
-        proc = subprocess.run(  # noqa: S603
+        proc = subprocess.run(
             ["git", *self.GIT_OPTS, "diff", "--cached", "--binary"],
             cwd=str(self.path), capture_output=True, check=False,
         )
@@ -240,9 +240,7 @@ def violated_write_set(patch_text: str | bytes, write_set: list[str]) -> list[st
         patch_text = patch_text.decode("utf-8", errors="replace")
     touched: set[str] = set()
     for line in patch_text.splitlines():
-        if line.startswith("+++ b/"):
-            touched.add(line[6:].strip())
-        elif line.startswith("--- a/") and "/dev/null" not in line:
+        if line.startswith("+++ b/") or line.startswith("--- a/") and "/dev/null" not in line:
             touched.add(line[6:].strip())
     allowed = set(write_set or [])
     return sorted(
@@ -331,7 +329,7 @@ class Executor:
         test_ok, test_output = True, "no test command configured"
         command = (self.cfg.raw.get("commands") or {}).get("test")
         if command and applied:
-            proc = subprocess.run(  # noqa: S603,S602
+            proc = subprocess.run(
                 command, cwd=str(self.cfg.root), shell=True,
                 capture_output=True, text=True, check=False,
             )
@@ -363,7 +361,7 @@ class Executor:
         )
         last_error = ""
         for flags in attempts:
-            proc = subprocess.run(  # noqa: S603
+            proc = subprocess.run(
                 ["git", *Worktree.GIT_OPTS, "apply", *flags, str(patch_path)],
                 cwd=str(self.cfg.root), capture_output=True, text=True, check=False,
             )

@@ -26,8 +26,8 @@ from adlc.reduce import load_run
 from adlc.runs import RunDir, sha256_file, utcnow, write_json
 from adlc.schemas import is_valid
 
-_AC_RE = re.compile(r"\*\*(?P<id>US\d+-AC\d+)\*\*\s*:?\s*(?P<text>.+?)$", re.M)
-_SCENARIO_RE = re.compile(r"^\s*Scenario:\s*(?P<id>US\d+-AC\d+)\s+(?P<text>.+?)$", re.M)
+_AC_RE = re.compile(r"\*\*(?P<id>US\d+-AC\d+)\*\*\s*:?\s*(?P<text>.+?)$", re.MULTILINE)
+_SCENARIO_RE = re.compile(r"^\s*Scenario:\s*(?P<id>US\d+-AC\d+)\s+(?P<text>.+?)$", re.MULTILINE)
 
 
 def extract_requirements(rd: RunDir) -> list[dict[str, str]]:

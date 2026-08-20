@@ -8,7 +8,6 @@ job with no wrapper scripts.
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -194,14 +193,14 @@ def run_list(as_json: bool = typer.Option(False, "--json")) -> None:
         except FileNotFoundError:
             rows.append({"runId": rd.run_id, "status": "unknown"})
     _emit(rows, as_json, "\n".join(
-        f"{r['runId']}  {str(r.get('status')):<10} gates={'pass' if r.get('gatesPassed') else 'fail'}"
+        f"{r['runId']}  {r.get('status')!s:<10} gates={'pass' if r.get('gatesPassed') else 'fail'}"
         for r in rows
     ))
 
 
-def _stage_command(name: str, func) -> None:  # noqa: ANN001
+def _stage_command(name: str, func) -> None:
     @app.command(name)
-    def _cmd(  # noqa: ANN202
+    def _cmd(
         run_id: str = typer.Argument("latest"),
         as_json: bool = typer.Option(False, "--json"),
     ) -> None:

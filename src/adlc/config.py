@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from importlib import import_module
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,33 @@ SPINE_DEFAULTS: dict[str, str] = {
     "evidence": "local",
     "flags": "flagd-file",
     "telemetry": "otel-file",
+}
+
+#: The spine's own adapters, resolvable **without** package metadata.
+#:
+#: Entry points are the extension mechanism, but they require an installed
+#: dist-info. That breaks two legitimate cases: running straight from a source
+#: checkout (`PYTHONPATH=src`), and any environment where the installed metadata
+#: is stale or shared. The framework's own defaults must never depend on either,
+#: so they are also resolvable by direct import. Leaf adapters continue to come
+#: from entry points only.
+BUILTIN_ADAPTERS: dict[str, dict[str, str]] = {
+    "agents": {"fake": "adlc.adapters.agents.fake:FakeAgentRunner"},
+    "taskstore": {"sqlite": "adlc.adapters.taskstore.sqlite:SqliteTaskStore"},
+    "evals": {"deterministic": "adlc.adapters.evals.deterministic:DeterministicRubricRunner"},
+    "evidence": {
+        "local": "adlc.adapters.evidence.local:LocalEvidenceCollector",
+        "playwright": "adlc.adapters.evidence.playwright:PlaywrightCollector",
+    },
+    "flags": {"flagd-file": "adlc.adapters.flags.flagd_file:FlagdFileProvider"},
+    "telemetry": {"otel-file": "adlc.adapters.telemetry.otel_file:OtelFileTelemetry"},
+    "gate": {
+        "tests": "adlc.adapters.gate.tests:TestsGate",
+        "secrets_local": "adlc.adapters.gate.secrets_local:SecretsLocalGate",
+        "deps_local": "adlc.adapters.gate.deps_local:DepsLocalGate",
+        "evidence_completeness":
+            "adlc.adapters.gate.evidence_completeness:EvidenceCompletenessGate",
+    },
 }
 
 #: Kinds that must NEVER auto-escalate from the spine default.
@@ -153,18 +181,42 @@ def find_repo_root(start: Path | None = None) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def load_adapters(kind: AdapterKind) -> dict[str, type]:
-    """Load all adapters registered under ``adlc.<kind>``.
+def _import_target(target: str) -> type:
+    """Resolve a ``module:attr`` reference."""
+    module_name, _, attr = target.partition(":")
+    module = import_module(module_name)
+    return getattr(module, attr)
 
-    A broken third-party adapter must never crash the spine, so import errors
-    are swallowed and simply make that adapter undiscoverable.
+
+def load_adapters(kind: AdapterKind) -> dict[str, type]:
+    """Load every adapter available for ``kind``.
+
+    Built-ins are resolved by direct import so the spine works from a plain
+    source checkout; leaf adapters come from ``adlc.<kind>`` entry points. A
+    broken third-party adapter must never crash the framework, so import errors
+    simply make that adapter undiscoverable.
     """
     found: dict[str, type] = {}
-    for ep in entry_points(group=f"adlc.{kind}"):
+
+    for name, target in BUILTIN_ADAPTERS.get(kind, {}).items():
+        try:
+            found[name] = _import_target(target)
+        except Exception:  # noqa: BLE001 - a missing optional built-in is not fatal
+            continue
+
+    try:
+        discovered = entry_points(group=f"adlc.{kind}")
+    except Exception:  # noqa: BLE001 - absent/corrupt metadata must not be fatal
+        discovered = ()
+
+    for ep in discovered:
+        if ep.name in found:
+            continue
         try:
             found[ep.name] = ep.load()
         except Exception:  # noqa: BLE001 - a bad leaf must not break the spine
             continue
+
     return found
 
 

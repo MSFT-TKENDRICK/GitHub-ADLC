@@ -7,11 +7,8 @@ resumes from the last completed level barrier instead of redoing merged work.
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
-
-import pytest
 
 from adlc.config import Config
 from adlc.reduce import aggregate_passed, load_run
@@ -23,7 +20,6 @@ from adlc.stages.intake import run_intake, run_qualify
 from adlc.stages.spec import run_spec
 from tests.conformance.conftest import bind_env
 
-
 # -- criterion 11: a clean repo can adopt the framework ---------------------
 
 def test_init_installs_a_thin_pinned_caller(tmp_path: Path) -> None:
@@ -34,7 +30,7 @@ def test_init_installs_a_thin_pinned_caller(tmp_path: Path) -> None:
 
     target = tmp_path / "fresh"
     target.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)  # noqa: S603
+    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)
 
     result = CliRunner().invoke(app, ["init", "--target", str(target), "--ref", "v0"])
     assert result.exit_code == 0, result.output
@@ -61,7 +57,7 @@ def test_init_never_clobbers_existing_ci(tmp_path: Path) -> None:
 
     target = tmp_path / "existing"
     (target / ".github" / "workflows").mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)  # noqa: S603
+    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)
 
     existing = target / ".github" / "workflows" / "ci.yml"
     existing.write_text("name: CI\non: push\njobs: {}\n", encoding="utf-8")

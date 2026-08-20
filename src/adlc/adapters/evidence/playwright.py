@@ -26,7 +26,7 @@ from adlc.ports import ArtifactRef, Run
 
 _SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"}
 _SENSITIVE_QUERY = re.compile(
-    r"([?&](?:access_token|api_key|apikey|token|sig|signature|password)=)[^&#]*", re.I
+    r"([?&](?:access_token|api_key|apikey|token|sig|signature|password)=)[^&#]*", re.IGNORECASE
 )
 _REDACTED = "[REDACTED-BY-ADLC]"
 
@@ -126,10 +126,9 @@ class PlaywrightCollector:
 
         if trace_path.is_file():
             artifacts.append(trace_path)
-        for shot in sorted(out.glob("screenshot-*.png")):
-            artifacts.append(shot)
-        for video in sorted(video_dir.glob("*.webm")) if video_dir.is_dir() else []:
-            artifacts.append(video)
+        artifacts.extend(sorted(out.glob("screenshot-*.png")))
+        if video_dir.is_dir():
+            artifacts.extend(sorted(video_dir.glob("*.webm")))
 
         replay = out / "replay.spec.ts"
         replay.write_text(_replay_script(target_url, variant), encoding="utf-8")

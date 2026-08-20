@@ -19,45 +19,45 @@ from adlc.runs import RunDir, utcnow, write_json
 #: Signals we look for in a brief. Deterministic, explainable, cheap.
 _SIGNALS: dict[str, tuple[re.Pattern[str], int, str]] = {
     "problem": (
-        re.compile(r"\b(problem|issue|pain|broken|fails?|bug|regress)", re.I),
+        re.compile(r"\b(problem|issue|pain|broken|fails?|bug|regress)", re.IGNORECASE),
         20, "states a problem",
     ),
     "outcome": (
-        re.compile(r"\b(so that|in order to|outcome|goal|value|benefit|impact)", re.I),
+        re.compile(r"\b(so that|in order to|outcome|goal|value|benefit|impact)", re.IGNORECASE),
         20, "states a desired outcome",
     ),
     "acceptance": (
-        re.compile(r"\b(acceptance|criteri|given\s+.*\bwhen\b|definition of done|must)", re.I),
+        re.compile(r"\b(acceptance|criteri|given\s+.*\bwhen\b|definition of done|must)", re.IGNORECASE),
         25, "has acceptance criteria",
     ),
     "scope": (
-        re.compile(r"\b(scope|out of scope|non-goal|constraint|limit)", re.I),
+        re.compile(r"\b(scope|out of scope|non-goal|constraint|limit)", re.IGNORECASE),
         15, "bounds the scope",
     ),
     "audience": (
-        re.compile(r"\b(user|customer|persona|developer|operator|admin)", re.I),
+        re.compile(r"\b(user|customer|persona|developer|operator|admin)", re.IGNORECASE),
         10, "identifies an audience",
     ),
     "measurable": (
-        re.compile(r"\b(\d+\s*(ms|s|%|rps|mb|kb)|p9[59]|latency|throughput|score)", re.I),
+        re.compile(r"\b(\d+\s*(ms|s|%|rps|mb|kb)|p9[59]|latency|throughput|score)", re.IGNORECASE),
         10, "includes a measurable target",
     ),
 }
 
 _CATEGORIES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("bug", re.compile(r"\b(bug|defect|broken|regress|crash|error)\b", re.I)),
-    ("security", re.compile(r"\b(security|vuln|cve|exploit|auth|secret)\b", re.I)),
-    ("performance", re.compile(r"\b(perf|latency|slow|throughput|memory|p9[59])\b", re.I)),
-    ("accessibility", re.compile(r"\b(a11y|accessib|screen reader|wcag|contrast)\b", re.I)),
-    ("docs", re.compile(r"\b(docs?|documentation|readme|guide)\b", re.I)),
-    ("infra", re.compile(r"\b(ci|pipeline|deploy|infra|workflow|runner)\b", re.I)),
-    ("feature", re.compile(r"\b(add|new|support|introduce|enable|feature)\b", re.I)),
+    ("bug", re.compile(r"\b(bug|defect|broken|regress|crash|error)\b", re.IGNORECASE)),
+    ("security", re.compile(r"\b(security|vuln|cve|exploit|auth|secret)\b", re.IGNORECASE)),
+    ("performance", re.compile(r"\b(perf|latency|slow|throughput|memory|p9[59])\b", re.IGNORECASE)),
+    ("accessibility", re.compile(r"\b(a11y|accessib|screen reader|wcag|contrast)\b", re.IGNORECASE)),
+    ("docs", re.compile(r"\b(docs?|documentation|readme|guide)\b", re.IGNORECASE)),
+    ("infra", re.compile(r"\b(ci|pipeline|deploy|infra|workflow|runner)\b", re.IGNORECASE)),
+    ("feature", re.compile(r"\b(add|new|support|introduce|enable|feature)\b", re.IGNORECASE)),
 )
 
 
 def brief_from_issue(number: int) -> str:
     """Fetch an issue via `gh` and render it as a brief."""
-    proc = subprocess.run(  # noqa: S603
+    proc = subprocess.run(
         ["gh", "issue", "view", str(number), "--json", "number,title,body,labels,url"],
         capture_output=True, text=True, check=False,
     )

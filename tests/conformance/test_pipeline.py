@@ -9,14 +9,11 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-import pytest
-
 from adlc.config import Config
 from adlc.reduce import aggregate_passed, load_run
 from adlc.runs import RunDir
 from adlc.schemas import is_valid
 from adlc.stages.intake import run_qualify
-
 
 # -- criterion 1 ------------------------------------------------------------
 
@@ -81,7 +78,7 @@ def test_same_level_nodes_actually_ran_concurrently(completed) -> None:
     assert len(level_zero) >= 2
 
     def parse(value: str) -> datetime:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
 
     windows = [(parse(n["started_at"]), parse(n["ended_at"])) for n in level_zero]
     latest_start = max(start for start, _ in windows)

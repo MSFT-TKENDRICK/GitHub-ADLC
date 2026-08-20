@@ -74,7 +74,7 @@ class SecretsLocalGate:
     # -- engines -----------------------------------------------------------
     @staticmethod
     def _gitleaks(root: Path) -> tuple[list[dict], str]:
-        proc = subprocess.run(  # noqa: S603
+        proc = subprocess.run(
             ["gitleaks", "detect", "--no-banner", "--report-format", "json", "--report-path", "-"],
             cwd=str(root), capture_output=True, text=True, check=False,
         )

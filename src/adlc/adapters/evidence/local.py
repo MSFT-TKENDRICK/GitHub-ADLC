@@ -59,7 +59,7 @@ class LocalEvidenceCollector:
                 })
                 continue
             started = time.time()
-            proc = subprocess.run(  # noqa: S602,S603
+            proc = subprocess.run(
                 command, cwd=str(root), shell=True,
                 capture_output=True, text=True, check=False,
             )

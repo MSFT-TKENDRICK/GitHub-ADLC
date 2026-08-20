@@ -115,7 +115,7 @@ class DepsLocalGate:
     # -- engines -----------------------------------------------------------
     @staticmethod
     def _pip_audit(root: Path) -> list[dict]:
-        proc = subprocess.run(  # noqa: S603
+        proc = subprocess.run(
             ["pip-audit", "-f", "json", "--progress-spinner", "off"],
             cwd=str(root), capture_output=True, text=True, check=False,
         )
@@ -135,7 +135,7 @@ class DepsLocalGate:
 
     @staticmethod
     def _npm_audit(root: Path) -> list[dict]:
-        proc = subprocess.run(  # noqa: S603
+        proc = subprocess.run(
             ["npm", "audit", "--json"],
             cwd=str(root), capture_output=True, text=True, check=False,
         )
