@@ -234,6 +234,69 @@ class TestGateResultShape:
         assert isinstance(result["evidence"], list)
         assert result["message"].strip()
 
+    @pytest.mark.parametrize("agt_present", [True, False])
+    def test_validates_against_the_adlc_run_schema(
+        self, monkeypatch, cfg: Config, agt_present: bool
+    ) -> None:
+        """The gate result must satisfy `schemas/adlc-run.schema.json`.
+
+        Both the happy path and the `not_run` path, since a degraded gate still
+        has to reduce into a valid run document.
+        """
+        from adlc.schemas import validate
+
+        monkeypatch.setattr(
+            gate_module.shutil, "which", lambda name: f"/usr/bin/{name}" if agt_present else None
+        )
+        if agt_present:
+            monkeypatch.setattr(
+                gate_module.subprocess,
+                "run",
+                fake_agt({"verify": (0, "", ""), "lint-policy": (0, "", "")}),
+            )
+        result = GovernanceGate().evaluate(RUN, cfg)
+
+        run = {
+            "schemaVersion": "adlc-run/v1",
+            "runId": RUN["runId"],
+            "createdAt": "2026-08-19T00:00:00Z",
+            "repo": "owner/name",
+            "baseSha": "0" * 40,
+            "status": "gated",
+            "profile": "full",
+            "stages": [],
+            "gates": [result],
+            "artifacts": [],
+        }
+        validate("adlc-run", run)
+
+    def test_json_serializable(self, agt_on_path, monkeypatch, cfg: Config) -> None:
+        """`reduce.write_gate` uses json.dumps with no default= fallback."""
+        monkeypatch.setattr(
+            gate_module.subprocess, "run", fake_agt({"verify": (0, "ok", ""), "lint-policy": (0, "", "")})
+        )
+        result = GovernanceGate().evaluate(RUN, cfg)
+        assert json.loads(json.dumps(result))["id"] == "governance"
+
+    def test_evidence_lands_in_the_run_gates_dir(
+        self, agt_on_path, monkeypatch, cfg: Config
+    ) -> None:
+        """Paths are resolved through RunDir, not hand-built."""
+        from adlc.runs import RunDir
+
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            gate_module.subprocess,
+            "run",
+            fake_agt({"verify": (0, "", ""), "lint-policy": (0, "", "")}, calls=calls),
+        )
+        GovernanceGate().evaluate(RUN, cfg)
+
+        rd = RunDir(cfg, RUN["runId"])
+        verify = next(call for call in calls if call[1] == "verify")
+        assert Path(verify[verify.index("--evidence") + 1]).parent == rd.gates_dir
+        assert (rd.gates_dir / "governance.json").is_file()
+
     def test_required_follows_the_profile(self, agt_on_path, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr(
             gate_module.subprocess, "run", fake_agt({"verify": (0, "", ""), "lint-policy": (0, "", "")})
