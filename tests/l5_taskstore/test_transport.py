@@ -187,7 +187,7 @@ def test_empty_and_non_json_responses_decode_to_none() -> None:
 )
 def test_dependency_transport_failure_is_downgraded_to_a_warning(fake_github, failure) -> None:
     """A network blip while mirroring edges must not fail a sync."""
-    from conftest import make_graph
+    from .conftest import make_graph
 
     real_request = fake_github.request
 

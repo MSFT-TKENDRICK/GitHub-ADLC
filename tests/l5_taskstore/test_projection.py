@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import make_graph
+from .conftest import make_graph
 
 from adlc.adapters.taskstore import github as gh
 

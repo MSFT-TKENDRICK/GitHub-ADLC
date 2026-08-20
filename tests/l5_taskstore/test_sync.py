@@ -10,7 +10,7 @@ The two properties that matter most are exercised here:
 from __future__ import annotations
 
 import pytest
-from conftest import FakeGitHub, issue_id_for, issue_number, make_graph
+from .conftest import FakeGitHub, issue_id_for, issue_number, make_graph
 
 from adlc.adapters.taskstore import github as gh
 

@@ -8,7 +8,7 @@ failing task store must never block the graph stage.
 from __future__ import annotations
 
 import pytest
-from conftest import FakeGitHub, issue_number, make_graph
+from .conftest import FakeGitHub, issue_number, make_graph
 
 from adlc.adapters.taskstore import github as gh
 from adlc.adapters.taskstore.sqlite import SqliteTaskStore
