@@ -104,12 +104,29 @@ The same rule covers every other degraded path:
 | Analysis found, but reading alerts fails (e.g. 403 GHAS off) | `not_run` |
 | Transport errors / unexpected exceptions while polling | retried, then `not_run` |
 | Code Quality not enabled in Settings | `not_run` |
-| Code Quality result set truncated and otherwise clean | `not_run` |
+| Alert/finding result set truncated **and otherwise clean** | `not_run` |
+| Alert/finding result set truncated **but a breach was seen** | `fail` (sound regardless) |
+| Dependency review + Dependabot both unreadable | `not_run` |
+| Diff changed no dependencies at all | `pass` — genuinely nothing to audit |
 
 Transport errors are retried rather than raised, because a flaky API is
 indistinguishable from a slow one — and both must end in a timeout, not a silent
 success. `tests/l4_security/test_poll_timeout.py` asserts this property
 explicitly, including that a timeout is `not_run` and never `pass`.
+
+### 2.1 Only pass what was actually verified
+
+This mirrors the discipline in the spine's `deps_local` gate, which carefully
+separates **"no manifests, so nothing to audit" → `pass`** from **"manifests
+exist but no auditor" → `not_run`**. The same split applies here:
+
+* *"This diff changed no dependencies"* is a real `pass` — the check ran and
+  found nothing to flag.
+* *"The alert list came back truncated"* is **not** a pass, even when the part we
+  saw was clean, because a clean sample drawn from a partial result set proves
+  nothing. Both the `security` and `code_quality` gates detect result-set
+  truncation and fail closed. A threshold breach found *within* a truncated
+  sample still fails normally — that conclusion is sound either way.
 
 ---
 
@@ -385,7 +402,24 @@ Every result follows the frozen `GateResult` shape from `adlc.ports` and cites
 `gates/<gate_id>.json` as evidence. `observed` always carries enough to audit the
 verdict without re-running it — for `security`: the analysis id, the matched
 `commit_sha`, counts in both severity vocabularies, the poll attempt count and
-elapsed time, and any transport errors.
+elapsed time, truncation state, and any transport errors.
+
+**These gates never write `run.json`.** They return a `GateResult`; the spine's
+`adlc.stages.gates.run_gates` persists it with `write_gate()`, and only
+`adlc reduce` folds gate files into `run.json`. That is what keeps parallel
+Actions jobs race-free.
+
+Note the division of labour with the executor: `run_gates` calls `detect()`
+itself and turns an unavailable or raising gate into `not_run` before
+`evaluate()` is ever reached, and it re-stamps `required` from the profile. Each
+gate here still re-checks `detect()` inside `evaluate()` so it is also correct
+when called directly, e.g. from a test or another tool.
+
+The `gateResult` schema in `schemas/adlc-run.schema.json` is
+`additionalProperties: false`, so results carry exactly `id`, `required`,
+`status`, `severity`, `observed`, `expected`, `message`, `evidence` and nothing
+else. `tests/l4_security/test_spine_integration.py` validates every reachable
+outcome of all three gates against the real schema.
 
 ---
 
@@ -403,6 +437,11 @@ credentials exported and on a bare CI runner. No test performs any network I/O;
 recorded fixtures in `tests/l4_security/fixtures/` stand in for the REST API, and
 polling runs against an injected fake clock so the timeout tests are instant and
 deterministic.
+
+`test_spine_integration.py` additionally drives all three gates through the real
+`adlc.stages.gates.run_gates` executor to confirm that, with no credentials, they
+degrade to `not_run`, that required + `not_run` fails the aggregate, and that
+every emitted result validates against `schemas/adlc-run.schema.json`.
 
 ---
 

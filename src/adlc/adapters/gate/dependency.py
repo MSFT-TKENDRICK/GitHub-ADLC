@@ -205,6 +205,8 @@ class DependencyReviewGate:
         client = GitHubRestClient(token, repo)
         summary: dict[str, Any] | None = None
         notes: list[str] = []
+        truncated = False
+        dependency_changes = 0
 
         if base_sha and head_sha:
             basehead = urllib.parse.quote(f"{base_sha}...{head_sha}", safe=".")
@@ -212,6 +214,7 @@ class DependencyReviewGate:
                 changes = client.get_list(
                     f"/repos/{repo}/dependency-graph/compare/{basehead}", max_pages=1
                 )
+                dependency_changes = len(changes)
                 summary = summarize_dependency_review(changes)
             except GitHubApiError as exc:
                 notes.append(f"dependency review unavailable ({exc})")
@@ -220,7 +223,7 @@ class DependencyReviewGate:
 
         if summary is None and allow_fallback:
             try:
-                alerts = client.get_list(
+                alerts, truncated = client.get_list_paged(
                     f"/repos/{repo}/dependabot/alerts", {"state": "open"}, max_pages=5
                 )
                 summary = summarize_dependabot_alerts(alerts)
@@ -243,7 +246,14 @@ class DependencyReviewGate:
             )
 
         violations = evaluate_threshold(summary["bySeverity"], max_by_severity)
-        observed = {**summary, "notes": notes, "baseSha": base_sha, "headSha": head_sha}
+        observed = {
+            **summary,
+            "notes": notes,
+            "baseSha": base_sha,
+            "headSha": head_sha,
+            "dependencyChanges": dependency_changes,
+            "truncated": truncated,
+        }
         expected["source"] = summary["source"]
         if violations:
             breach = ", ".join(
@@ -263,6 +273,26 @@ class DependencyReviewGate:
                 ),
                 "evidence": [f"gates/{self.id}.json"],
             }
+        if truncated:
+            return not_run_result(
+                self.id,
+                cfg,
+                "Dependabot alerts were truncated before the threshold could be proven clean, "
+                "so only part of the alert set was verified.",
+                observed=observed,
+                expected=expected,
+                severity="medium",
+            )
+        # "This diff changed no dependencies" is genuinely nothing to audit, and
+        # is a real pass -- distinct from "we could not audit", which fails
+        # closed above. Same discipline as the spine's deps_local gate.
+        if summary["source"] == "dependency-review" and dependency_changes == 0:
+            message = "no dependency changes between baseSha and headSha - nothing to audit"
+        else:
+            message = (
+                f"{summary['source']}: {summary['total']} advisory(ies), none exceeding "
+                f"{max_by_severity}."
+            )
         return {
             "id": self.id,
             "required": _is_required(cfg, self.id),
@@ -270,9 +300,6 @@ class DependencyReviewGate:
             "severity": "low",
             "observed": observed,
             "expected": expected,
-            "message": (
-                f"{summary['source']}: {summary['total']} advisory(ies), none exceeding "
-                f"{max_by_severity}."
-            ),
+            "message": message,
             "evidence": [f"gates/{self.id}.json"],
         }

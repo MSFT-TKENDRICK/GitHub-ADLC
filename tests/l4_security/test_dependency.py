@@ -196,6 +196,51 @@ def test_missing_shas_fall_back_with_a_note(
     assert any("baseSha" in note for note in result["observed"]["notes"])
 
 
+def test_no_dependency_changes_is_a_real_pass(
+    cfg: Any, run: Any, with_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'Nothing to audit' is a genuine pass, phrased like the spine's deps_local."""
+    client = FakeClient(routes={"dependency-graph/compare": []})
+    monkeypatch.setattr("adlc.adapters.gate.dependency.GitHubRestClient", client)
+
+    result = DependencyReviewGate().evaluate(run, cfg)
+
+    assert result["status"] == "pass"
+    assert result["observed"]["dependencyChanges"] == 0
+    assert "nothing to audit" in result["message"]
+
+
+def test_dependency_changes_with_no_advisories_says_so(
+    cfg: Any, run: Any, dep: dict[str, Any], with_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clean *audited* changes must read differently from 'nothing to audit'."""
+    added_clean = [c for c in dep["dependency_review"] if c["name"] == "attrs"]
+    client = FakeClient(routes={"dependency-graph/compare": added_clean})
+    monkeypatch.setattr("adlc.adapters.gate.dependency.GitHubRestClient", client)
+
+    result = DependencyReviewGate().evaluate(run, cfg)
+
+    assert result["status"] == "pass"
+    assert result["observed"]["dependencyChanges"] == 1
+    assert "nothing to audit" not in result["message"]
+
+
+def test_truncated_dependabot_fallback_is_not_run(
+    cfg: Any, run: Any, with_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = FakeClient(
+        routes={"dependabot/alerts": []},
+        errors={"dependency-graph/compare": GitHubApiError("HTTP 403", status=403)},
+        truncated=True,
+    )
+    monkeypatch.setattr("adlc.adapters.gate.dependency.GitHubRestClient", client)
+
+    result = DependencyReviewGate().evaluate(run, cfg)
+
+    assert result["status"] == "not_run"
+    assert result["status"] != "pass"
+
+
 def test_configurable_threshold(
     cfg: Any, run: Any, dep: dict[str, Any], with_credentials: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

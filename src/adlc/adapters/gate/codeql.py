@@ -238,12 +238,32 @@ class GitHubRestClient:
         per_page: int = DEFAULT_PER_PAGE,
     ) -> list[dict[str, Any]]:
         """Page through a list endpoint. Returns ``[]`` for an empty resource."""
+        items, _ = self.get_list_paged(path, params, max_pages=max_pages, per_page=per_page)
+        return items
+
+    def get_list_paged(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        per_page: int = DEFAULT_PER_PAGE,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Page through a list endpoint, reporting whether the page cap was hit.
+
+        The second element is ``True`` when pagination stopped because
+        ``max_pages`` was exhausted while pages were still coming back full —
+        i.e. the caller is holding a **partial** result set. Callers that would
+        otherwise report ``pass`` must treat that as unverified and fail closed.
+        """
         out: list[dict[str, Any]] = []
+        truncated = True
         for page in range(1, max_pages + 1):
             merged = dict(params or {})
             merged.update({"per_page": per_page, "page": page})
             payload = self._request(path, merged)
             if not payload:
+                truncated = False
                 break
             if not isinstance(payload, list):
                 raise GitHubApiError(
@@ -251,8 +271,9 @@ class GitHubRestClient:
                 )
             out.extend(item for item in payload if isinstance(item, dict))
             if len(payload) < per_page:
+                truncated = False
                 break
-        return out
+        return out, truncated
 
     # -- code scanning ----------------------------------------------------
     def list_analyses(
@@ -284,7 +305,21 @@ class GitHubRestClient:
         max_pages: int = DEFAULT_MAX_PAGES,
     ) -> list[dict[str, Any]]:
         """``GET /repos/{o}/{r}/code-scanning/alerts``."""
-        return self.get_list(
+        return self.list_alerts_paged(
+            ref=ref, state=state, tool_name=tool_name, severity=severity, max_pages=max_pages
+        )[0]
+
+    def list_alerts_paged(
+        self,
+        *,
+        ref: str | None = None,
+        state: str | None = "open",
+        tool_name: str | None = None,
+        severity: str | None = None,
+        max_pages: int = DEFAULT_MAX_PAGES,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """As :meth:`list_alerts`, but also reports result-set truncation."""
+        return self.get_list_paged(
             f"/repos/{self.repo}/code-scanning/alerts",
             {"ref": ref, "state": state, "tool_name": tool_name, "severity": severity},
             max_pages=max_pages,
@@ -651,7 +686,9 @@ class CodeQlGate:
         analysis = poll.analysis or {}
         analysis_ref = str(analysis.get("ref") or ref or "") or None
         try:
-            alerts = client.list_alerts(ref=analysis_ref, state="open", tool_name=tool_name)
+            alerts, truncated = client.list_alerts_paged(
+                ref=analysis_ref, state="open", tool_name=tool_name
+            )
         except GitHubApiError as exc:
             return not_run_result(
                 self.id,
@@ -674,6 +711,7 @@ class CodeQlGate:
             "analysisKey": analysis.get("analysis_key"),
             "attempts": poll.attempts,
             "elapsedSeconds": round(poll.elapsed, 1),
+            "truncated": truncated,
             "violations": violations,
         }
         if violations:
@@ -696,6 +734,18 @@ class CodeQlGate:
                 ),
                 "evidence": [f"gates/{self.id}.json"],
             }
+        if truncated:
+            # A clean sample drawn from a partial result set proves nothing.
+            # Same discipline as deps_local: only pass what was actually checked.
+            return not_run_result(
+                self.id,
+                cfg,
+                f"CodeQL alerts for {analysis_ref} were truncated at {len(alerts)} results "
+                "before the threshold could be proven clean, so only part of the alert set "
+                "was verified. Triage the existing alerts or narrow the query.",
+                observed=observed,
+                expected=expected,
+            )
         return {
             "id": self.id,
             "required": _is_required(cfg, self.id),

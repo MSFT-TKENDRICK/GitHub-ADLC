@@ -141,6 +141,37 @@ def test_gate_reads_alerts_scoped_to_the_matched_analysis_ref(
     assert alert_calls[0][1]["state"] == "open"
 
 
+def test_truncated_alert_set_is_not_run_never_pass(
+    cfg: Any, run: Any, with_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean sample from a partial result set proves nothing — fail closed."""
+    fixture = load_fixture("code_scanning_alerts.json")
+    analyses = load_fixture("code_scanning_analyses.json")["analyses"]
+    client = FakeClient(analyses=analyses, alerts=fixture["clean"], truncated=True)
+    monkeypatch.setattr("adlc.adapters.gate.codeql.GitHubRestClient", client)
+
+    result = CodeQlGate().evaluate(run, cfg)
+
+    assert result["status"] == "not_run"
+    assert result["status"] != "pass"
+    assert result["observed"]["truncated"] is True
+    assert "truncated" in result["message"]
+
+
+def test_truncation_still_fails_on_a_real_breach(
+    cfg: Any, run: Any, with_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A breach found inside the sample is sound regardless of truncation."""
+    fixture = load_fixture("code_scanning_alerts.json")
+    analyses = load_fixture("code_scanning_analyses.json")["analyses"]
+    client = FakeClient(analyses=analyses, alerts=fixture["breaching"], truncated=True)
+    monkeypatch.setattr("adlc.adapters.gate.codeql.GitHubRestClient", client)
+
+    result = CodeQlGate().evaluate(run, cfg)
+
+    assert result["status"] == "fail"
+
+
 def test_configurable_threshold_from_config(
     cfg: Any, run: Any, with_credentials: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

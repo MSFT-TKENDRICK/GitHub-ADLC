@@ -238,7 +238,7 @@ def test_codeql_gate_alert_read_failure_is_not_run(
     analyses = load_fixture("code_scanning_analyses.json")["analyses"]
 
     class ExplodingClient(FakeClient):
-        def list_alerts(self, **kwargs: Any) -> list[dict[str, Any]]:
+        def list_alerts_paged(self, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
             raise GitHubApiError("HTTP 403: GHAS not enabled", status=403)
 
     monkeypatch.setattr(

@@ -121,11 +121,13 @@ class FakeClient:
         alerts: list[dict[str, Any]] | None = None,
         routes: dict[str, Any] | None = None,
         errors: dict[str, Exception] | None = None,
+        truncated: bool = False,
     ) -> None:
         self.analyses = analyses if analyses is not None else []
         self.alerts = alerts if alerts is not None else []
         self.routes = routes or {}
         self.errors = errors or {}
+        self.truncated = truncated
         self.calls: list[tuple[str, Any]] = []
 
     # -- constructed by the gate as GitHubRestClient(token, repo) ----------
@@ -146,14 +148,22 @@ class FakeClient:
         return self._resolve(path)
 
     def get_list(self, path: str, params: Any = None, **kwargs: Any) -> Any:
+        return self.get_list_paged(path, params, **kwargs)[0]
+
+    def get_list_paged(
+        self, path: str, params: Any = None, **kwargs: Any
+    ) -> tuple[list[dict[str, Any]], bool]:
         self.calls.append((path, params))
         result = self._resolve(path)
-        return result if isinstance(result, list) else []
+        return (result if isinstance(result, list) else []), self.truncated
 
     def list_analyses(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.calls.append(("code-scanning/analyses", kwargs))
         return list(self.analyses)
 
     def list_alerts(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return self.list_alerts_paged(**kwargs)[0]
+
+    def list_alerts_paged(self, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
         self.calls.append(("code-scanning/alerts", kwargs))
-        return list(self.alerts)
+        return list(self.alerts), self.truncated
