@@ -1,0 +1,449 @@
+# Reviewer squads (L8)
+
+> GitHub Agentic Workflows (`gh-aw`) + two `GateRunner`s.
+> Sources: `.github/workflows/adlc-*.md` · compiled: `.github/workflows/adlc-*.lock.yml`
+> Members: `.github/agents/*.agent.md` · config: `templates/.adlc/squads.yaml`
+> Gates: `src/adlc/adapters/gate/{adversarial_review,evidence_review}.py`
+
+This workstream adds the two *judgement* seams of the ADLC — an adversarial code
+review squad and an evidence review squad — plus the two outer-loop workflows
+that feed the pipeline (`autoresearch`, `intake`).
+
+Everything here is a **pure addition**. Both gates are `required_by_default =
+False`, both `detect()` cheaply and honestly, and both report `not_run` with a
+specific reason when they have nothing to score. Nothing in this leaf can break
+the credential-free conformance suite.
+
+---
+
+## 1. Toolchain
+
+Workflows are **Markdown files with YAML frontmatter** in `.github/workflows/`,
+compiled by [`github/gh-aw`](https://github.com/github/gh-aw) into hardened
+GitHub Actions files:
+
+```bash
+gh extension install github/gh-aw     # note: moved from githubnext/gh-aw
+gh aw compile                         # .md -> .lock.yml
+```
+
+**Both the `.md` source and the generated `.lock.yml` are committed.** The lock
+file is what GitHub actually runs; the Markdown is what humans review.
+
+Verified against **gh-aw v0.86.2** and the frontmatter schema at
+<https://github.github.com/gh-aw/>. Corrections to older guidance you may find
+elsewhere, all confirmed against `pkg/parser/schemas/main_workflow_schema.json`
+at the pinned tag:
+
+| Stale | Current |
+|---|---|
+| `tools: { edit-file: false }` | the key is **`edit`** (boolean) |
+| `tools: { bash: { allowed: [...] } }` | `bash` takes a **bare array**: `bash: ["cat *", "jq *"]` |
+| `tools: { web-fetch: false }` | `web-fetch`/`web-search` accept **null or object only** — *omit* them to disable |
+| `strict: true` must be set | `strict` already **defaults to `true`**; we set it explicitly anyway |
+| `engine: { model: ... }`, `engine: { max-turns: ... }` | both **deprecated** — use top-level `model:` / `max-turns:` |
+| `github: { mode: remote }` | still valid; `gh-proxy` is now the preferred mode |
+
+`github.toolsets` is drawn from a fixed enum (`issues`, `repos`,
+`pull_requests`, `actions`, `code_security`, …). That enum is the whole basis of
+the evidence squad's sandbox — see §4.
+
+### Two things the spine should own
+
+1. **`.gitattributes` and `.github/aw/actions-lock.json`.** `gh aw compile`
+   creates both: the first adds
+   `.github/workflows/*.lock.yml linguist-generated=true`, which collapses the
+   ~110 KB lock diffs in review; the second is a compile-time cache of resolved
+   action SHAs. Both sit outside this workstream's exclusive paths, so they are
+   deliberately **not** committed here. Neither is needed at runtime — the
+   `.lock.yml` files already carry every action pinned to a full SHA inline. The
+   spine should adopt both, and add a `.gitignore` covering `__pycache__/`.
+2. **The `evidence-review-pack` artifact.** `adlc-evidence-review.md` downloads
+   an artifact named `evidence-review-pack` containing
+   `evidence-review-pack.json` from the most recent completed workflow run named
+   `ADLC` for the PR's head SHA. That is the contract; see §4.2.
+
+---
+
+## 2. The safe-outputs security model
+
+This is the whole security story, and it is worth stating plainly because it is
+what makes it acceptable to point a language model at a repository at all.
+
+```mermaid
+flowchart LR
+    T["event<br/>issue · PR · schedule"] --> A
+    subgraph AJ["agent job — READ-ONLY"]
+        A["agentic run<br/>contents: read<br/>no write scope at all"]
+    end
+    A -->|"buffered as an artifact,<br/>not an API call"| TD["AI threat detection"]
+    TD --> SO
+    subgraph SOJ["safe-outputs jobs — one narrow scope each"]
+        SO["create-issue · add-comment<br/>add-labels"]
+    end
+    SO --> GH[("GitHub")]
+```
+
+The agent job **never** holds a write permission. When the agent wants to create
+an issue or post a comment, it calls an MCP tool that *buffers a structured
+request* into an artifact. A separate job — with exactly one narrow write scope,
+after an AI threat-detection pass — performs the actual API call.
+
+Consequences that matter:
+
+- A prompt injection that convinces the agent to "push a commit" achieves
+  nothing, because the token in that job cannot push.
+- Every write is **capped and allowlisted at compile time**: `max: 1` issue,
+  `max: 1` comment, `allowed: [...]` labels. A compromised agent cannot spam.
+- Every write is **auditable**: the buffered request survives as an artifact.
+
+Every workflow in this leaf declares `permissions:` with `read` values only, and
+`tests/l8_squads/test_workflows.py::TestEveryWorkflow::test_agent_job_holds_no_write_permission`
+fails the build if anyone ever changes that.
+
+### Cost caps
+
+Every workflow sets all three. `test_every_cost_cap_is_set` enforces it.
+
+| Workflow | `timeout-minutes` | `max-turns` | `max-ai-credits` |
+|---|---|---|---|
+| `adlc-autoresearch` | 20 | 40 | 400 |
+| `adlc-intake` | 15 | 25 | 250 |
+| `adlc-adversarial` | 30 | 90 | 900 |
+| `adlc-evidence-review` | 20 | 30 | 300 |
+
+`network:` is an explicit firewall allowlist on all four (`allowed: [defaults]`),
+never a bare `*` — which `strict: true` rejects anyway.
+
+---
+
+## 3. The workflows
+
+### 3.1 `adlc-autoresearch.md` — propose the next run
+
+`schedule: weekly on monday` + `workflow_dispatch`. Reasons over three inputs:
+repository knowledge (including `docs/decisions/` ADRs), past run outcomes in
+`.adlc/runs/*/run.json`, and historical human feedback (closed `adlc:brief`
+issues and the review comments on their PRs).
+
+Emits **at most one** issue:
+
+```yaml
+safe-outputs:
+  create-issue:
+    max: 1
+    title-prefix: "[adlc:brief] "
+    labels: [adlc:brief, adlc:autoresearch]
+    close-older-issues: true
+    close-older-key: adlc-autoresearch-brief
+    deduplicate-by-title: 2      # tolerate two-character title drift
+```
+
+The prompt is explicit that **proposing nothing is a successful cycle**, and
+lists hard negative signals (duplicates, "add more tests", anything touching the
+`PROTECTED_PATHS` from `adlc.ports`). An outer loop that manufactures work to
+look busy is worse than no outer loop.
+
+### 3.2 `adlc-intake.md` — qualify and categorise
+
+Triggers on `issues: [opened, labeled, reopened]`, filtered by
+`if: contains(github.event.issue.labels.*.name, 'adlc:brief')`.
+
+Scores the brief out of 100 across five dimensions (problem is real, outcome is
+falsifiable, scope is bounded, ACs are checkable, evidence is producible)
+against `qualify.minScore` from `.adlc/config.yaml`, then posts one comment and
+applies allowlisted labels (`adlc:qualified` / `adlc:needs-detail` /
+`adlc:rejected`, a `kind`, and `adlc:route-inner` / `adlc:route-outer`).
+
+> **Known GitHub limitation.** Issues created by `autoresearch` through
+> safe-outputs are authored by `github-actions[bot]` using `GITHUB_TOKEN`, and
+> GitHub deliberately does **not** re-trigger workflows from `GITHUB_TOKEN`
+> events. So autoresearch → intake does not chain automatically. Either label
+> the issue by hand, or give `create-issue` a `github-app:` credential. This is
+> a platform behaviour, not a bug in these workflows.
+
+### 3.3 `adlc-adversarial.md` — the adversarial code squad
+
+`pull_request: [opened, synchronize, reopened, ready_for_review]`. Checks out the
+repo (it *is* the code reviewer), establishes the diff against the merge base,
+loads `squads.adversarial_review.members[]` from `.adlc/squads.yaml`, and runs
+each member's `.github/agents/*.agent.md` profile as a separate, independent
+pass.
+
+Each pass writes `$ADLC_REVIEW_DIR/adversarial_review.<member-id>.md`. A
+deterministic `post-steps` uploads them as the `adlc-reviews-adversarial`
+artifact, which the spine drops into `runs/<run>/reviews/` for the gate.
+
+`edit: true` is set here — and *only* here — because the squad has to stage its
+verdict files. The job still holds `contents: read`, nothing is pushed, and the
+only channels off the runner are safe-outputs and that artifact.
+
+### 3.4 `adlc-evidence-review.md` — the evidence squad
+
+See §4. This is the one that matters.
+
+---
+
+## 4. Why the evidence squad's sandbox is structural, not prompt-based
+
+### 4.1 The argument
+
+You can write "do not read the source code" in a system prompt. That is a
+*request to a language model*. It is not a control. It can be argued with,
+confused, out-competed by a later instruction, or subverted by content the model
+reads along the way — and you will not find out, because a model that ignored
+the instruction produces output that looks exactly like a model that obeyed it.
+
+The evidence squad's value depends entirely on it **not** having seen the
+implementation. A reviewer who has read the diff will rationalise the evidence
+to match the code; that is what reviewers do. So the isolation cannot be a
+promise. It has to be a property of the job.
+
+So: **the reviewer does not read the source because the source is not there.**
+
+```yaml
+checkout: false           # no source tree on the runner, at all
+tools:
+  github:
+    mode: remote
+    toolsets: [issues]    # no `repos` toolset => no file-read tool
+    read-only: true
+  bash: ["cat *", "jq *", "head *", "wc *"]
+  edit: false
+# web-fetch / web-search are opt-in and simply not requested
+```
+
+Each line is a distinct control, in descending order of load:
+
+| Control | What it removes | Verified by |
+|---|---|---|
+| `checkout: false` | The entire source tree. The compiled `agent` job contains **zero** `actions/checkout` steps. `cat` has nothing to read; `grep` has nothing to search. | `test_compiled_agent_job_contains_no_checkout_step` |
+| `toolsets: [issues]` | The MCP path back to the code. Without `repos` there is no `get_file_contents`, no blob read, no tree listing. The compiled job starts the server with `"X-MCP-Toolsets": "issues"`. | `test_compiled_mcp_server_is_scoped_to_issues` |
+| `read-only: true` | Writes even within `issues`. | `test_github_access_is_read_only_issues` |
+| no `web-fetch` / `web-search` | HTTP as a way to re-fetch the repo. Second layer: the `network:` firewall allowlist. | `test_no_web_access_is_requested` |
+| trivial `bash` | `git`, `curl`, `wget`, `find`, `python`, `node`, `gh` — every command that could reach code or exfiltrate. | `test_compiled_shell_allowlist_excludes_every_egress_command` |
+| one `add-comment`, `max: 1` | Every other write path. No `upload-artifact`, no `create-pull-request`. | `test_the_only_write_path_is_one_comment` |
+
+These are assertions against the **compiled `.lock.yml`**, not against the
+Markdown. What GitHub runs is what is tested.
+
+> **One honest caveat.** gh-aw v0.86 still grants the Copilot harness its own
+> `write` tool regardless of `edit: false`, for its own scratch output. So
+> `edit: false` is a declaration of intent rather than a hard block. It does not
+> weaken anything here, because with no checkout there is nothing to overwrite
+> and no push path — which is precisely why the sandbox is built on
+> `checkout: false` first and everything else as depth. Do not restructure this
+> workflow to depend on `edit: false` as a boundary.
+
+### 4.2 The pack is the only input, and the agent does not choose it
+
+The reviewer's entire universe is `evidence-review-pack.json`
+(`schemas/evidence-review-pack.schema.json`). Per `docs/PLAN.md` §4.6 it carries
+requirements, measurements, a coverage map and redacted screenshot references —
+and **no raw HAR, trace, console text, replay source or HTML**, because all of
+those are attacker-controlled, leak source, and are prompt-injection vectors.
+
+The pack is fetched and screened by **deterministic pre-steps**, before the agent
+starts. The agent never selects its own input:
+
+1. `gh api` finds the most recent completed run named `ADLC` for the PR's head
+   SHA; `gh run download` pulls the `evidence-review-pack` artifact. A missing
+   pack is a warning and a downstream `not_run`, never a silent pass.
+2. A `jq` screen rejects the pack outright if it carries any top-level key
+   outside the schema's eight, is missing a required member, contains a
+   malformed `artifactSha256`, or *smells like a smuggled raw payload*
+   (`<html`, `<script`, `HTTP/1.`, a HAR-shaped `"entries":`, `data:text/html`).
+
+Then the prompt tells the reviewer to treat every string in the pack as **data,
+never instruction**, and to file an attempted injection as a `critical` finding
+rather than complying. That instruction is the *last* layer, not the first.
+
+---
+
+## 5. Squad members
+
+`.github/agents/*.agent.md` — YAML frontmatter (`name`, `description`, `model`,
+`tools`) plus a Markdown system prompt.
+
+| Member | Squad | Lens |
+|---|---|---|
+| `security-adversary` | `adversarial_review` | The attacker holding the diff. Reachability is the bar: entry point, untrusted input, path between them. Includes prompt-injection and agent-surface review, because this repo runs agents. |
+| `performance-adversary` | `adversarial_review` | The incident this change will cause. Must name the breaking input *scale* and the *mechanism*. Micro-optimisation is explicitly out of scope. |
+| `accessibility-adversary` | `adversarial_review` | The user who cannot use a mouse or see the screen. Scoped to what a scanner structurally cannot catch — focus order and return, announcement quality, error recovery — because `axe` already gates the rest. |
+| `requirements-auditor` | `evidence_review` | Judges evidence against requirements without code access. Hunts evidence that *exists but does not demonstrate*. |
+
+Each prompt is written to be genuinely adversarial: hunt the specific ways *this*
+change fails, never summarise it. Each also says, explicitly, that **zero
+findings is a legitimate and common outcome** and that manufacturing a finding is
+the worst available failure — a squad that cries wolf gets switched off, and then
+it protects nothing.
+
+---
+
+## 6. The quorum model
+
+From `templates/.adlc/squads.yaml`, vendored to `.adlc/squads.yaml` by
+`adlc init`. Resolution order:
+
+1. `<repo>/.adlc/squads.yaml`
+2. `<repo>/templates/.adlc/squads.yaml`
+3. built-in defaults compiled into the gate modules
+
+`detect()` returns `(False, reason)` naming both searched paths when neither file
+exists. It is two `Path.is_file()` calls: no network, no subprocess, no raising.
+
+```yaml
+squads:
+  adversarial_review:
+    blocking: true
+    quorum: "2/3"
+    citation: file-line
+    members: [security-adversary, performance-adversary, accessibility-adversary]
+  evidence_review:
+    blocking: false          # advisory; the deterministic check is what blocks
+    quorum: "1/1"
+    citation: artifact-sha256
+    members: [requirements-auditor]
+```
+
+**A member casts a blocking vote only when it both declared `verdict: block`
+*and* filed at least one *cited* finding at a blocking severity** (`high` or
+`critical` by default). A `block` verdict backed by nothing checkable is
+downgraded to a pass and recorded in `observed.unsupportedBlockVerdicts`.
+
+`quorum` resolution (`quorum_threshold`):
+
+| Expression | Members | Threshold | Why |
+|---|---|---|---|
+| `"2/3"` | 3 | 2 | denominator matches — read literally |
+| `"2/3"` | 6 | 4 | scaled: adding members must not weaken the squad |
+| `2` | 3 | 2 | bare integer |
+| `"all"` | 4 | 4 | |
+| `"any"` | 4 | 1 | |
+| `"9/3"` | 3 | 3 | clamped — never unreachable |
+| `0`, `-4` | 3 | 1 | clamped — a squad always needs a vote |
+| `"banana"`, `"2/0"` | 3 | 3 | unparseable fails **safe**, to unanimous |
+
+A member that filed no verdict is an **abstention**, never a pass
+(`abstainCountsAsPass: false`), and is reported in `observed.membersMissing`.
+
+---
+
+## 7. Citation-or-discard
+
+> **A finding that cites no evidence is discarded before the quorum is counted.**
+
+This is not a style rule. An uncited LLM claim is unfalsifiable: no human can
+check it, so it must never be able to block a merge. The two squads use
+different citation shapes because they review different things:
+
+**`adversarial_review` — `file-line`.** `path/to/file.ext:L88-L104` or
+`path/to/file.ext:L88`. A *bare path is not a citation*: "this file is bad" is
+not evidence, and accepting it would make the rule cosmetic.
+
+**`evidence_review` — `artifact-sha256`.** A bare 64-hex digest that **actually
+appears in the pack**. A hallucinated digest is treated as worse than no
+citation — it looks checkable — so a finding survives only if at least one of its
+cited hashes is genuinely in the pack. Fabrications are recorded in
+`observed.advisory.fabricatedCitations`.
+
+Discarded findings are never hidden; they are listed in
+`observed.discardedFindings` with the member, severity, title and reason, and
+surfaced in `report.html`. The squad's own PR comment shows the
+`cited / filed` ratio, so a member that habitually files uncited noise is
+visible.
+
+---
+
+## 8. The gates
+
+Both are registered in `pyproject.toml` and implement `adlc.ports.GateRunner`.
+`required_by_default = False`; the `full` profile marks both required.
+
+### 8.1 `AdversarialReviewGate` (`id="adversarial_review"`)
+
+Reads `runs/<run>/reviews/*.md`, keeps the files whose frontmatter names its
+squad, applies citation-or-discard, then counts against the quorum.
+
+| Situation | Status |
+|---|---|
+| no verdict files (or no `reviews/` dir, or no `runId`) | `not_run` + a reason naming the directory |
+| quorum met, squad `blocking: true` | **`fail`**, severity `high` |
+| quorum met, squad `blocking: false` | `pass`, severity `medium`, message says "non-blocking" |
+| quorum not met | `pass` |
+
+A malformed verdict file is recorded in `observed.parseErrors` and the gate
+carries on. An invalid `verdict:` value degrades to `abstain`. Neither raises.
+
+### 8.2 `EvidenceReviewGate` (`id="evidence_review"`)
+
+Two halves, and **only one of them can fail a build**.
+
+```mermaid
+flowchart TB
+    P{{"evidence-review-pack.json"}} --> C
+    R{{"run.json artifacts[]"}} --> C
+    C["deterministic coverage check<br/>no LLM involved"]
+    C -->|"incomplete"| F["FAIL · severity high"]
+    C -->|"complete"| L["advisory squad verdicts<br/>reviews/evidence_review.*.md"]
+    L -->|"no verdicts"| P1["PASS · advisory not_run"]
+    L -->|"quorum met, cited"| W["PASS · WARN · severity medium"]
+    L -->|"quorum not met"| P2["PASS"]
+```
+
+**The blocking half** (`check_coverage`) is deterministic and offline. Every
+requirement must have at least `minArtifactsPerRequirement` artifact hashes that
+are:
+
+- listed in a `coverage[]` entry with `present: true`, **and**
+- well-formed 64-hex, **and**
+- **hash-verified** — the digest must match a `sha256` actually recorded in
+  `run.json`'s `artifacts[]`. The pack is not self-certifying; a pack claiming
+  evidence the run never produced fails.
+
+Plus: the pack must declare a `collector`, and its `candidateSha` must equal the
+run's `headSha` — a pack from a previous commit is stale, not evidence. Orphan
+coverage rows, malformed digests, and an **empty requirements list** all fail.
+(Verifying nothing must never look like verifying everything.)
+
+**The advisory half** is capped by construction. The LLM squad can downgrade a
+passing coverage result to a warning — `status` stays `pass`, `severity` rises to
+`medium`, and the message is prefixed `WARN:`. It can do nothing else:
+
+- it can never turn green red, because an LLM judgement is not a fact;
+- it can never turn red green, because coverage is evaluated **first** and
+  independently, and the gate returns before the squad is even read.
+
+`GateStatus` is `pass | fail | not_run`, so "warn" is carried in
+`severity` + the `WARN:` message prefix + `observed.advisory`, not as a fourth
+status. That keeps the aggregator's fail-closed rule intact.
+
+### 8.3 Fail-closed
+
+Per `docs/PLAN.md` §4.2, **`required: true` + `not_run` ⇒ the aggregate fails.**
+Both gates therefore return `not_run` with a specific, human-readable reason
+rather than inventing a `pass`, in every degraded case: no squad config, no
+verdict files, no pack, unparseable pack, no `runId`. Neither gate ever returns
+`pass` for something it did not actually verify.
+
+---
+
+## 9. Tests
+
+```bash
+python -m pytest tests/l8_squads -q     # 163 tests, no credentials, no network
+ruff check src/adlc/adapters/gate/
+```
+
+| File | Covers |
+|---|---|
+| `test_quorum.py` | quorum arithmetic including every degenerate input; blocking vs non-blocking squads; missing members; malformed and invalid verdicts |
+| `test_citations.py` | citation regex shape for both kinds; uncited findings discarded; one cited finding rescuing a vote; fabricated hashes |
+| `test_coverage.py` | deterministic coverage in isolation and through the gate; that an LLM `pass` cannot rescue missing coverage and an LLM `warn` cannot fail a build |
+| `test_detect.py` | `detect()` contract, `GateRunner` protocol conformance, `GateResult` shape, every `not_run` degrade path, profile-driven `required` |
+| `test_workflows.py` | frontmatter of all four workflows; cost caps; read-only permissions; **the evidence sandbox asserted against the compiled `.lock.yml`**; agent profiles; `squads.yaml` |
+
+`tests/l8_squads/conftest.py` prepends this worktree's `src/` to `sys.path` so
+the suite tests this checkout rather than an editable install elsewhere, and
+prepends its own directory so `import l8_fixtures` cannot collide with another
+workstream's `conftest`.
