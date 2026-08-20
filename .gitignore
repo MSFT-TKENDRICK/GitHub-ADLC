@@ -11,3 +11,11 @@ __pycache__/
 .venv/
 .pytest_cache/
 
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+
+# Scratch worktrees and local venvs used during development
+adlc-diag-*/
+

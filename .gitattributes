@@ -1,0 +1,51 @@
+# Line-ending policy.
+#
+# This is load-bearing, not cosmetic. ADLC's executor produces patches with
+# `git diff` in an isolated worktree and applies them at a level barrier. On a
+# machine with `core.autocrlf=true` (the Windows default), git rewrites line
+# endings between the worktree, the index and the patch, and `git apply` then
+# fails with the famously unhelpful `corrupt patch at line N`. That bug cost a
+# real debugging cycle during this project's own construction.
+#
+# The executor defends itself directly -- it normalises patch bytes and runs git
+# with `core.autocrlf=false` -- but normalising here as well means the repository
+# never stores a CRLF in the first place, so contributors on any platform
+# produce byte-identical diffs.
+
+# Normalise everything git detects as text; store LF in the repository.
+* text=auto eol=lf
+
+# Files that MUST be LF regardless of platform, because something executes or
+# parses them where a CR is a syntax error or an invisible argument.
+*.sh            text eol=lf
+*.py            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+*.toml          text eol=lf
+*.feature       text eol=lf
+*.mmd           text eol=lf
+*.patch         -text
+*.diff          -text
+
+# Binary evidence artifacts: never touch these.
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.webm          binary
+*.mp4           binary
+*.zip           binary
+*.gz            binary
+*.pdf           binary
+*.woff          binary
+*.woff2         binary
+
+# Generated, but committed on purpose: gh-aw compiles `.md` workflows into
+# hardened `.lock.yml` Actions files and both are required at runtime. Mark them
+# so they collapse in diffs without being excluded from review.
+*.lock.yml      linguist-generated=true
+
+.github/workflows/*.lock.yml linguist-generated=true
