@@ -103,6 +103,36 @@ def test_every_artifact_hash_verifies(completed) -> None:
         assert sha256_file(path) == artifact["sha256"], artifact["path"]
 
 
+def test_evidence_runs_every_available_collector(completed) -> None:
+    """Evidence collectors are additive, not alternatives.
+
+    Selecting a single collector would silently change what evidence exists
+    based on what happens to be installed on the machine. Every available
+    collector must run, and every unavailable one must be recorded with a
+    reason rather than passing unnoticed.
+    """
+    _, rd = completed
+    evidence = [s for s in load_run(rd)["stages"] if s["stage"] == "evidence"][-1]
+    data = evidence["data"]
+
+    assert data["collectorsRan"], "no evidence collector ran"
+    assert "local" in data["collectorsRan"], data["collectorsRan"]
+    assert not data["collectorsFailed"], data["collectorsFailed"]
+
+    # Everything that did not run must say why, specifically.
+    for name, reason in data["collectorsSkipped"].items():
+        assert reason and len(reason) > 10, f"{name} skipped without a usable reason"
+
+    # Every registered collector is accounted for exactly once.
+    from adlc.config import load_adapters
+
+    registered = set(load_adapters("evidence"))
+    accounted = set(data["collectorsRan"]) | set(data["collectorsSkipped"]) | set(
+        data["collectorsFailed"]
+    )
+    assert registered == accounted, registered ^ accounted
+
+
 def test_replayable_evidence_exists(completed) -> None:
     """C5: the evidence bundle is replayable, not just descriptive."""
     _, rd = completed

@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from adlc.config import Config, select_adapter
+from adlc.config import Config, load_adapters
 from adlc.ports import ArtifactRef
 from adlc.reduce import load_run
 from adlc.runs import RunDir, sha256_file, utcnow, write_json
@@ -139,25 +139,43 @@ def build_review_pack(
 
 
 def run_evidence(cfg: Config, rd: RunDir, variant: str = "candidate-a") -> dict[str, Any]:
+    """Capture evidence with **every** available collector.
+
+    Evidence collectors are additive, not alternatives: Playwright captures a
+    replayable trace, Lighthouse measures performance, axe measures
+    accessibility, k6 measures load. Selecting only one would silently change
+    what evidence exists based on what happens to be installed on the machine,
+    which is precisely the kind of invisible variation this framework exists to
+    remove. So we run them all and record why each one did or did not run.
+    """
     started = utcnow()
     out_dir = rd.evidence_dir / variant
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    collector = select_adapter(cfg, "evidence")
-    collector_name = getattr(collector, "name", type(collector).__name__)
-    available, reason = type(collector).detect(cfg)
-
     run = load_run(rd)
-    artifacts: list[ArtifactRef] = []
-    if available:
-        try:
-            artifacts = collector.collect(run, variant, out_dir)
-        except Exception as exc:  # noqa: BLE001 - report honestly, never fabricate
-            reason = f"{collector_name} raised {type(exc).__name__}: {exc}"
-            available = False
+    collectors = load_adapters("evidence")
+    ran: list[str] = []
+    skipped: dict[str, str] = {}
+    failed: dict[str, str] = {}
 
-    # Re-hash whatever actually landed on disk; never trust the collector's list.
-    artifacts = [
+    for name in sorted(collectors):
+        cls = collectors[name]
+        try:
+            available, reason = cls.detect(cfg)
+        except Exception as exc:  # noqa: BLE001 - a broken collector is not fatal
+            skipped[name] = f"detect() raised {type(exc).__name__}: {exc}"
+            continue
+        if not available:
+            skipped[name] = reason
+            continue
+        try:
+            cls().collect(run, variant, out_dir)
+            ran.append(name)
+        except Exception as exc:  # noqa: BLE001 - never fabricate on failure
+            failed[name] = f"{type(exc).__name__}: {exc}"
+
+    # Re-hash whatever actually landed on disk; never trust a collector's list.
+    artifacts: list[ArtifactRef] = [
         {
             "path": rd.rel(path),
             "kind": _kind_for(path),
@@ -173,12 +191,15 @@ def run_evidence(cfg: Config, rd: RunDir, variant: str = "candidate-a") -> dict[
     write_json(rd.review_pack, pack)
     valid, errors = is_valid("evidence-review-pack", pack)
 
-    status = "ok" if artifacts and valid else "fail"
-    message = (
-        f"{len(artifacts)} artifact(s) via {collector_name}"
-        if artifacts
-        else f"no evidence captured - {reason}"
-    )
+    status = "ok" if artifacts and valid and not failed else "fail"
+    if artifacts:
+        message = f"{len(artifacts)} artifact(s) from {len(ran)} collector(s): {', '.join(ran)}"
+    else:
+        message = "no evidence captured - " + "; ".join(
+            f"{name}: {why}" for name, why in {**skipped, **failed}.items()
+        )
+    if failed:
+        message += f"; {len(failed)} collector(s) failed: {', '.join(failed)}"
     if not valid:
         message += f"; review pack invalid: {errors[:3]}"
 
@@ -189,9 +210,9 @@ def run_evidence(cfg: Config, rd: RunDir, variant: str = "candidate-a") -> dict[
         message=message,
         data={
             "variant": variant,
-            "collector": collector_name,
-            "collectorAvailable": available,
-            "collectorReason": reason,
+            "collectorsRan": ran,
+            "collectorsSkipped": skipped,
+            "collectorsFailed": failed,
             "artifacts": len(artifacts),
             "requirements": len(pack["requirements"]),
             "measurements": len(pack["measurements"]),
@@ -200,7 +221,7 @@ def run_evidence(cfg: Config, rd: RunDir, variant: str = "candidate-a") -> dict[
         },
         started_at=started,
     )
-    return {"artifacts": artifacts, "pack": pack, "valid": valid}
+    return {"artifacts": artifacts, "pack": pack, "valid": valid, "ran": ran}
 
 
 def _kind_for(path: Path) -> str:
