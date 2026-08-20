@@ -189,6 +189,47 @@ class AppInsightsTelemetry:
         """Why this adapter stopped exporting, or ``None`` while healthy."""
         return self._disabled_reason
 
+    # -- Convenience builders ---------------------------------------------
+    #
+    # Signature-compatible with the spine default so this adapter is a drop-in
+    # replacement. The span bodies are byte-for-byte the ones `otel_file`
+    # produces -- deliberately duplicated rather than imported, so that neither
+    # sink can silently change the wire shape of the other.
+
+    def emit_flag_evaluation(
+        self, *, key: str, variant: str, value: Any, reason: str,
+        provider: str, context_id: str | None = None, flag_set_id: str | None = None,
+    ) -> None:
+        """Emit a ``feature_flag.evaluation`` event using current semconv names.
+
+        The OTel spec states the event name MUST be exactly
+        ``feature_flag.evaluation``.
+        """
+        self.emit({
+            "name": "feature_flag.evaluation",
+            "feature_flag.key": key,
+            "feature_flag.provider.name": provider,
+            "feature_flag.result.variant": variant,
+            "feature_flag.result.value": value,
+            "feature_flag.result.reason": reason.lower(),
+            "feature_flag.context.id": context_id,
+            "feature_flag.set.id": flag_set_id,
+        })
+
+    def emit_agent_invocation(
+        self, *, agent: str, operation: str = "invoke_agent",
+        model: str | None = None, tokens_in: int = 0, tokens_out: int = 0,
+    ) -> None:
+        """Emit a ``gen_ai.*`` span for an agent invocation."""
+        self.emit({
+            "name": operation,
+            "gen_ai.operation.name": operation,
+            "gen_ai.agent.name": agent,
+            "gen_ai.request.model": model,
+            "gen_ai.usage.input_tokens": tokens_in,
+            "gen_ai.usage.output_tokens": tokens_out,
+        })
+
     def flush(self, timeout_millis: int = 5_000) -> bool:
         """Best-effort flush of the tracer provider. Never raises."""
         try:
@@ -225,9 +266,20 @@ class AppInsightsTelemetry:
     def _flatten(self, span: dict[str, Any]) -> dict[str, Any]:
         """Collect attributes, verbatim, plus a little run context.
 
-        Top-level non-reserved keys are folded in under ``adlc.*`` so nothing a
-        caller supplied is silently discarded, while the real ``attributes``
-        map keeps its exact semconv keys.
+        The spine's default (:class:`~adlc.adapters.telemetry.otel_file.OtelFileTelemetry`)
+        emits **flat** spans -- semconv attributes sit at the top level next to
+        ``name``, not inside an ``attributes`` map::
+
+            {"name": "feature_flag.evaluation",
+             "feature_flag.key": "...", "feature_flag.result.variant": "..."}
+
+        Both shapes are accepted. The rule that keeps them straight is simple
+        and, crucially, does not need a hard-coded list of semconv names that
+        would rot: **a top-level key containing a dot is an OTel attribute and
+        is passed through verbatim**; a top-level key without a dot is ADLC
+        metadata and is namespaced under ``adlc.``. That way
+        ``feature_flag.key`` and ``gen_ai.provider.name`` survive untouched
+        while ``runId`` becomes ``adlc.runId``.
         """
         merged: dict[str, Any] = dict(span.get("attributes") or {})
 
@@ -238,8 +290,10 @@ class AppInsightsTelemetry:
                 merged.setdefault(f"adlc.span.{_snake(key)}", value)
 
         for key, value in span.items():
-            if key not in _RESERVED_KEYS and value not in (None, "", [], {}):
-                merged.setdefault(f"adlc.{key}", value)
+            if key in _RESERVED_KEYS or value is None or value == "" or value == [] or value == {}:
+                continue
+            # A dotted key is an OTel semantic-convention attribute. Never rename.
+            merged.setdefault(key if "." in key else f"adlc.{key}", value)
 
         sanitized = _sanitize(merged)
         if len(sanitized) < len(merged):

@@ -271,12 +271,16 @@ jobs:
       # GITHUB_EVENT_PATH is set automatically; SreAgentReceiver.detect() finds
       # it and the receiver parses whichever event shape arrived.
       - name: Incident -> brief -> narrow run -> gates
-        run: adlc hotfix --json
+        run: python -m adlc.stages.hotfix --json
 ```
 
-`adlc hotfix` **fails closed**: if the required gates did not actually run, it
-exits non-zero rather than reporting success. Pass `--allow-incomplete` only if
-you understand you are accepting an ungated result.
+`adlc.stages.hotfix` **fails closed**: if the brief does not qualify, if a
+required gate fails, or if the gates did not run at all, it exits non-zero
+rather than reporting success. `--allow-unqualified` and `--allow-incomplete`
+exist, but only use them if you understand you are accepting a weaker result.
+
+> Note: `hotfix` is not yet registered as an `adlc` subcommand — `cli.py` is the
+> spine's file. Invoke the module directly, as above.
 
 ---
 
