@@ -28,10 +28,12 @@ app = typer.Typer(
 run_app = typer.Typer(no_args_is_help=True, help="Create and inspect runs.")
 adr_app = typer.Typer(no_args_is_help=True, help="Architecture decision records.")
 review_app = typer.Typer(no_args_is_help=True, help="Apply native PR review decisions.")
+feedback_app = typer.Typer(no_args_is_help=True, help="Apply human feedback from the evidence page.")
 export_app = typer.Typer(no_args_is_help=True, help="Export a run to another format.")
 app.add_typer(run_app, name="run")
 app.add_typer(adr_app, name="adr")
 app.add_typer(review_app, name="review")
+app.add_typer(feedback_app, name="feedback")
 app.add_typer(export_app, name="export")
 
 
@@ -340,6 +342,28 @@ def reduce(
           f"{len(run['gates'])} gate(s), {len(run['artifacts'])} artifact(s)")
 
 
+@app.command("evidence-diff")
+def evidence_diff(
+    run_id: str = typer.Argument("latest"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Diff this run's evidence against its `referencesRun` baseline.
+
+    Measurement deltas, coverage changes and screenshot classification. With no
+    baseline the absence is stated in the artifact rather than left implicit.
+    """
+    from adlc.stages.evidence_diff import run_evidence_diff
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    result = run_evidence_diff(cfg, rd)
+    reduce_run(cfg, rd)
+    latest = rd.latest_stage("evidence_diff") or {}
+    _emit(result, as_json, f"evidence-diff: {latest.get('message', '')}")
+    if latest.get("status") == "fail":
+        raise typer.Exit(1)
+
+
 @app.command()
 def report(
     run_id: str = typer.Argument("latest"),
@@ -359,6 +383,106 @@ def report(
 
         webbrowser.open(rd.report.as_uri())
     _emit(result, as_json, f"report: {result['path']}")
+
+
+@app.command("report-serve")
+def report_serve(
+    run_id: str = typer.Argument("latest"),
+    port: int = typer.Option(0, "--port", help="0 asks the OS for a free port."),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Serve report.html on loopback so the page can submit feedback directly.
+
+    Purely a convenience: exporting a pack file and running `adlc feedback apply`
+    does exactly the same thing with no server at all.
+    """
+    from adlc.serve import serve_report
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    if not rd.report.is_file():
+        typer.secho(f"no report.html in {rd.run_id} - run `adlc report` first",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+    handle = serve_report(cfg, rd, port=port)
+    typer.echo(f"serving {rd.run_id} at {handle.url}")
+    typer.echo("bound to 127.0.0.1 only; the nonce above authorises submissions. Ctrl-C to stop.")
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(handle.url)
+    try:
+        handle.thread.join()
+    except KeyboardInterrupt:
+        typer.echo("stopping")
+    finally:
+        handle.stop()
+
+
+@feedback_app.command("apply")
+def feedback_apply(
+    pack: Path = typer.Argument(..., help="Path to an adlc-human-feedback/v1 JSON pack."),
+    run_id: str = typer.Argument("latest"),
+    route: str = typer.Option("", "--route", help="Override the pack's route (outer|inner)."),
+    actor: str = typer.Option("", "--actor", help="Who is applying it."),
+    retrigger: bool = typer.Option(
+        True, "--retrigger/--no-retrigger",
+        help="Re-run the design loop on the successor run (default: on).",
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Apply a feedback pack: record it, decide, and retrigger the loop.
+
+    A `revise` verdict creates a successor run carrying `referencesRun`, the
+    resolved `route`, and the quoted feedback, then re-runs the design stages on
+    it. Nothing about the reviewed run is ever edited.
+    """
+    from adlc.runs import read_json
+    from adlc.stages.feedback import apply_feedback
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    if not pack.is_file():
+        typer.secho(f"no such pack: {pack}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+    result = apply_feedback(
+        cfg, rd, read_json(pack),
+        route=route or None, actor=actor or None, retrigger=retrigger,
+    )
+    if not result.get("applied"):
+        _emit(result, as_json, f"refused: {result.get('reason', 'unknown')}")
+        raise typer.Exit(1)
+
+    reduce_run(cfg, rd)
+    successor = result.get("successorRun")
+    ran = (result.get("retriggered") or {}).get("ran") or []
+    _emit(
+        result, as_json,
+        f"{rd.run_id}: {result['verdict']} -> {result['outcome']}"
+        + (f"; created run {successor} (route={result['route']})" if successor else "")
+        + (f"; re-ran {', '.join(str(s['stage']) for s in ran)}" if ran else ""),
+    )
+
+
+@feedback_app.command("validate")
+def feedback_validate(
+    pack: Path = typer.Argument(..., help="Path to an adlc-human-feedback/v1 JSON pack."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Check a pack against its schema without applying it."""
+    from adlc.runs import read_json
+
+    if not pack.is_file():
+        typer.secho(f"no such pack: {pack}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+    ok, errors = is_valid("human-feedback-pack", read_json(pack))
+    _emit({"valid": ok, "errors": errors}, as_json,
+          "valid" if ok else "INVALID\n  " + "\n  ".join(errors[:10]))
+    if not ok:
+        raise typer.Exit(1)
 
 
 @app.command()
