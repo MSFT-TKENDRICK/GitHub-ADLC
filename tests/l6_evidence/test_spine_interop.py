@@ -202,24 +202,58 @@ def test_unmeasured_sidecar_is_invisible_to_the_spine_measurement_glob(
 
 
 # ---------------------------------------------------------------------------
-# adapter selection policy
+# Registry discoverability
+#
+# The spine now runs *every* available evidence collector rather than selecting
+# one, recording each in collectorsRan / collectorsSkipped / collectorsFailed.
+# These tests assert what that model needs from L6 and are deliberately
+# agnostic to whether the spine selects or enumerates.
 # ---------------------------------------------------------------------------
 
 
-def test_undetected_collectors_leave_the_spine_default_in_place(no_tools) -> None:
-    """With no tools installed the spine's own collector must still be chosen."""
-    from adlc.config import EXPLICIT_ONLY_KINDS, select_adapter
+@pytest.mark.parametrize(
+    "collector_cls", [LighthouseCollector, K6Collector, AxeCollector], ids=lambda c: c.name
+)
+def test_each_collector_is_discoverable_through_the_registry(collector_cls, no_tools) -> None:
+    """The spine enumerates `adlc.evidence`; an unloadable leaf is invisible."""
+    from adlc.config import load_adapters
 
-    assert "evidence" not in EXPLICIT_ONLY_KINDS, (
-        "evidence is observational and is allowed to auto-detect"
+    registered = load_adapters("evidence")
+    assert collector_cls.name in registered, (
+        f"'{collector_cls.name}' must load from its pyproject entry point"
     )
-    assert select_adapter(no_tools, "evidence").name in {"local", "playwright"}
+    assert registered[collector_cls.name] is collector_cls
+
+
+@pytest.mark.parametrize(
+    "collector_cls", [LighthouseCollector, K6Collector, AxeCollector], ids=lambda c: c.name
+)
+def test_an_unavailable_collector_yields_a_skip_reason(collector_cls, no_tools) -> None:
+    """With no tools installed each collector lands in collectorsSkipped.
+
+    The spine records `detect()`'s reason verbatim, and its conformance test
+    requires that reason to be specific rather than empty.
+    """
+    from adlc.config import detect_all
+
+    available, reason = detect_all(no_tools, "evidence")[collector_cls.name]
+    assert available is False
+    assert reason.strip(), "an empty skip reason is not actionable"
+    assert any(token in reason for token in ("not on PATH", "not installed"))
+
+
+def test_evidence_is_not_an_explicit_only_kind(no_tools) -> None:
+    """Evidence is observational: it needs no opt-in to run."""
+    from adlc.config import EXPLICIT_ONLY_KINDS
+
+    assert "evidence" not in EXPLICIT_ONLY_KINDS
 
 
 @pytest.mark.parametrize(
     "collector_cls", [LighthouseCollector, K6Collector, AxeCollector], ids=lambda c: c.name
 )
 def test_an_explicit_override_selects_this_collector(collector_cls, no_tools) -> None:
+    """`adapters: {evidence: k6}` still pins one collector by name."""
     from adlc.config import select_adapter
 
     assert select_adapter(no_tools, "evidence", collector_cls.name).name == collector_cls.name
