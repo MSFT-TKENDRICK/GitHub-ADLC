@@ -1,0 +1,52 @@
+{
+  "action": "adlc-incident",
+  "client_payload": {
+    "id": "INC-2026-08-19-0007",
+    "title": "Checkout p95 latency breached SLO after deploy",
+    "severity": "sev2",
+    "detectedAt": "2026-08-19T14:07:00Z",
+    "source": "azure-sre-agent",
+    "summary": "p95 latency on POST /api/checkout rose from 380ms to 2.4s within 6 minutes of revision adlc-day2-demo--0000042 going live.",
+    "impact": "Roughly 8% of checkout attempts time out at the client. No data loss observed.",
+    "suspectedCause": "A synchronous inventory lookup was added to the checkout handler in 9f2c1ab.",
+    "resource": {
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-adlc-demo/providers/Microsoft.App/containerApps/adlc-day2-demo",
+      "name": "adlc-day2-demo",
+      "type": "Microsoft.App/containerApps",
+      "subscriptionId": "00000000-0000-0000-0000-000000000000",
+      "resourceGroup": "rg-adlc-demo",
+      "region": "eastus"
+    },
+    "deployment": {
+      "commit": "9f2c1ab7d4e5f60718293a4b5c6d7e8f90a1b2c3",
+      "environment": "production",
+      "workflowRunId": "17284993001"
+    },
+    "signals": [
+      {
+        "id": "S001",
+        "kind": "metric",
+        "description": "p95 latency, POST /api/checkout",
+        "value": 2400,
+        "threshold": 800,
+        "unit": "ms",
+        "query": "AppRequests | where Name == 'POST /api/checkout' | summarize percentile(DurationMs, 95) by bin(TimeGenerated, 5m)"
+      },
+      {
+        "id": "S002",
+        "kind": "log",
+        "description": "Upstream inventory timeouts per minute",
+        "value": 143,
+        "threshold": 5,
+        "unit": "count/min"
+      }
+    ],
+    "links": [
+      { "title": "Incident in SRE Agent", "url": "https://sre.azure.com/incidents/INC-2026-08-19-0007" }
+    ],
+    "labels": ["adlc:incident", "area:checkout"],
+    "writeSet": ["src/checkout/handler.py", "src/checkout/inventory.py"]
+  },
+  "repository": { "full_name": "contoso/storefront" },
+  "sender": { "login": "azure-sre-agent[bot]" }
+}
