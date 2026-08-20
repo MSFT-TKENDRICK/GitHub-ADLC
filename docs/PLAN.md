@@ -67,7 +67,7 @@ Copilot/ASSERT/CodeQL integration. The first is never called an agent proof.
 | Spec-driven development | **`github/spec-kit`** | GA | Scripts are non-interactive with `--json` — CI calls them directly |
 | Coding agents | Copilot **cloud agent**, Agent Tasks API, `gh agent-task` | API/CLI **preview** | Optional `AgentRunner` adapter |
 | Programmatic agents | **Copilot SDK** | GA | Optional `AgentRunner` — needs entitlement, so **not** credential-free |
-| Task store | **Sub-issues API** + Projects v2 | GA | Optional; default is `taskgraph.json` + SQLite |
+| Task store | **Sub-issues API** + **issue dependencies** + Projects v2 | GA | Optional; default is `taskgraph.json` + SQLite. Limits: **100 sub-issues per parent, 8 levels of nesting** |
 | Security | **CodeQL**, secret scanning, dependency-review | GA | Optional gate adapters; free defaults are local `gitleaks` + `pip-audit`/`npm audit` |
 | Code quality | **GitHub Code Quality** | GA (2026-07) | Enabled in **repo/org Settings**; `analysis-kinds: code-scanning,code-quality` |
 | Governed agent calls | **`microsoft/agent-framework`** | Preview | `ChatClientAgent` + middleware |
@@ -94,8 +94,17 @@ product is rarely checkable, so ADLC is built to be correct either way.
   outside ADLC arrives with no run directory, no evidence, no gates and no ADR
   lineage, so routing incidents through dispatch is correct regardless.
 - **SRE Agent provisioning**: portal onboarding is documented; no `az`/Bicep path found.
-- **Issue-dependency creation API**: unverified, so `taskgraph.json` stays authoritative
-  and sub-issues provide the GitHub-native tree.
+- **Issue-dependency creation API**: **verified and in use.**
+  `POST /repos/{o}/{r}/issues/{n}/dependencies/blocked_by` with `{"issue_id": <id>}`
+  is documented, alongside DELETE and both GET directions
+  ([REST reference](https://docs.github.com/en/rest/issues/issue-dependencies)).
+  Two gotchas: the relationship is only creatable from the *blocked* side — there
+  is no `POST .../dependencies/blocking` — and the field is `issue_id`, not
+  `sub_issue_id`. We use it as a **projection only**: `taskgraph.json` remains
+  authoritative, dependencies are never read back to make decisions, every write
+  degrades to a warning, and edges are rendered into issue bodies regardless.
+  *(This entry previously read "unverified". It was corrected once checked
+  directly against the REST reference, per the rule in §10.)*
 - **LaunchDarkly experiment-results read API**: unverified, so LD delivers flags and
   emits metrics but is never a gate authority.
 
@@ -512,6 +521,10 @@ YAML-fence command protocol. No more than 2 variants. No mutation of historical 
 not exist" usually is not, especially for a preview product. Where this document or the
 code asserts an absence, it is because absence was demonstrated — otherwise it says what
 was searched and what was found.
+
+The rule runs both ways: **a stale "unverified" is also a false claim.** When something
+marked unverified is later confirmed, this document is corrected and the correction is
+noted, rather than leaving a caveat that has quietly stopped being true.
 
 ---
 
