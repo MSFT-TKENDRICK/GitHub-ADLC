@@ -56,6 +56,25 @@ def _rd(cfg: Config, run_id: str | None) -> RunDir:
         raise typer.Exit(2) from exc
 
 
+def _read_json_arg(path: Path, label: str) -> Any:
+    """Read a JSON file argument, exiting cleanly instead of raising a traceback.
+
+    Every one of these paths is supplied by a human or a CI step, so a missing or
+    truncated file is ordinary input, not a bug worth a stack trace.
+    """
+    if not path.is_file():
+        typer.secho(f"no such {label}: {path}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        typer.secho(f"{label} {path} is not valid JSON: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        typer.secho(f"cannot read {label} {path}: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+
 @app.callback(invoke_without_command=False)
 def _root(
     version: bool = typer.Option(False, "--version", help="Show the version and exit."),
@@ -438,17 +457,19 @@ def feedback_apply(
     resolved `route`, and the quoted feedback, then re-runs the design stages on
     it. Nothing about the reviewed run is ever edited.
     """
-    from adlc.runs import read_json
-    from adlc.stages.feedback import apply_feedback
+    from adlc.stages.feedback import VALID_ROUTES, apply_feedback
 
     cfg = _cfg()
     rd = _rd(cfg, run_id)
-    if not pack.is_file():
-        typer.secho(f"no such pack: {pack}", fg=typer.colors.RED, err=True)
+    if route and route not in VALID_ROUTES:
+        typer.secho(
+            f"--route must be one of {', '.join(VALID_ROUTES)}", fg=typer.colors.RED, err=True
+        )
         raise typer.Exit(2)
+    payload = _read_json_arg(pack, "pack")
 
     result = apply_feedback(
-        cfg, rd, read_json(pack),
+        cfg, rd, payload,
         route=route or None, actor=actor or None, retrigger=retrigger,
     )
     if not result.get("applied"):
@@ -472,13 +493,7 @@ def feedback_validate(
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
     """Check a pack against its schema without applying it."""
-    from adlc.runs import read_json
-
-    if not pack.is_file():
-        typer.secho(f"no such pack: {pack}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(2)
-
-    ok, errors = is_valid("human-feedback-pack", read_json(pack))
+    ok, errors = is_valid("human-feedback-pack", _read_json_arg(pack, "pack"))
     _emit({"valid": ok, "errors": errors}, as_json,
           "valid" if ok else "INVALID\n  " + "\n  ".join(errors[:10]))
     if not ok:
@@ -573,16 +588,45 @@ def adr_set_status(
 def review_apply(
     run_id: str = typer.Argument("latest"),
     event: Path = typer.Option(..., "--event", help="pull_request_review webhook payload."),
+    feedback_pack: Path = typer.Option(
+        None, "--feedback-pack",
+        help="Apply a human-feedback pack under this review's authority.",
+    ),
+    retrigger: bool = typer.Option(
+        True, "--retrigger/--no-retrigger",
+        help="Re-run the design loop on the successor run (--feedback-pack only).",
+    ),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Apply a native GitHub PR review as the human decision."""
+    """Apply a native GitHub PR review as the human decision.
+
+    With ``--feedback-pack`` the structured pack is applied under the review's
+    permission, and both must describe the same commit.
+    """
     from adlc.stages.review import apply_review
 
     cfg = _cfg()
     rd = _rd(cfg, run_id)
-    result = apply_review(cfg, rd, json.loads(event.read_text(encoding="utf-8")))
+    payload = _read_json_arg(event, "event")
+
+    if feedback_pack is None:
+        result = apply_review(cfg, rd, payload)
+        reduce_run(cfg, rd)
+        _emit(result, as_json, f"review: {(rd.latest_stage('review') or {}).get('message', '')}")
+        if not result.get("applied"):
+            raise typer.Exit(1)
+        return
+
+    from adlc.stages.feedback import apply_pack_with_review
+
+    result = apply_pack_with_review(
+        cfg, rd, payload, _read_json_arg(feedback_pack, "feedback pack"), retrigger=retrigger
+    )
     reduce_run(cfg, rd)
-    _emit(result, as_json, f"review: {(rd.latest_stage('review') or {}).get('message', '')}")
+    _emit(
+        result, as_json,
+        f"review+feedback: {(rd.latest_stage('feedback') or {}).get('message', '')}",
+    )
     if not result.get("applied"):
         raise typer.Exit(1)
 

@@ -559,3 +559,121 @@ def test_a_skipped_citation_check_is_recorded(cfg: Config, pack: dict[str, Any])
 
     assert result["citationCheck"] == "skipped-no-artifacts"
     assert "citation check skipped" in _stage(rd)["message"]
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the code review of the committed stack
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_identical_submissions_create_one_successor(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """The replay guard must hold under the concurrency the server actually has.
+
+    `find_replay` alone is a time-of-check/time-of-use race: the record it looks
+    for is written last, after the retrigger. Two threaded POSTs would both miss
+    it and both fork the lineage -- the exact failure the guard exists to stop.
+    """
+    import threading
+
+    before = {p.name for p in run.path.parent.iterdir()}
+    barrier = threading.Barrier(2)
+    results: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def submit() -> None:
+        barrier.wait(timeout=30)
+        outcome = fb.apply_feedback(cfg, run, copy.deepcopy(pack), retrigger=False)
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    created = {p.name for p in run.path.parent.iterdir()} - before
+    assert len(created) == 1, f"the lineage forked into {sorted(created)}"
+    assert len(results) == 2
+    assert sum(1 for r in results if r.get("applied") and not r.get("replay")) == 1
+
+
+def test_an_in_flight_duplicate_is_refused_not_forked(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """A duplicate arriving mid-retrigger is told so, rather than forking."""
+    identity = fb.pack_digest(dict(pack))
+    assert fb.claim_identity(run, identity) is True
+
+    result = fb.apply_feedback(cfg, run, pack, retrigger=False)
+
+    assert result["applied"] is False
+    assert "already being applied" in result["reason"]
+    assert result["inFlight"] is True
+
+
+def test_a_claim_is_released_when_the_work_crashes(
+    cfg: Config, run: RunDir, pack: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient fault must not wedge the run against every future retry."""
+
+    def boom(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("adr store unavailable")
+
+    monkeypatch.setattr(fb, "_record_adr", boom)
+    with pytest.raises(RuntimeError):
+        fb.apply_feedback(cfg, run, copy.deepcopy(pack), retrigger=False)
+
+    monkeypatch.undo()
+    retried = fb.apply_feedback(cfg, run, copy.deepcopy(pack), retrigger=False)
+    assert retried["applied"] is True
+    assert retried.get("replay") is False
+
+
+def test_claims_are_not_mistaken_for_feedback_records(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """Claims live beside records; the index allocator must ignore them."""
+    fb.apply_feedback(cfg, run, pack, retrigger=False)
+
+    assert (fb.feedback_dir(run) / "1.json").is_file()
+    assert fb.next_feedback_index(run) == 2
+
+
+def test_an_out_of_enum_route_is_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """A typo'd route would write a run.json its own schema rejects."""
+    result = fb.apply_feedback(cfg, run, pack, route="Outer", retrigger=False)
+
+    assert result["applied"] is False
+    assert "unknown route" in result["reason"]
+    assert run.latest_stage("feedback")["status"] == "fail"
+
+
+def test_a_pack_declaring_an_out_of_enum_route_is_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """The schema is the first gate; `VALID_ROUTES` covers the CLI override that bypasses it."""
+    pack["route"] = "sideways"
+    result = fb.apply_feedback(cfg, run, pack, retrigger=False)
+
+    assert result["applied"] is False
+    assert "validation" in result["reason"]
+
+
+def test_every_successor_route_validates_against_the_run_schema(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """The canonical record the retrigger creates must be schema-valid."""
+    from adlc.reduce import reduce_run
+    from adlc.schemas import is_valid
+
+    result = fb.apply_feedback(cfg, run, pack, route="outer", retrigger=False)
+    successor = RunDir(cfg, result["successorRun"])
+    reduce_run(cfg, successor)
+
+    ok, errors = is_valid("adlc-run", read_json(successor.run_json))
+    assert ok, errors

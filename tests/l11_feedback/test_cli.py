@@ -112,3 +112,109 @@ def test_report_serve_refuses_without_a_report(repo: RunDir) -> None:
     result = _invoke("report-serve", repo.run_id, "--no-open")
     assert result.exit_code == 2
     assert "run `adlc report` first" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Ordinary bad input is a message and an exit code, never a traceback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", ["apply", "validate"])
+def test_malformed_json_exits_cleanly(
+    repo: RunDir, tmp_path: Path, command: str
+) -> None:
+    broken = tmp_path / "broken.json"
+    broken.write_text('{"schemaVersion": "adlc-human-feedback/v1",', encoding="utf-8")
+
+    result = _invoke("feedback", command, str(broken), "--json")
+
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "not valid JSON" in result.output
+
+
+@pytest.mark.parametrize("command", ["apply", "validate"])
+def test_undecodable_pack_exits_cleanly(
+    repo: RunDir, tmp_path: Path, command: str
+) -> None:
+    broken = tmp_path / "latin1.json"
+    broken.write_bytes(b'{"summary": "caf\xe9"}')
+
+    result = _invoke("feedback", command, str(broken), "--json")
+
+    assert result.exit_code == 2, result.output
+    assert "cannot read" in result.output or "not valid JSON" in result.output
+
+
+def test_an_out_of_enum_route_is_rejected_by_the_cli(
+    repo: RunDir, pack_file: Path
+) -> None:
+    result = _invoke(
+        "feedback", "apply", str(pack_file), repo.run_id, "--route", "Outer", "--json"
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--route must be one of" in result.output
+
+
+def test_review_apply_with_a_feedback_pack(repo: RunDir, pack_file: Path, tmp_path: Path) -> None:
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps(
+            {
+                "review": {
+                    "state": "changes_requested",
+                    "commit_id": CANDIDATE_SHA,
+                    "user": {"login": "maintainer"},
+                    "body": "revise please",
+                },
+                "pull_request": {"head": {"sha": CANDIDATE_SHA}, "labels": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _invoke(
+        "review", "apply", repo.run_id, "--event", str(event),
+        "--feedback-pack", str(pack_file), "--no-retrigger", "--json",
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["applied"] is True
+    assert payload["reviewApplied"] is True
+    assert payload["authorisedBy"] == "maintainer"
+
+
+def test_review_apply_refuses_a_pack_for_another_commit(
+    repo: RunDir, pack_file: Path, tmp_path: Path
+) -> None:
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps(
+            {
+                "review": {
+                    "state": "changes_requested",
+                    "commit_id": "9" * 40,
+                    "user": {"login": "maintainer"},
+                },
+                "pull_request": {"head": {"sha": "9" * 40}, "labels": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _invoke(
+        "review", "apply", repo.run_id, "--event", str(event),
+        "--feedback-pack", str(pack_file), "--json",
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "borrow that permission" in result.output
+
+
+def test_review_apply_missing_event_exits_two(repo: RunDir, tmp_path: Path) -> None:
+    result = _invoke("review", "apply", repo.run_id, "--event", str(tmp_path / "nope.json"))
+
+    assert result.exit_code == 2, result.output
+    assert "no such event" in result.output

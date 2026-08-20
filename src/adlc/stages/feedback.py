@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,13 @@ OUTER_LOOP_STAGES: tuple[str, ...] = ("qualify", "spec", "enrich", "graph")
 #: The inner loop re-enters at build time against the spec that already exists,
 #: so re-specifying would discard the very artefact under review.
 INNER_LOOP_STAGES: tuple[str, ...] = ()
+
+#: ``schemas/adlc-run.schema.json`` constrains ``route`` to this set. A run
+#: record is the canonical, schema-validated history, so a typo'd route must be
+#: refused at the door rather than written into one -- otherwise the command
+#: succeeds, the successor exists, and ``adlc validate`` later declares the run
+#: it just created invalid.
+VALID_ROUTES: tuple[str, ...] = ("outer", "inner")
 
 #: Everything except tab and newline. Control characters in a pack are either a
 #: copy-paste accident or an attempt to smuggle framing past a reader.
@@ -390,6 +398,10 @@ def find_replay(rd: RunDir, identity: str) -> dict[str, Any] | None:
     not fork the lineage into two successor runs that each claim to be *the*
     revision of one parent -- especially now that applying feedback re-runs the
     design loop, so a replay is duplicated work, not just a duplicated file.
+
+    This finds *completed* submissions only. On its own it is a
+    time-of-check/time-of-use race, because the record it looks for is written
+    last: see :func:`claim_identity`, which closes that window.
     """
     if not identity:
         return None
@@ -401,6 +413,60 @@ def find_replay(rd: RunDir, identity: str) -> dict[str, Any] | None:
         if stored.get("packIdentity") == identity:
             return stored
     return None
+
+
+def _claim_path(rd: RunDir, identity: str) -> Path:
+    return feedback_dir(rd) / "claims" / f"{identity}.claim"
+
+
+def claim_identity(rd: RunDir, identity: str) -> bool:
+    """Atomically claim the right to apply a pack with this exact content.
+
+    ``find_replay`` alone is not enough. The record that makes a submission
+    discoverable as a replay is written *last* -- after the ADR, the successor
+    run, and the entire design-loop retrigger, which is seconds of work. The
+    server is threaded, so two identical POSTs (a double-click, or the browser
+    retry the replay guard was written for) would both look, both miss, and both
+    fork the lineage.
+
+    The claim is taken before any of that work and is atomic at the filesystem
+    level, so exactly one caller can proceed and the loser is told so.
+    """
+    if not identity:
+        return True
+    path = _claim_path(rd, identity)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(utcnow())
+    except FileExistsError:
+        return False
+    return True
+
+
+def release_identity(rd: RunDir, identity: str) -> None:
+    """Return a claim whose work did not complete, so an honest retry can run."""
+    if not identity:
+        return
+    with suppress(OSError):
+        _claim_path(rd, identity).unlink()
+
+
+def _replay_result(
+    rd: RunDir, prior: dict[str, Any], *, verdict: str, outcome: str, route: str
+) -> dict[str, Any]:
+    return {
+        "applied": True, "replay": True,
+        "verdict": verdict, "outcome": prior.get("outcome", outcome),
+        "route": prior.get("route", route), "adr": prior.get("adr"),
+        "successorRun": prior.get("successorRun"),
+        "record": rd.rel(feedback_dir(rd) / f"{prior.get('index')}.json"),
+        "discarded": prior.get("discardedAnnotations") or [],
+        "reportDrift": bool(prior.get("reportDrift")),
+        "counts": prior.get("counts") or {},
+        "retriggered": prior.get("retriggered"),
+        "reason": "identical feedback was already applied to this run",
+    }
 
 
 def _refuse(
@@ -503,66 +569,87 @@ def apply_feedback(
     resolved_route = route or str(pack.get("route") or "outer")
     reviewer = actor or str(pack.get("submittedBy") or "unknown")
 
+    if resolved_route not in VALID_ROUTES:
+        return _refuse(
+            rd, started,
+            f"unknown route '{clean_inline(resolved_route, limit=32)}' - expected one of "
+            + ", ".join(VALID_ROUTES),
+            {"route": resolved_route},
+        )
+
     try:
         identity = pack_digest(dict(raw)) if isinstance(raw, dict) else ""
     except (TypeError, ValueError, UnicodeEncodeError):
         identity = ""
     if prior := find_replay(rd, identity):
-        return {
-            "applied": True, "replay": True,
-            "verdict": verdict, "outcome": prior.get("outcome", outcome),
-            "route": prior.get("route", resolved_route), "adr": prior.get("adr"),
-            "successorRun": prior.get("successorRun"),
-            "record": rd.rel(feedback_dir(rd) / f"{prior.get('index')}.json"),
-            "discarded": prior.get("discardedAnnotations") or [],
-            "reportDrift": bool(prior.get("reportDrift")),
-            "counts": prior.get("counts") or {},
-            "retriggered": prior.get("retriggered"),
-            "reason": "identical feedback was already applied to this run",
+        return _replay_result(
+            rd, prior, verdict=verdict, outcome=outcome, route=resolved_route
+        )
+    if not claim_identity(rd, identity):
+        # Someone else holds the claim. Either they finished between the two
+        # checks -- in which case this is an ordinary replay -- or they are still
+        # mid-retrigger, and proceeding would fork the lineage.
+        if prior := find_replay(rd, identity):
+            return _replay_result(
+                rd, prior, verdict=verdict, outcome=outcome, route=resolved_route
+            )
+        return _refuse(
+            rd, started,
+            "an identical feedback submission is already being applied to this run",
+            {"packIdentity": identity, "inFlight": True},
+        )
+
+    try:
+        adr = _record_adr(cfg, rd, pack, outcome=outcome, reviewer=reviewer)
+
+        successor: str | None = None
+        retriggered: dict[str, Any] | None = None
+        if outcome == "iterate":
+            successor = _create_successor(
+                cfg, rd, pack, discarded=discarded, route=resolved_route
+            )
+            if retrigger:
+                retriggered = retrigger_loop(cfg, successor, resolved_route)
+
+        counts = {
+            "annotations": len(kept),
+            "discardedAnnotations": len(discarded),
+            "critiques": len(pack.get("critiques") or []),
+            "diffDecisions": len(pack.get("diffDecisions") or []),
+        }
+        decision = {
+            "outcome": outcome,
+            "rationale": (
+                clean_inline(pack.get("summary")) or f"structured human feedback: {verdict}"
+            ),
+            "decidedBy": reviewer,
+            "decidedAt": utcnow(),
+            "reviewSha": pack_sha,
+            "adr": adr,
         }
 
-    adr = _record_adr(cfg, rd, pack, outcome=outcome, reviewer=reviewer)
-
-    successor: str | None = None
-    retriggered: dict[str, Any] | None = None
-    if outcome == "iterate":
-        successor = _create_successor(
-            cfg, rd, pack, discarded=discarded, route=resolved_route
+        record = record_pack(
+            rd, pack,
+            {
+                "outcome": outcome,
+                "route": resolved_route,
+                "adr": adr,
+                "successorRun": successor,
+                "discardedAnnotations": discarded,
+                "reportDrift": report_drift,
+                "retriggered": retriggered,
+                "packIdentity": identity,
+                "citationCheck": citation_check,
+                "counts": counts,
+                "decision": decision,
+            },
         )
-        if retrigger:
-            retriggered = retrigger_loop(cfg, successor, resolved_route)
-
-    counts = {
-        "annotations": len(kept),
-        "discardedAnnotations": len(discarded),
-        "critiques": len(pack.get("critiques") or []),
-        "diffDecisions": len(pack.get("diffDecisions") or []),
-    }
-    decision = {
-        "outcome": outcome,
-        "rationale": clean_inline(pack.get("summary")) or f"structured human feedback: {verdict}",
-        "decidedBy": reviewer,
-        "decidedAt": utcnow(),
-        "reviewSha": pack_sha,
-        "adr": adr,
-    }
-
-    record = record_pack(
-        rd, pack,
-        {
-            "outcome": outcome,
-            "route": resolved_route,
-            "adr": adr,
-            "successorRun": successor,
-            "discardedAnnotations": discarded,
-            "reportDrift": report_drift,
-            "retriggered": retriggered,
-            "packIdentity": identity,
-            "citationCheck": citation_check,
-            "counts": counts,
-            "decision": decision,
-        },
-    )
+    except Exception:
+        # The claim outlives its work only if the work succeeded. Holding it
+        # after a crash would refuse the operator's honest retry for the life of
+        # the run, turning a transient fault into a permanently stuck run.
+        release_identity(rd, identity)
+        raise
 
     message = (
         f"{reviewer} submitted '{verdict}' -> {outcome}"
@@ -717,3 +804,79 @@ def retrigger_loop(cfg: Config, run_id: str, route: str) -> dict[str, Any]:
         result["reduceError"] = reduction_error
     return result
 
+
+def apply_pack_with_review(
+    cfg: Config,
+    rd: RunDir,
+    event: dict[str, Any],
+    raw: Any,
+    *,
+    retrigger: bool = True,
+) -> dict[str, Any]:
+    """Apply a feedback pack whose authority comes from a native PR review.
+
+    A downloaded pack is a file. A file proves nothing about who wrote it, so on
+    a shared runner it cannot be allowed to decide anything on its own. A
+    ``pull_request_review`` event *does* carry authority: creating one required
+    write access to the repository, and GitHub bound it to a commit.
+
+    So the two are applied as one act, and bound to each other: the commit the
+    reviewer signed off must be the commit the pack describes. A pack for a
+    different commit is refused rather than applied under a permission that was
+    granted for something else.
+
+    Both halves succeed or neither is applied. A pack that fails validation
+    leaves the review unapplied too -- the operator asked for one composite
+    decision, and applying half of it silently would be a worse surprise than
+    refusing and letting them retry.
+    """
+    from adlc.stages.review import _STATE_MAP, apply_review
+
+    started = utcnow()
+    review = event.get("review") or {} if isinstance(event, dict) else {}
+    state = str(review.get("state", "")).lower()
+    reviewer = str((review.get("user") or {}).get("login", "") or "unknown")
+    review_sha = str(review.get("commit_id") or "")
+    binding = {"state": state, "reviewSha": review_sha, "reviewer": reviewer}
+
+    if state not in _STATE_MAP:
+        return _refuse(
+            rd, started,
+            f"unsupported review state '{clean_inline(state, limit=32) or '(none)'}'",
+            binding,
+        )
+    if not isinstance(raw, dict):
+        return _refuse(rd, started, "feedback pack is not a JSON object", binding)
+
+    candidate = str(raw.get("candidateSha") or "")
+    if not review_sha:
+        return _refuse(
+            rd, started,
+            "review carries no commit_id - refusing to apply a pack under an unbound review",
+            binding,
+        )
+    if candidate != review_sha:
+        return _refuse(
+            rd, started,
+            f"pack describes {clean_inline(candidate, limit=64)[:8] or '(nothing)'} but the "
+            f"review authorised {review_sha[:8]} - refusing to borrow that permission",
+            {**binding, "candidateSha": candidate},
+        )
+
+    result = apply_feedback(cfg, rd, raw, actor=reviewer, retrigger=retrigger)
+    if not result.get("applied"):
+        return {**result, "reviewApplied": False, "authorisedBy": reviewer}
+    if result.get("replay"):
+        # The pack was already applied. Re-applying the review would move the ADR
+        # a second time for a decision that was recorded once.
+        return {**result, "reviewApplied": False, "authorisedBy": reviewer}
+
+    review_result = apply_review(
+        cfg, rd, event, adopted_successor=result.get("successorRun")
+    )
+    return {
+        **result,
+        "reviewApplied": bool(review_result.get("applied")),
+        "review": review_result,
+        "authorisedBy": reviewer,
+    }
