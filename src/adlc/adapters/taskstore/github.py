@@ -669,20 +669,13 @@ class GitHubTaskStore:
         settings: Mapping[str, Any] | None = None,
     ) -> None:
         self.cfg = cfg
-        self._settings: dict[str, Any] = dict(settings or _settings_from_cfg(cfg))
         self._transport = transport
+        self._explicit_settings = settings is not None
+        self._explicit_repo = owner is not None and repo is not None
         self._owner, self._repo = owner, repo
-        if self._owner is None or self._repo is None:
-            resolved = resolve_repo(cfg, self._settings)
-            if resolved:
-                self._owner, self._repo = resolved
-
-        self.sub_issue_limit = int(self._settings.get("maxSubIssues", SUB_ISSUE_LIMIT))
-        self.sync_dependencies = bool(self._settings.get("syncDependencies", True))
-        self.enable_projects = bool(self._settings.get("enableProjects", False))
-        self.project_id = self._settings.get("projectId") or os.environ.get("ADLC_GITHUB_PROJECT")
-        self.project_fields: dict[str, Any] = dict(self._settings.get("projectFields") or {})
-        self.extra_labels: list[str] = list(self._settings.get("labels") or [])
+        self._apply_settings(
+            dict(settings) if settings is not None else _settings_from_cfg(cfg)
+        )
 
         #: Populated by :meth:`sync`. ``node id -> {"id", "number", "url"}``.
         self.node_records: dict[str, dict[str, Any]] = {}
@@ -695,6 +688,31 @@ class GitHubTaskStore:
         #: Non-fatal problems (e.g. Projects v2 failures) surfaced to the caller.
         self.warnings: list[str] = []
         self._run_id: str | None = None
+
+    def _apply_settings(self, settings: Mapping[str, Any]) -> None:
+        self._settings = dict(settings)
+        self.sub_issue_limit = int(self._settings.get("maxSubIssues", SUB_ISSUE_LIMIT))
+        self.sync_dependencies = bool(self._settings.get("syncDependencies", True))
+        self.enable_projects = bool(self._settings.get("enableProjects", False))
+        self.project_id = self._settings.get("projectId") or os.environ.get("ADLC_GITHUB_PROJECT")
+        self.project_fields: dict[str, Any] = dict(self._settings.get("projectFields") or {})
+        self.extra_labels: list[str] = list(self._settings.get("labels") or [])
+        if not self._explicit_repo:
+            resolved = resolve_repo(self.cfg, self._settings)
+            if resolved:
+                self._owner, self._repo = resolved
+
+    def bind(self, cfg: Config) -> None:
+        """Attach this store to a config. Called by the graph stage before ``sync()``.
+
+        ``select_adapter`` instantiates adapters with no arguments, so this is
+        the only point at which the repository root -- and therefore the git
+        remote and the ``taskstore.github`` config block -- becomes available.
+        """
+        self.cfg = cfg
+        self._apply_settings(
+            self._settings if self._explicit_settings else _settings_from_cfg(cfg)
+        )
 
     # -- detection --------------------------------------------------------
     @staticmethod
@@ -760,7 +778,13 @@ class GitHubTaskStore:
 
     # -- TaskStore protocol ----------------------------------------------
     def sync(self, graph: TaskGraph) -> dict[str, str]:
-        """Project ``graph`` onto issues. Idempotent: safe to call repeatedly."""
+        """Project ``graph`` onto issues. Idempotent: safe to call repeatedly.
+
+        Returns ``{node_id: "<owner>/<repo>#<number>"}`` -- a self-describing
+        external id, matching the spine SQLite store's ``sqlite:<run>/<node>``
+        convention. Richer records (``id``, ``number``, ``node_id``, ``url``)
+        stay available on :attr:`node_records`.
+        """
         run_id = str(graph.get("runId") or "").strip()
         if not run_id:
             raise GitHubTaskStoreError("taskgraph is missing 'runId'; cannot sync to GitHub")
@@ -886,7 +910,10 @@ class GitHubTaskStore:
         if self.enable_projects:
             self._sync_project(nodes)
 
-        return {node_id: str(rec["number"]) for node_id, rec in self.node_records.items()}
+        return {
+            node_id: f"{self.slug}#{rec['number']}"
+            for node_id, rec in self.node_records.items()
+        }
 
     def update(self, node_id: str, status: str, note: str = "") -> None:
         """Record ``status`` on the issue for ``node_id``: comment, label, open/close."""
@@ -943,6 +970,13 @@ class GitHubTaskStore:
 
     # -- internals --------------------------------------------------------
     def _run_dir(self, run_id: str) -> str:
+        """Repo-relative run directory, derived from config when it is bound."""
+        if self.cfg is not None:
+            try:
+                run_dir = self.cfg.run_dir(run_id).resolve()
+                return run_dir.relative_to(Path(self.cfg.root).resolve()).as_posix()
+            except (AttributeError, OSError, ValueError):
+                pass
         return f".adlc/runs/{run_id}"
 
     def _node_labels(self, label: str, node: TaskNode) -> list[str]:

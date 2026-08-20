@@ -10,7 +10,7 @@ The two properties that matter most are exercised here:
 from __future__ import annotations
 
 import pytest
-from conftest import FakeGitHub, issue_id_for, make_graph
+from conftest import FakeGitHub, issue_id_for, issue_number, make_graph
 
 from adlc.adapters.taskstore import github as gh
 
@@ -36,10 +36,12 @@ def test_sync_creates_one_parent_and_one_sub_issue_per_node(fake_github: FakeGit
     assert len(fake_github.sub_issues[parent_number]) == 3
 
 
-def test_sync_returns_issue_numbers_keyed_by_node_id(fake_github: FakeGitHub) -> None:
+def test_sync_returns_self_describing_external_ids(fake_github: FakeGitHub) -> None:
+    """Matches the spine SQLite store's `sqlite:<run>/<node>` convention."""
     mapping = store(fake_github).sync(make_graph(2))
     for node_id, external in mapping.items():
-        issue = fake_github.issues[int(external)]
+        assert external.startswith("acme/widgets#")
+        issue = fake_github.issues[issue_number(external)]
         assert gh.parse_marker(issue["body"]) == ("2026-08-19-a1b2", "node", node_id)
 
 
@@ -73,10 +75,10 @@ def test_issues_are_labelled_so_the_run_can_be_re_indexed(fake_github: FakeGitHu
 def test_cross_references_are_resolved_to_real_issue_numbers(fake_github: FakeGitHub) -> None:
     st = store(fake_github)
     mapping = st.sync(make_graph(3))
-    body = fake_github.issues[int(mapping["T002"])]["body"]
+    body = fake_github.issues[issue_number(mapping["T002"])]["body"]
 
-    assert f"Blocked by: #{mapping['T001']} (`T001`)" in body
-    assert f"Blocks: #{mapping['T003']} (`T003`)" in body
+    assert f"Blocked by: #{issue_number(mapping['T001'])} (`T001`)" in body
+    assert f"Blocks: #{issue_number(mapping['T003'])} (`T003`)" in body
     assert "_pending_" not in body
     assert "not yet synced" not in body
 
@@ -96,7 +98,10 @@ def test_second_sync_performs_no_mutations_at_all(fake_github: FakeGitHub) -> No
 
     assert fake_github.mutations == []
     assert fake_github.issues == before
-    assert mapping == {"T001": "2", "T002": "3", "T003": "4", "T004": "5"}
+    assert mapping == {
+        "T001": "acme/widgets#2", "T002": "acme/widgets#3",
+        "T003": "acme/widgets#4", "T004": "acme/widgets#5",
+    }
 
 
 def test_resync_reuses_issues_even_with_a_fresh_store_instance(fake_github: FakeGitHub) -> None:
@@ -141,11 +146,12 @@ def test_dependencies_post_the_blocker_id_to_the_blocked_issue(fake_github: Fake
         if c[0] == "POST" and c[1].endswith("/dependencies/blocked_by")
     ]
     assert len(posts) == 2
-    blocked_path = f"/repos/acme/widgets/issues/{mapping['T002']}/dependencies/blocked_by"
+    blocked = issue_number(mapping["T002"])
+    blocked_path = f"/repos/acme/widgets/issues/{blocked}/dependencies/blocked_by"
     t002 = next(c for c in posts if c[1] == blocked_path)
     assert set(t002[2]) == {"issue_id"}
-    assert t002[2]["issue_id"] == issue_id_for(int(mapping["T001"]))
-    assert fake_github.blocked_by[int(mapping["T002"])] == [issue_id_for(int(mapping["T001"]))]
+    assert t002[2]["issue_id"] == issue_id_for(issue_number(mapping["T001"]))
+    assert fake_github.blocked_by[blocked] == [issue_id_for(issue_number(mapping["T001"]))]
 
 
 def test_dependency_sync_can_be_switched_off(fake_github: FakeGitHub) -> None:
@@ -161,8 +167,9 @@ def test_dependency_api_failure_degrades_to_a_warning(fake_github: FakeGitHub) -
 
     assert len(mapping) == 3
     assert any("blocked by" in w for w in st.warnings)
-    body = fake_github.issues[int(mapping["T002"])]["body"]
-    assert f"Blocked by: #{mapping['T001']}" in body  # the edge survives in the body
+    body = fake_github.issues[issue_number(mapping["T002"])]["body"]
+    # the edge survives in the body even when the API refuses
+    assert f"Blocked by: #{issue_number(mapping['T001'])}" in body
 
 
 def test_dependency_edges_are_not_re_posted(fake_github: FakeGitHub) -> None:
@@ -222,7 +229,9 @@ def test_reparenting_moves_a_node_between_chunks(fake_github: FakeGitHub) -> Non
     assert st.warnings == []
     # Every task now hangs off the single remaining parent.
     parent = st.parents[0]["number"]
-    assert {fake_github.parent_of[issue_id_for(int(n))] for n in mapping.values()} == {parent}
+    assert {
+        fake_github.parent_of[issue_id_for(issue_number(n))] for n in mapping.values()
+    } == {parent}
     assert len(fake_github.sub_issues[parent]) == 6
 
 
@@ -255,7 +264,7 @@ def test_a_removed_node_is_detached_and_closed(fake_github: FakeGitHub) -> None:
     """Otherwise the parent rollup counts it forever and a run never hits 100%."""
     st = store(fake_github)
     mapping = st.sync(make_graph(3))
-    removed = int(mapping["T003"])
+    removed = issue_number(mapping["T003"])
 
     st2 = store(fake_github)
     st2.sync(make_graph(2))
@@ -301,7 +310,7 @@ def test_kind_and_level_labels_are_replaced_not_accumulated(fake_github: FakeGit
     graph["nodes"][0].update(kind="doc", level=5)
     mapping = store(fake_github).sync(graph)
 
-    labels = fake_github.issues[int(mapping["T001"])]["labels"]
+    labels = fake_github.issues[issue_number(mapping["T001"])]["labels"]
     assert "adlc-kind:doc" in labels
     assert "adlc-kind:implement" not in labels
     assert "adlc-level:5" in labels
@@ -311,7 +320,7 @@ def test_kind_and_level_labels_are_replaced_not_accumulated(fake_github: FakeGit
 def test_human_and_status_labels_survive_a_resync(fake_github: FakeGitHub) -> None:
     st = store(fake_github)
     mapping = st.sync(make_graph(1))
-    number = int(mapping["T001"])
+    number = issue_number(mapping["T001"])
     st.update("T001", "fail")
     fake_github.issues[number]["labels"].append("needs-triage")
 
@@ -356,7 +365,7 @@ def test_progress_does_not_double_count_the_root(fake_github: FakeGitHub) -> Non
 def test_update_comments_labels_and_closes(fake_github: FakeGitHub) -> None:
     st = store(fake_github)
     mapping = st.sync(make_graph(2))
-    number = int(mapping["T001"])
+    number = issue_number(mapping["T001"])
 
     st.update("T001", "ok", note="patch applied cleanly")
 
@@ -384,7 +393,7 @@ def test_update_maps_task_outcomes_to_issue_state(
     mapping = st.sync(make_graph(1))
     st.update("T001", status)
 
-    issue = fake_github.issues[int(mapping["T001"])]
+    issue = fake_github.issues[issue_number(mapping["T001"])]
     assert issue["state"] == state
     assert issue["state_reason"] == reason
 
@@ -392,7 +401,7 @@ def test_update_maps_task_outcomes_to_issue_state(
 def test_repeating_an_update_does_not_duplicate_the_comment(fake_github: FakeGitHub) -> None:
     st = store(fake_github)
     mapping = st.sync(make_graph(1))
-    number = int(mapping["T001"])
+    number = issue_number(mapping["T001"])
 
     st.update("T001", "fail", note="tests red")
     st.update("T001", "fail", note="tests red")
@@ -406,7 +415,7 @@ def test_a_genuine_repeat_transition_is_still_recorded(fake_github: FakeGitHub) 
     """Retry history is evidence; only an immediate replay is deduplicated."""
     st = store(fake_github)
     mapping = st.sync(make_graph(1))
-    number = int(mapping["T001"])
+    number = issue_number(mapping["T001"])
 
     for status in ("running", "fail", "running", "fail", "ok"):
         st.update("T001", status)
@@ -424,8 +433,8 @@ def test_updates_for_sibling_nodes_do_not_deduplicate_each_other(fake_github: Fa
     st.update("T001", "ok")
     st.update("T002", "ok")
 
-    assert len(fake_github.comments[int(mapping["T001"])]) == 1
-    assert len(fake_github.comments[int(mapping["T002"])]) == 1
+    assert len(fake_github.comments[issue_number(mapping["T001"])]) == 1
+    assert len(fake_github.comments[issue_number(mapping["T002"])]) == 1
 
 
 def test_update_replaces_rather_than_accumulates_status_labels(fake_github: FakeGitHub) -> None:
@@ -434,7 +443,7 @@ def test_update_replaces_rather_than_accumulates_status_labels(fake_github: Fake
     st.update("T001", "in_progress")
     st.update("T001", "ok")
 
-    labels = fake_github.issues[int(mapping["T001"])]["labels"]
+    labels = fake_github.issues[issue_number(mapping["T001"])]["labels"]
     assert [lbl for lbl in labels if lbl.startswith("adlc-status:")] == ["adlc-status:ok"]
 
 
@@ -459,7 +468,7 @@ def test_update_relocates_an_issue_using_adlc_run_id(
 
     st = store(fake_github)
     st.update("T002", "ok")
-    assert fake_github.issues[int(mapping["T002"])]["state"] == "closed"
+    assert fake_github.issues[issue_number(mapping["T002"])]["state"] == "closed"
 
 
 def test_relocating_indexes_the_whole_run_exactly_once(

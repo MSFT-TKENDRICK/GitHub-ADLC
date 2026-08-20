@@ -226,6 +226,11 @@ def _no_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+def issue_number(external_id: str) -> int:
+    """Parse an ``owner/repo#N`` external id back to its issue number."""
+    return int(external_id.rsplit("#", 1)[1])
+
+
 def make_graph(node_count: int = 3, run_id: str = "2026-08-19-a1b2") -> dict[str, Any]:
     """A small, schema-shaped task graph: a T001 -> T002 -> ... dependency chain."""
     nodes: list[dict[str, Any]] = []

@@ -1,12 +1,35 @@
 # GitHub task store (`taskstore=github`)
 
-An **optional** `TaskStore` adapter that projects a run's `taskgraph.json` onto
-GitHub's native work-tracking primitives: a parent issue per run, one sub-issue
-per task node, real issue-dependency links, and — behind a flag — Projects v2
-fields.
+An **optional, opt-in** `TaskStore` adapter that projects a run's
+`taskgraph.json` onto GitHub's native work-tracking primitives: a parent issue
+per run, one sub-issue per task node, dependency edges, and — behind a flag —
+Projects v2 fields.
 
-It is a *pure addition*. With no token, `detect()` declines and the spine's
-credential-free SQLite store takes over. Nothing here can fail the conformance
+> ### ⚠️ This adapter is never selected automatically. You must opt in.
+>
+> ```yaml
+> # .adlc/config.yaml
+> adapters:
+>   taskstore: github
+> ```
+>
+> `taskstore` is in `EXPLICIT_ONLY_KINDS` (`src/adlc/config.py`), so
+> `select_adapter` **skips the "first detected wins" step** for it. Having
+> `GITHUB_TOKEN` set is deliberately not enough.
+>
+> **Why:** every GitHub Actions runner exports `GITHUB_TOKEN`, and plenty of
+> developer laptops have `gh` authenticated. If ambient detection selected this
+> store, a plain `adlc graph` would start creating real issues in a live
+> repository with nobody having asked for it. Writing to someone's issue tracker
+> is not a safe default.
+>
+> `detect()` still runs and still reports in `adlc doctor` / `capabilities.json`
+> — it just no longer *selects* this store on its own. **So if `adlc doctor`
+> says the GitHub store is "available" but your run still used `sqlite`, the
+> config opt-in above is what's missing.**
+
+Without that opt-in — and with no credentials at all — the spine's
+credential-free SQLite store is used and nothing here can fail the conformance
 suite.
 
 - Module: `src/adlc/adapters/taskstore/github.py`
@@ -45,9 +68,10 @@ flowchart TD
 | `nodes[].context` | **Not inlined.** Referenced as `.adlc/runs/<runId>/taskgraph.json` |
 | task outcome | `update()` → comment + `adlc-status:<status>` label + open/closed state |
 
-`sync()` returns `{node_id: "<issue number>"}`. Richer records (`id`, `number`,
-`node_id`, `url`) are available on `store.node_records`, and native progress on
-`store.progress()`.
+`sync()` returns `{node_id: "<owner>/<repo>#<number>"}` — a self-describing
+external id, mirroring the spine SQLite store's `sqlite:<run>/<node>`. Richer
+records (`id`, `number`, `node_id`, `url`) are available on `store.node_records`,
+and native progress on `store.progress()`.
 
 ### Ordering and chunking
 
@@ -278,7 +302,59 @@ That is asserted directly in
 
 ---
 
-## 6. Detection
+## 6. How the spine drives this adapter
+
+`src/adlc/stages/graph.py` does exactly this, once per `adlc graph`:
+
+```python
+store = select_adapter(cfg, "taskstore")   # constructs with NO arguments
+if hasattr(store, "bind"):
+    store.bind(cfg)
+store.sync(graph)
+```
+
+`select_adapter`'s order is: explicit override → `config.yaml` → first detected →
+spine default. **`taskstore` is in `EXPLICIT_ONLY_KINDS`, so the "first detected"
+step is skipped entirely** — this store is reachable only via the `config.yaml`
+opt-in at the top of this document, or an explicit override.
+
+Three consequences shape the design:
+
+1. **`select_adapter` calls `cls()`.** The constructor cannot require a config,
+   so `GitHubTaskStore()` is inert: it resolves nothing and opens nothing.
+2. **`bind(cfg)` is the only way config arrives.** It is where the repository
+   root — and therefore the git remote and the `taskstore.github` block — become
+   available, so `bind()` re-resolves both. Explicit constructor arguments win
+   over anything `bind()` finds, which is what makes the adapter testable.
+3. **The whole call is wrapped in `try/except`** and recorded as
+   `taskStore: "unavailable (<reason>)"` on the stage result. Raising is
+   survivable; returning a wrong mapping silently is not. So every unrecoverable
+   problem raises `GitHubTaskStoreError` with a specific message, and everything
+   optional degrades to `store.warnings`.
+
+Observed end to end, offline:
+
+| Environment | Selected | Graph stage |
+|---|---|---|
+| no token, no opt-in | `sqlite` | `ok` |
+| token present, **no opt-in** | `sqlite` | `ok` — ambient credentials never escalate |
+| opt-in + unreachable API | `github` | `ok`, `taskStore: "unavailable (GET … failed: …refused)"` |
+
+This adapter **never writes `run.json`** — only `adlc reduce` does. It writes
+nothing to disk at all.
+
+Note that `run_graph` discards `sync()`'s return value; the mapping is part of
+the `TaskStore` contract rather than something the spine persists today.
+
+### Run directory references
+
+Issue bodies link to the run directory, derived from `cfg.run_dir(run_id)` and
+made relative to `cfg.root` so no absolute local path leaks into a public issue.
+Unbound, it falls back to `.adlc/runs/<runId>`.
+
+---
+
+## 7. Detection
 
 `detect()` is cheap, non-raising, and makes **no network calls** — it reads
 environment variables and, at most, one small `.git/config` file.
@@ -290,6 +366,9 @@ environment variables and, at most, one small `.git/config` file.
 | Both resolved | `(True, "GitHub Issues task store available for <owner>/<repo>")` |
 | Anything raises | `(False, "GitHub task store unavailable: <error>")` |
 
+Remember that `(True, …)` reports *capability*, not selection — see the opt-in
+note at the top.
+
 The repository is resolved from, in order: `taskstore.github.repo`,
 `$GITHUB_REPOSITORY`, then a `github.com` remote in `.git/config`. Worktrees are
 handled — a worktree's `.git` is a *file* containing a `gitdir:` pointer, and the
@@ -300,7 +379,7 @@ adapter follows it through `commondir` to the shared config.
 
 ---
 
-## 7. Token scopes
+## 8. Token scopes
 
 | Feature | Fine-grained PAT / GitHub App | Classic PAT |
 |---|---|---|
@@ -321,14 +400,15 @@ endpoints, so they are available under that stable pin; override with
 
 ---
 
-## 8. Configuration
+## 9. Configuration
 
-All keys live under `taskstore.github` in `.adlc/config.yaml` and every one is
-optional.
+All keys live under `taskstore.github` in `.adlc/config.yaml`. The
+`adapters.taskstore` opt-in is **required**; everything under `taskstore.github`
+is optional.
 
 ```yaml
 adapters:
-  taskstore: github          # or omit and let detect() choose
+  taskstore: github          # REQUIRED — this store is never auto-selected
 
 taskstore:
   github:
@@ -365,7 +445,7 @@ item, which is why `level` and `kind` are also written as issue labels.
 
 ---
 
-## 9. `update()`
+## 10. `update()`
 
 ```python
 store.update("T003", "ok", note="patch applied cleanly")
@@ -390,7 +470,7 @@ message naming the missing piece rather than failing silently.
 
 ---
 
-## 10. Dependencies and testing
+## 11. Dependencies and testing
 
 The module imports **nothing outside the standard library** — `urllib` only. No
 entry was added to `pyproject.toml`.
@@ -408,15 +488,25 @@ on 403/429/5xx. It normalises *every* failure — including the raw `TimeoutErro
 wrap — into `GitHubTaskStoreError`, so optional paths can reliably contain them.
 
 ```console
-$ python -m pytest tests/l5_taskstore -q
-$ ruff check src/adlc/adapters/taskstore/
+$ python -m venv .venv --system-site-packages
+$ .venv/Scripts/python -m pip install -e . --no-deps
+$ .venv/Scripts/python -m pytest tests/l5_taskstore -q
+$ .venv/Scripts/python -m ruff check src/adlc/adapters/taskstore/
 ```
 
 Both run green with no credentials and no network access.
 
+> Use a **per-worktree venv**, not `pip install -e .` into a shared interpreter:
+> the editable pointer is global, so in a multi-worktree checkout the last
+> install silently wins and you end up testing someone else's code. `PYTHONPATH`
+> alone is not sufficient either — entry points come from installed
+> distribution metadata, so without an install `select_adapter` resolves
+> nothing. The selection tests skip themselves in that case rather than
+> reporting a false failure.
+
 ---
 
-## 11. Sources
+## 12. Sources
 
 All verified 2026-08-19:
 
