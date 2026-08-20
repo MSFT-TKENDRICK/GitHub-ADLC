@@ -8,7 +8,6 @@ failing task store must never block the graph stage.
 from __future__ import annotations
 
 import pytest
-from .conftest import FakeGitHub, issue_number, make_graph
 
 from adlc.adapters.taskstore import github as gh
 from adlc.adapters.taskstore.sqlite import SqliteTaskStore
@@ -20,6 +19,8 @@ from adlc.config import (
     select_adapter,
 )
 from adlc.ports import TaskStore
+
+from .conftest import FakeGitHub, issue_number, make_graph
 
 #: Entry points come from installed distribution metadata, not from PYTHONPATH.
 #: Without them `select_adapter` cannot resolve anything, so skip rather than

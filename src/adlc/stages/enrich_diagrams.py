@@ -719,7 +719,7 @@ def generate(run_dir: Path, spec_text: str, cfg: Config) -> list[Path]:
         for filename, builder in builders:
             try:
                 diagram = builder(ctx)
-            except Exception:  # noqa: BLE001 - one bad facet must not sink the rest
+            except Exception:
                 log.exception("enrich_diagrams: %s builder failed", filename)
                 continue
             if not diagram:
@@ -732,7 +732,7 @@ def generate(run_dir: Path, spec_text: str, cfg: Config) -> list[Path]:
             path = out_dir / filename
             path.write_text(diagram, encoding="utf-8")
             written.append(path)
-    except Exception:  # noqa: BLE001 - contract: never break the run
+    except Exception:
         log.exception("enrich_diagrams: generation failed")
         return written
     return written

@@ -579,6 +579,6 @@ def generate(run_dir: Path, spec_text: str, cfg: Config) -> list[Path]:
         path = out_dir / "wireframe.excalidraw"
         path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         return [path]
-    except Exception:  # noqa: BLE001 - contract: never break the run
+    except Exception:
         log.exception("enrich_wireframe: generation failed")
         return []

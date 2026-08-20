@@ -86,7 +86,7 @@ def test_generate_never_raises(module, run_arg, spec_arg, tmp_path: Path, cfg) -
 def test_generate_never_raises_on_a_broken_config(module, tmp_path: Path, spec_text: str) -> None:
     class Exploding:
         @property
-        def raw(self):  # noqa: ANN201 - deliberately hostile
+        def raw(self):
             raise RuntimeError("config blew up")
 
     assert isinstance(module.generate(tmp_path / "run", spec_text, Exploding()), list)

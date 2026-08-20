@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from .conftest import make_graph
 
 from adlc.adapters.taskstore import github as gh
+
+from .conftest import make_graph
 
 
 def test_markers_are_stable_and_parseable() -> None:

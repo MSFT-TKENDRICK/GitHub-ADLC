@@ -460,6 +460,6 @@ def generate(run_dir: Path, spec_text: str, cfg: Config) -> list[Path]:
         path = out_dir / "personas.md"
         path.write_text(rendered, encoding="utf-8")
         return [path]
-    except Exception:  # noqa: BLE001 - contract: never break the run
+    except Exception:
         log.exception("enrich_personas: generation failed")
         return []
