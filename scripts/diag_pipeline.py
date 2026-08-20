@@ -89,6 +89,15 @@ def main() -> int:
         print(f"    {name} done in {time.time() - started:.2f}s", flush=True)
 
     keep = os.environ.get("ADLC_DIAG_KEEP")
+    build = rd.latest_stage("build")
+    if build:
+        print(f"\nbuild status: {build['status']} - {build['message']}")
+        for barrier in build["data"].get("barriers", []):
+            print(f"  level {barrier['level']}: applied={barrier['applied']} "
+                  f"tests={barrier['testsPassed']}")
+            for conflict in barrier["conflicts"]:
+                print(f"    CONFLICT {conflict['node']}: {conflict['error'][:600]}")
+
     print(f"\nrun dir: {rd.path}")
     if not keep:
         os.chdir(Path(__file__).resolve().parents[1])

@@ -33,6 +33,17 @@ SPINE_DEFAULTS: dict[str, str] = {
     "telemetry": "otel-file",
 }
 
+#: Kinds that must NEVER auto-escalate from the spine default.
+#:
+#: Auto-detection is safe for observational adapters, but these have real side
+#: effects: an agent runner spends money and can open pull requests, and a task
+#: store writes issues into a live repository. On any GitHub Actions runner
+#: `GITHUB_TOKEN` is present, so a naive "first detected wins" policy would
+#: silently switch a plain `adlc build` onto the cloud agent. Escalating to
+#: either of these must be a deliberate choice in `.adlc/config.yaml` or an
+#: explicit `--runner` flag.
+EXPLICIT_ONLY_KINDS: frozenset[str] = frozenset({"agents", "taskstore"})
+
 #: Gates that are required in each profile. `required + not_run` => FAIL.
 PROFILE_REQUIRED_GATES: dict[str, tuple[str, ...]] = {
     "minimal": ("tests", "secrets_local", "deps_local", "evidence_completeness"),
@@ -170,6 +181,12 @@ def detect_all(cfg: Config, kind: AdapterKind) -> dict[str, tuple[bool, str]]:
 def select_adapter(cfg: Config, kind: AdapterKind, override: str | None = None) -> Any:
     """Resolve one adapter instance for ``kind``.
 
+    Order: explicit override -> ``config.yaml`` -> first detected -> spine default.
+
+    Kinds in :data:`EXPLICIT_ONLY_KINDS` skip the "first detected" step: they
+    have side effects (cost, pull requests, issues) that must never be switched
+    on by ambient environment alone.
+
     Raises ``LookupError`` only when even the spine default is missing, which
     means the installation itself is broken.
     """
@@ -180,20 +197,25 @@ def select_adapter(cfg: Config, kind: AdapterKind, override: str | None = None) 
     wanted = override or cfg.adapters.get(kind)
     if wanted:
         if wanted not in adapters:
-            raise LookupError(f"adapter '{wanted}' not registered for kind '{kind}'")
+            raise LookupError(
+                f"adapter '{wanted}' not registered for kind '{kind}'. "
+                f"Available: {', '.join(sorted(adapters))}"
+            )
         return adapters[wanted]()
 
-    for name, cls in adapters.items():
-        if name == SPINE_DEFAULTS.get(kind):
-            continue
-        try:
-            available, _ = cls.detect(cfg)
-        except Exception:  # noqa: BLE001
-            available = False
-        if available:
-            return cls()
-
     default_name = SPINE_DEFAULTS.get(kind)
+
+    if kind not in EXPLICIT_ONLY_KINDS:
+        for name, cls in adapters.items():
+            if name == default_name:
+                continue
+            try:
+                available, _ = cls.detect(cfg)
+            except Exception:  # noqa: BLE001
+                available = False
+            if available:
+                return cls()
+
     if default_name and default_name in adapters:
         return adapters[default_name]()
     return next(iter(adapters.values()))()

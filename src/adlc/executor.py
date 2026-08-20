@@ -179,6 +179,12 @@ def verify_capsule(node: TaskNode, root: Path) -> list[str]:
 class Worktree:
     """A disposable git worktree pinned to an exact SHA."""
 
+    #: Neutralise line-ending rewriting for every git call the executor makes.
+    #: With `core.autocrlf=true` (the Windows default) git rewrites line endings
+    #: between the worktree, the index and the patch, which produces patches
+    #: that fail to apply with "corrupt patch".
+    GIT_OPTS = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false")
+
     def __init__(self, root: Path, sha: str, name: str) -> None:
         self.root = root
         self.sha = sha
@@ -187,7 +193,7 @@ class Worktree:
         self._added = False
 
     def __enter__(self) -> Worktree:
-        git("worktree", "add", "--detach", str(self.path), self.sha, cwd=self.root)
+        git(*self.GIT_OPTS, "worktree", "add", "--detach", str(self.path), self.sha, cwd=self.root)
         self._added = True
         return self
 
@@ -196,14 +202,42 @@ class Worktree:
             git("worktree", "remove", "--force", str(self.path), cwd=self.root, check=False)
         shutil.rmtree(self.path, ignore_errors=True)
 
-    def diff(self) -> str:
-        """Patch of everything changed in this worktree, including new files."""
-        git("add", "-A", cwd=self.path, check=False)
-        return git("diff", "--cached", "--binary", cwd=self.path, check=False)
+    def diff(self) -> bytes:
+        """Patch of everything changed in this worktree, including new files.
+
+        Returned as **bytes** deliberately. Round-tripping a patch through text
+        mode corrupts it: newline translation rewrites every line ending, and
+        binary hunks do not survive decoding at all.
+        """
+        git(*self.GIT_OPTS, "add", "-A", cwd=self.path, check=False)
+        proc = subprocess.run(  # noqa: S603
+            ["git", *self.GIT_OPTS, "diff", "--cached", "--binary"],
+            cwd=str(self.path), capture_output=True, check=False,
+        )
+        return normalise_patch(proc.stdout)
 
 
-def violated_write_set(patch_text: str, write_set: list[str]) -> list[str]:
+def normalise_patch(patch: bytes) -> bytes:
+    """Make a patch safe to apply.
+
+    Two failure modes this prevents, both of which produce the unhelpful
+    ``corrupt patch at line N`` error:
+
+    * stray carriage returns introduced by line-ending translation
+    * a missing final newline, which truncates the last hunk
+    """
+    if not patch:
+        return patch
+    patch = patch.replace(b"\r\n", b"\n")
+    if not patch.endswith(b"\n"):
+        patch += b"\n"
+    return patch
+
+
+def violated_write_set(patch_text: str | bytes, write_set: list[str]) -> list[str]:
     """Paths touched by a patch that were not declared in the node's write-set."""
+    if isinstance(patch_text, bytes):
+        patch_text = patch_text.decode("utf-8", errors="replace")
     touched: set[str] = set()
     for line in patch_text.splitlines():
         if line.startswith("+++ b/"):
@@ -253,16 +287,16 @@ class Executor:
 
                 with Worktree(self.cfg.root, base_sha, node["id"]) as wt:
                     outcome: TaskOutcome = await self.runner.run_task(node, wt.path, self.cfg)
-                    patch_text = wt.diff()
+                    patch_bytes = wt.diff()
 
                 if outcome.get("status") == "fail":
                     record.status = "fail"
                     record.message = outcome.get("log", "agent reported failure")
-                elif not patch_text.strip():
+                elif not patch_bytes.strip():
                     record.status = "ok"
                     record.message = "no changes produced"
                 else:
-                    violations = violated_write_set(patch_text, node.get("writeSet") or [])
+                    violations = violated_write_set(patch_bytes, node.get("writeSet") or [])
                     if violations:
                         record.status = "fail"
                         record.message = (
@@ -271,7 +305,8 @@ class Executor:
                     else:
                         patch_path = self.rd.patches_dir / f"{node['id']}.patch"
                         patch_path.parent.mkdir(parents=True, exist_ok=True)
-                        patch_path.write_text(patch_text, encoding="utf-8")
+                        # Binary write: any newline translation corrupts the patch.
+                        patch_path.write_bytes(patch_bytes)
                         record.patch = self.rd.rel(patch_path)
                         record.status = "ok"
             except Exception as exc:  # noqa: BLE001 - one bad node must not kill the run
@@ -287,14 +322,11 @@ class Executor:
             if record.status != "ok" or not record.patch:
                 continue
             patch_path = self.rd.path / record.patch
-            proc = subprocess.run(  # noqa: S603
-                ["git", "apply", "--index", "--3way", str(patch_path)],
-                cwd=str(self.cfg.root), capture_output=True, text=True, check=False,
-            )
-            if proc.returncode == 0:
+            ok, error = self._apply(patch_path)
+            if ok:
                 applied.append(record.node_id)
             else:
-                conflicts.append({"node": record.node_id, "error": proc.stderr.strip()})
+                conflicts.append({"node": record.node_id, "error": error})
 
         test_ok, test_output = True, "no test command configured"
         command = (self.cfg.raw.get("commands") or {}).get("test")
@@ -308,7 +340,8 @@ class Executor:
 
         new_sha = base_sha
         if applied and not conflicts and test_ok:
-            git("commit", "-m", f"adlc: level {level} ({', '.join(applied)})",
+            git(*Worktree.GIT_OPTS, "commit", "-m",
+                f"adlc: level {level} ({', '.join(applied)})",
                 "--no-verify", cwd=self.cfg.root, check=False)
             new_sha = git("rev-parse", "HEAD", cwd=self.cfg.root, check=False) or base_sha
 
@@ -317,6 +350,27 @@ class Executor:
             "testsPassed": test_ok, "testOutput": test_output,
             "baseShaBefore": base_sha, "baseShaAfter": new_sha, "at": utcnow(),
         }
+
+    def _apply(self, patch_path: Path) -> tuple[bool, str]:
+        """Apply one patch, trying the plain path before the 3-way fallback.
+
+        ``--3way`` needs the pre-image blobs, so it is not always usable for
+        newly created files; the plain apply handles those.
+        """
+        attempts = (
+            ["--index", "--whitespace=nowarn"],
+            ["--index", "--3way", "--whitespace=nowarn"],
+        )
+        last_error = ""
+        for flags in attempts:
+            proc = subprocess.run(  # noqa: S603
+                ["git", *Worktree.GIT_OPTS, "apply", *flags, str(patch_path)],
+                cwd=str(self.cfg.root), capture_output=True, text=True, check=False,
+            )
+            if proc.returncode == 0:
+                return True, ""
+            last_error = proc.stderr.strip()
+        return False, last_error
 
     async def run(self, graph: TaskGraph, *, resume_from: int = 0) -> ExecutionReport:
         levels = validate_graph(graph)

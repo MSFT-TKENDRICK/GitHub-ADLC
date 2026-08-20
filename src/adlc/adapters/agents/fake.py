@@ -61,7 +61,7 @@ class FakeAgentRunner:
             if content is None:
                 content = _synthesise(node, rel_path)
 
-            target.write_text(content, encoding="utf-8")
+            target.write_text(content, encoding="utf-8", newline="\n")
             written.append(rel_path)
 
         return {

@@ -178,3 +178,34 @@ def test_full_pipeline_reaches_a_green_aggregate(completed) -> None:
     passed, failures = aggregate_passed(run["gates"])
     assert passed, f"required gates failed: {failures}"
     assert run["status"] in {"gated", "reported", "decided"}
+
+
+def test_build_stage_actually_succeeded(completed) -> None:
+    """Guard against a green aggregate masking a broken build.
+
+    The gate set does not include build health, so without this the suite could
+    pass while every patch failed to apply.
+    """
+    _, rd = completed
+    build = [s for s in load_run(rd)["stages"] if s["stage"] == "build"][-1]
+    assert build["status"] == "ok", build["message"]
+
+    data = build["data"]
+    assert data["completedLevels"] == data["levels"], data["barriers"]
+    assert not data["failedNodes"], data["failedNodes"]
+    for barrier in data["barriers"]:
+        assert not barrier["conflicts"], barrier["conflicts"]
+        assert barrier["testsPassed"], barrier["testOutput"]
+        assert barrier["applied"], f"level {barrier['level']} applied no patches"
+
+
+def test_candidate_commits_advanced_past_the_base(completed) -> None:
+    """Patch barriers really commit -- the candidate is a build at a commit."""
+    _, rd = completed
+    run = load_run(rd)
+    variants = {v["key"]: v for v in run["variants"]}
+    assert "candidate-a" in variants
+    assert variants["candidate-a"]["commit"], "candidate has no commit"
+    assert variants["candidate-a"]["commit"] != run["baseSha"], (
+        "candidate commit did not advance past the base SHA"
+    )
