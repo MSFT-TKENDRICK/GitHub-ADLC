@@ -71,8 +71,10 @@ async def test_patch_is_written_and_applies_at_the_base_sha(
     assert result.ok, result.reason
     assert result.patch_path is not None
     assert result.patch_path.name == "T001.patch"
-    assert result.patch_path.parent.name == "patches"
-    assert result.patch_path.parent.parent == repo.parent  # never inside the worktree
+    # A sibling of the worktree, never inside it — the patch must not be part of
+    # its own diff, and the name must be unique per worktree.
+    assert result.patch_path.parent == repo.parent / f"{repo.name}.patches"
+    assert repo not in result.patch_path.parents
     assert base_sha[:12] in result.reason
 
     text = result.patch_path.read_text(encoding="utf-8")
@@ -155,7 +157,7 @@ async def test_patch_path_finds_the_run_directory(node: TaskNode, tmp_path: Path
 async def test_task_id_is_sanitized_for_the_filename(repo: Path, repo_cfg: Config) -> None:
     path = resolve_patch_path({"id": "T 1/../evil"}, repo, repo_cfg)
     assert path.name == "T_1_.._evil.patch"
-    assert path.parent == repo.parent / "patches"
+    assert path.parent == repo.parent / f"{repo.name}.patches"
 
 
 # ---------------------------------------------------------------------------

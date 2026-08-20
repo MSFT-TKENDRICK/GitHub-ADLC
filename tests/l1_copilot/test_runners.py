@@ -390,12 +390,29 @@ index 2222222..3333333 100644
 """
 
 
-def _stub_gh(monkeypatch: pytest.MonkeyPatch, runner: GhAwRunner, patch_text: str | None) -> None:
-    async def list_run_ids(_slug: str, limit: int = 30) -> set[int]:
-        return {1, 2} if not getattr(list_run_ids, "dispatched", False) else {1, 2, 99}
+def _stub_gh(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: GhAwRunner,
+    patch_text: str | None,
+    *,
+    patch_name: str = "T001.patch",
+    new_runs: list[dict[str, Any]] | None = None,
+    baseline_fails: bool = False,
+) -> None:
+    state = {"dispatched": False}
+    fresh = new_runs if new_runs is not None else [{"databaseId": 99, "displayTitle": "T001"}]
+
+    async def list_runs(_slug: str, limit: int = 30) -> list[dict[str, Any]] | None:
+        if baseline_fails and not state["dispatched"]:
+            return None
+        rows: list[dict[str, Any]] = [
+            {"databaseId": 1, "displayTitle": "old"},
+            {"databaseId": 2, "displayTitle": "older"},
+        ]
+        return rows + fresh if state["dispatched"] else rows
 
     async def dispatch(_slug: str, _inputs: dict[str, str]) -> GhResult:
-        list_run_ids.dispatched = True
+        state["dispatched"] = True
         return GhResult(0, "", "")
 
     async def view_run(_slug: str, run_id: int) -> dict[str, Any]:
@@ -406,10 +423,12 @@ def _stub_gh(monkeypatch: pytest.MonkeyPatch, runner: GhAwRunner, patch_text: st
         directory = Path(args[args.index("--dir") + 1])
         (directory / "adlc-patch").mkdir(parents=True, exist_ok=True)
         if patch_text is not None:
-            (directory / "adlc-patch" / "T001.patch").write_text(patch_text, encoding="utf-8")
+            # Bytes, not write_text: on Windows text mode turns LF into CRLF and
+            # git then rejects the patch — the exact defect this suite guards.
+            (directory / "adlc-patch" / patch_name).write_bytes(patch_text.encode("utf-8"))
         return GhResult(0, "", "")
 
-    monkeypatch.setattr(runner, "list_run_ids", list_run_ids)
+    monkeypatch.setattr(runner, "list_runs", list_runs)
     monkeypatch.setattr(runner, "dispatch", dispatch)
     monkeypatch.setattr(runner, "view_run", view_run)
     monkeypatch.setattr(gh_aw_module, "run_gh", fake_run_gh)
@@ -476,13 +495,13 @@ async def test_gh_aw_reports_a_failed_dispatch(
     monkeypatch.setenv("ADLC_REPO", "octo/demo")
     runner = GhAwRunner()
 
-    async def no_runs(_slug: str, limit: int = 30) -> set[int]:
-        return set()
+    async def some_runs(_slug: str, limit: int = 30) -> list[dict[str, Any]]:
+        return [{"databaseId": 1, "displayTitle": "old"}]
 
     async def refused(_slug: str, _inputs: dict[str, str]) -> GhResult:
         return GhResult(1, "", "could not find any workflows named adlc-task.lock.yml")
 
-    monkeypatch.setattr(runner, "list_run_ids", no_runs)
+    monkeypatch.setattr(runner, "list_runs", some_runs)
     monkeypatch.setattr(runner, "dispatch", refused)
 
     outcome = await runner.run_task(node, repo, repo_cfg)
@@ -490,6 +509,75 @@ async def test_gh_aw_reports_a_failed_dispatch(
     assert outcome["status"] == "fail"
     assert "could not dispatch" in outcome["log"]
     assert "adlc-task.lock.yml" in outcome["log"]
+
+
+async def test_gh_aw_refuses_to_dispatch_without_a_run_baseline(
+    node: TaskNode, repo: Path, repo_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed baseline query would make every pre-existing run look new."""
+    _available(monkeypatch, GhAwRunner)
+    monkeypatch.setenv("ADLC_REPO", "octo/demo")
+    runner = GhAwRunner()
+    dispatched: list[str] = []
+
+    async def broken(_slug: str, limit: int = 30) -> list[dict[str, Any]] | None:
+        return None
+
+    async def dispatch(_slug: str, _inputs: dict[str, str]) -> GhResult:
+        dispatched.append("yes")
+        return GhResult(0, "", "")
+
+    monkeypatch.setattr(runner, "list_runs", broken)
+    monkeypatch.setattr(runner, "dispatch", dispatch)
+
+    outcome = await runner.run_task(node, repo, repo_cfg)
+
+    assert outcome["status"] == "fail"
+    assert "baseline" in outcome["log"]
+    assert dispatched == [], "must not dispatch when the baseline is unknown"
+
+
+async def test_gh_aw_refuses_to_guess_between_concurrent_runs(
+    node: TaskNode, repo: Path, repo_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sibling nodes at the same level dispatch the same workflow concurrently."""
+    _available(monkeypatch, GhAwRunner)
+    monkeypatch.setenv("ADLC_REPO", "octo/demo")
+    runner = GhAwRunner()
+    _stub_gh(
+        monkeypatch, runner, PATCH_TEXT,
+        new_runs=[
+            {"databaseId": 98, "displayTitle": "adlc-task"},
+            {"databaseId": 99, "displayTitle": "adlc-task"},
+        ],
+    )
+
+    outcome = await runner.run_task(node, repo, repo_cfg)
+
+    assert outcome["status"] == "fail"
+    assert "none is identifiable" in outcome["log"]
+    assert "run-name" in outcome["log"]
+
+
+async def test_gh_aw_picks_the_run_named_for_this_task(
+    node: TaskNode, repo: Path, repo_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _available(monkeypatch, GhAwRunner)
+    monkeypatch.setenv("ADLC_REPO", "octo/demo")
+    runner = GhAwRunner()
+    _stub_gh(
+        monkeypatch, runner, PATCH_TEXT,
+        new_runs=[
+            {"databaseId": 98, "displayTitle": "T999"},
+            {"databaseId": 42, "displayTitle": "T001"},
+            {"databaseId": 97, "displayTitle": "T002"},
+        ],
+    )
+
+    outcome = await runner.run_task(node, repo, repo_cfg)
+
+    assert outcome["status"] == "ok", outcome["log"]
+    assert "gh-aw run 42" in outcome["log"]
 
 
 async def test_gh_aw_fails_closed_on_an_unsuccessful_run(
