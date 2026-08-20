@@ -1,0 +1,29 @@
+{#-
+  wireframe.excalidraw.j2 — rendered by adlc.stages.enrich_wireframe (leaf L9).
+
+  This template owns the *document envelope* only. Element geometry is computed
+  in Python and injected pre-serialised as `elements_json`, because hand-rolling
+  a few hundred numeric JSON fields in Jinja is how you ship a file nobody can
+  open. The generator json.loads() this render before writing, so a broken
+  template fails the run's enrichment step loudly instead of producing an
+  unopenable .excalidraw.
+
+  Envelope fields verified against excalidraw/excalidraw:
+    packages/common/src/constants.ts
+      EXPORT_DATA_TYPES.excalidraw = "excalidraw"
+      VERSIONS.excalidraw          = 2
+      DEFAULT_GRID_SIZE            = 20
+-#}
+{
+  "type": "{{ doc_type }}",
+  "version": {{ version }},
+  "source": "{{ source }}",
+  "elements": {{ elements_json }},
+  "appState": {
+    "gridSize": {{ grid_size }},
+    "gridStep": 5,
+    "gridModeEnabled": false,
+    "viewBackgroundColor": "{{ view_background_color }}"
+  },
+  "files": {}
+}

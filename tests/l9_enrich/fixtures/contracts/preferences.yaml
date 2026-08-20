@@ -1,0 +1,11 @@
+openapi: 3.1.0
+info:
+  title: Reader preferences API
+  version: 1.0.0
+paths:
+  /api/v1/preferences:
+    get:
+      summary: Read the caller's current theme preference
+  /api/v1/preferences/{readerId}:
+    put:
+      summary: Update one reader's theme preference
