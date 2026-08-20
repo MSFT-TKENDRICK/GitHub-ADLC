@@ -1,0 +1,17 @@
+{
+  "action": "opened",
+  "issue": {
+    "number": 412,
+    "title": "Checkout error rate above 5% since 14:07 UTC",
+    "html_url": "https://github.com/contoso/storefront/issues/412",
+    "created_at": "2026-08-19T14:11:32Z",
+    "labels": [
+      { "name": "adlc:incident" },
+      { "name": "severity: high" },
+      { "name": "area:checkout" }
+    ],
+    "body": "The checkout endpoint started returning 5xx shortly after the latest deploy.\n\nRolling back is not an option because the release also carried a tax-table fix.\n\n```json\n{\n  \"id\": \"INC-2026-08-19-0009\",\n  \"summary\": \"POST /api/checkout returns 502 for ~6% of requests.\",\n  \"deployment\": { \"commit\": \"9f2c1ab7d4e5f60718293a4b5c6d7e8f90a1b2c3\" },\n  \"signals\": [\n    { \"id\": \"S001\", \"kind\": \"metric\", \"description\": \"5xx rate on POST /api/checkout\", \"value\": 0.061, \"threshold\": 0.01, \"unit\": \"ratio\" }\n  ]\n}\n```\n\nSee the dashboard for the full picture."
+  },
+  "repository": { "full_name": "contoso/storefront" },
+  "sender": { "login": "azure-sre-agent[bot]" }
+}

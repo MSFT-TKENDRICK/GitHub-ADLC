@@ -1,0 +1,181 @@
+// =============================================================================
+// DISABLED EXAMPLE - requires an Azure subscription and an Application Insights
+// resource. ADLC never executes these queries. They are here so the
+// "continuous eval feeds requirements" loop in docs/day2-operations.md is a
+// concrete thing you can run, not a diagram box.
+//
+// Paste into Log Analytics / Application Insights Logs. Adjust table names to
+// match your workspace - see the VERIFIED / UNVERIFIED notes below.
+// =============================================================================
+//
+// VERIFIED (learn.microsoft.com/en-us/azure/azure-monitor/app/data-model-complete,
+// checked 2026-08-19). Table names differ between the classic Application
+// Insights schema and the workspace-based Log Analytics schema:
+//
+//   telemetry type   | classic              | workspace-based (recommended)
+//   -----------------+----------------------+------------------------------
+//   trace / log      | traces               | AppTraces
+//   custom event     | customEvents         | AppEvents
+//   dependency       | dependencies         | AppDependencies
+//   request          | requests             | AppRequests
+//   exception        | exceptions           | AppExceptions
+//   generative AI    | genAIContent         | AppGenAIContent
+//   custom metric    | customMetrics        | AppMetrics
+//
+// The docs also note: "Application Insights stores application log records in
+// the traces table for legacy reasons. Spans for distributed tracing are stored
+// in the requests and dependencies tables."
+//
+// The queries below use the WORKSPACE-BASED names. If you are on a classic
+// resource, substitute per the table above.
+//
+// -----------------------------------------------------------------------------
+// UNVERIFIED - READ THIS BEFORE TRUSTING QUERY 3
+// -----------------------------------------------------------------------------
+// We could NOT find documentation for the schema Microsoft Foundry "continuous
+// evaluation" writes its scores into. Specifically:
+//   * no documented table name for evaluation results;
+//   * no documented column name for an evaluation score.
+// The Foundry agent-monitoring how-to says only that "Monitoring data is stored
+// in the connected Application Insights resource" and describes evaluation
+// metrics conceptually.
+// Pages searched: /azure/foundry/observability/how-to/how-to-monitor-agents-dashboard,
+// /azure/foundry/observability (overview), /azure/azure-monitor/app/data-model-complete.
+//
+// A widely-circulated blog claims an `EvaluationScore` column on
+// AppGenAIContent. We could not confirm that from Microsoft docs and are NOT
+// relying on it.
+//
+// Therefore Query 3 is written against attributes ADLC ITSELF emits via
+// src/adlc/adapters/telemetry/appinsights.py, which we control and can
+// guarantee. If you want Foundry's own continuous-eval output, inspect your
+// workspace first (Query 0) and adjust.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// Query 0 - DISCOVERY. Run this FIRST.
+// Find out what actually lands in your workspace before assuming a schema.
+// -----------------------------------------------------------------------------
+union withsource=SourceTable AppTraces, AppEvents, AppDependencies, AppRequests
+| where TimeGenerated > ago(7d)
+| summarize Rows = count(), SampleKeys = make_set(bag_keys(Properties), 50)
+        by SourceTable
+| order by Rows desc
+
+
+// -----------------------------------------------------------------------------
+// Query 1 - Feature-flag exposure by variant.
+// Attribute names are the current OpenTelemetry semconv spellings (Release
+// Candidate): feature_flag.key, feature_flag.result.variant,
+// feature_flag.result.reason, feature_flag.context.id, feature_flag.set.id,
+// feature_flag.provider.name.
+// Source: opentelemetry.io/docs/specs/semconv/feature-flags/feature-flags-events/
+//
+// Custom span attributes surface in the `Properties` dynamic column.
+// -----------------------------------------------------------------------------
+let lookback = 24h;
+AppDependencies
+| where TimeGenerated > ago(lookback)
+| extend
+    FlagKey     = tostring(Properties["feature_flag.key"]),
+    Variant     = tostring(Properties["feature_flag.result.variant"]),
+    Reason      = tostring(Properties["feature_flag.result.reason"]),
+    FlagSet     = tostring(Properties["feature_flag.set.id"]),
+    ProviderName = tostring(Properties["feature_flag.provider.name"])
+| where isnotempty(FlagKey)
+| summarize
+    Exposures = count(),
+    Contexts  = dcount(tostring(Properties["feature_flag.context.id"]))
+    by FlagKey, FlagSet, Variant, Reason, ProviderName
+| order by FlagKey asc, Exposures desc
+
+
+// -----------------------------------------------------------------------------
+// Query 2 - Error rate and latency per flag variant.
+// This is the signal that answers "did the candidate we shipped make things
+// worse?". A sustained regression here is what should raise an incident.
+// -----------------------------------------------------------------------------
+let lookback = 24h;
+let budgetMs = 800.0;   // keep in sync with your benchmarks.yaml
+AppRequests
+| where TimeGenerated > ago(lookback)
+| extend Variant = tostring(Properties["feature_flag.result.variant"])
+| where isnotempty(Variant)
+| summarize
+    Requests   = count(),
+    Failures   = countif(Success == false),
+    P95Ms      = percentile(DurationMs, 95),
+    P99Ms      = percentile(DurationMs, 99)
+    by Variant, bin(TimeGenerated, 15m)
+| extend
+    ErrorRate   = todouble(Failures) / todouble(Requests),
+    BreachedSlo = P95Ms > budgetMs
+| order by TimeGenerated desc, Variant asc
+
+
+// -----------------------------------------------------------------------------
+// Query 3 - Continuous-eval signal, from ADLC's OWN telemetry.
+// See the UNVERIFIED block above: this deliberately does NOT depend on an
+// undocumented Foundry schema. It reads attributes this framework emits.
+//
+// gen_ai.* attribute names below are the current spellings from
+// github.com/open-telemetry/semantic-conventions-genai (status: Development).
+// NOTE: gen_ai.system was RENAMED to gen_ai.provider.name; the coalesce()
+// tolerates telemetry emitted before that rename.
+// -----------------------------------------------------------------------------
+let lookback = 7d;
+let scoreThreshold = 0.70;   // keep in sync with .adlc/config.yaml eval.threshold
+AppDependencies
+| where TimeGenerated > ago(lookback)
+| extend
+    Operation = tostring(Properties["gen_ai.operation.name"]),
+    Provider  = coalesce(tostring(Properties["gen_ai.provider.name"]),
+                         tostring(Properties["gen_ai.system"])),
+    Model     = tostring(Properties["gen_ai.response.model"]),
+    InTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutTokens = toint(Properties["gen_ai.usage.output_tokens"]),
+    RubricId  = tostring(Properties["adlc.rubric.id"]),
+    Score     = todouble(Properties["adlc.rubric.score"]),
+    RunId     = tostring(Properties["adlc.runId"])
+| where isnotempty(RubricId) and isnotnull(Score)
+| summarize
+    Evaluations = count(),
+    MeanScore   = avg(Score),
+    P10Score    = percentile(Score, 10),
+    FailRate    = todouble(countif(Score < scoreThreshold)) / todouble(count()),
+    Tokens      = sum(InTokens) + sum(OutTokens),
+    Runs        = dcount(RunId)
+    by RubricId, Operation, Provider, Model, bin(TimeGenerated, 1d)
+| order by TimeGenerated desc, FailRate desc
+
+
+// -----------------------------------------------------------------------------
+// Query 4 - Rubric drift detector.
+// This is the query that FEEDS THE SELF-EVOLVING PIPELINE. It finds rubrics
+// whose pass rate moved materially week over week. A sustained move is evidence
+// that a threshold no longer reflects reality - which is a PROPOSAL for a
+// human, delivered as a pull request with an ADR, never an automatic edit.
+// See docs/day2-operations.md "The self-evolving pipeline".
+// -----------------------------------------------------------------------------
+let scoreThreshold = 0.70;
+let thisWeek = AppDependencies
+    | where TimeGenerated between (ago(7d) .. now())
+    | extend RubricId = tostring(Properties["adlc.rubric.id"]),
+             Score    = todouble(Properties["adlc.rubric.score"])
+    | where isnotempty(RubricId) and isnotnull(Score)
+    | summarize Recent = avg(Score), RecentN = count() by RubricId;
+let priorWeek = AppDependencies
+    | where TimeGenerated between (ago(14d) .. ago(7d))
+    | extend RubricId = tostring(Properties["adlc.rubric.id"]),
+             Score    = todouble(Properties["adlc.rubric.score"])
+    | where isnotempty(RubricId) and isnotnull(Score)
+    | summarize Prior = avg(Score), PriorN = count() by RubricId;
+thisWeek
+| join kind=inner priorWeek on RubricId
+| extend Delta = Recent - Prior
+| where RecentN >= 30 and PriorN >= 30       // ignore small samples
+| where abs(Delta) >= 0.05                   // ignore noise
+| project RubricId, Prior, Recent, Delta, PriorN, RecentN,
+          CrossedThreshold = (Prior >= scoreThreshold) != (Recent >= scoreThreshold)
+| order by abs(Delta) desc
