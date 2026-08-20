@@ -44,7 +44,7 @@ class TestsGate:
                 ),
             }
 
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S602 - runs commands.test/lint from .adlc/config.yaml, which agent patches cannot modify (PROTECTED_PATHS)
             command, cwd=str(cfg.root), shell=True,
             capture_output=True, text=True, check=False,
         )

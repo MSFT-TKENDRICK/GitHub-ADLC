@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -198,7 +199,7 @@ def run_list(as_json: bool = typer.Option(False, "--json")) -> None:
     ))
 
 
-def _stage_command(name: str, func) -> None:
+def _stage_command(name: str, func: Callable[[Config, RunDir], Any]) -> None:
     @app.command(name)
     def _cmd(
         run_id: str = typer.Argument("latest"),

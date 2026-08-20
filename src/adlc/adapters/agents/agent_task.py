@@ -166,7 +166,7 @@ def _request(method: str, url: str, token: str, body: dict[str, Any] | None = No
     if not url.startswith("https://"):  # never let a config value downgrade the transport
         raise ApiError(0, f"refusing non-https request to {url!r}")
     payload = json.dumps(body).encode("utf-8") if body is not None else None
-    request = urllib.request.Request(url, data=payload, method=method)
+    request = urllib.request.Request(url, data=payload, method=method)  # noqa: S310 - https enforced above
     request.add_header("Accept", "application/vnd.github+json")
     request.add_header("X-GitHub-Api-Version", API_VERSION)
     request.add_header("Authorization", f"Bearer {token}")
@@ -174,7 +174,7 @@ def _request(method: str, url: str, token: str, body: dict[str, Any] | None = No
     if payload is not None:
         request.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:  # noqa: S310 - https enforced above
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:800] if exc.fp else exc.reason

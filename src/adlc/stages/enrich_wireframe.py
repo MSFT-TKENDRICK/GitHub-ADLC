@@ -141,7 +141,7 @@ def outline(spec_text: str) -> dict[str, Any]:
         for line in text.splitlines():
             heading = _STORY_HEADING.match(line)
             if heading:
-                label = _clean(re.split(r"\s+[-–—]\s+", heading.group(1))[-1], 18)
+                label = _clean(re.split(r"\s+[\u2013\u2014-]\s+", heading.group(1))[-1], 18)
                 if label and label not in nav:
                     nav.append(label)
     nav = nav[:5] or ["Home", "Settings"]
@@ -531,7 +531,7 @@ def build_document(spec_text: str) -> dict[str, Any]:
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
         # This template renders Markdown/JSON, not HTML. HTML escaping here would
         # corrupt the output, so autoescape stays off deliberately.
-        autoescape=False,
+        autoescape=False,  # noqa: S701 - renders Markdown/JSON, not HTML
         undefined=StrictUndefined,
         trim_blocks=True,
         lstrip_blocks=True,

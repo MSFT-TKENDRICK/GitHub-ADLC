@@ -67,7 +67,7 @@ def normalize_severity(value: Any) -> str:
 
 
 def _empty_counts() -> dict[str, int]:
-    return {level: 0 for level in (*SEVERITIES, "unknown")}
+    return dict.fromkeys((*SEVERITIES, "unknown"), 0)
 
 
 def summarize_dependency_review(

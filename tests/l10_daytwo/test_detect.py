@@ -27,7 +27,7 @@ def test_detect_is_false_without_credentials(adapter, cfg: Config) -> None:
     assert isinstance(reason, str)
     # "specific" means it names what was missing, not just "unavailable".
     assert len(reason) > 30, f"reason is not specific enough: {reason!r}"
-    assert "unavailable" != reason.strip().lower()
+    assert reason.strip().lower() != "unavailable"
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=ADAPTER_IDS)

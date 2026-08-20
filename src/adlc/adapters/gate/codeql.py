@@ -1,8 +1,8 @@
-"""CodeQL code-scanning gate (``security``) — L4.
+"""CodeQL code-scanning gate (``security``) -- L4.
 
 Why this module looks the way it does
 -------------------------------------
-The naive design — "run security scanning, then build" — does not work, because
+The naive design -- "run security scanning, then build" -- does not work, because
 CodeQL's own lifecycle forbids it:
 
     codeql init  →  build ONCE  →  analyze/upload  →  poll for the analysis of
@@ -43,6 +43,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from adlc.adapters._transport import require_https
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from adlc.config import Config
     from adlc.ports import GateResult, Run
@@ -75,9 +77,9 @@ DEFAULT_API_URL = "https://api.github.com"
 API_VERSION = "2022-11-28"
 USER_AGENT = "adlc-gate/0.1.0"
 
-#: ``rule.security_severity_level`` — security-relevant CodeQL queries only.
+#: ``rule.security_severity_level`` -- security-relevant CodeQL queries only.
 SECURITY_SEVERITIES: tuple[str, ...] = ("critical", "high", "medium", "low")
-#: ``rule.severity`` — the SARIF level, present on every rule including
+#: ``rule.severity`` -- the SARIF level, present on every rule including
 #: non-security (quality/maintainability) ones.
 SARIF_SEVERITIES: tuple[str, ...] = ("error", "warning", "note", "none")
 
@@ -201,7 +203,8 @@ class GitHubRestClient:
             query = {k: str(v) for k, v in params.items() if v is not None}
             if query:
                 url = f"{url}?{urllib.parse.urlencode(query)}"
-        req = urllib.request.Request(url, method="GET")
+        require_https(url)
+        req = urllib.request.Request(url, method="GET")  # noqa: S310 - scheme checked above
         req.add_header("Authorization", f"Bearer {self.token}")
         req.add_header("Accept", "application/vnd.github+json")
         req.add_header("X-GitHub-Api-Version", API_VERSION)
@@ -252,7 +255,7 @@ class GitHubRestClient:
         """Page through a list endpoint, reporting whether the page cap was hit.
 
         The second element is ``True`` when pagination stopped because
-        ``max_pages`` was exhausted while pages were still coming back full —
+        ``max_pages`` was exhausted while pages were still coming back full --
         i.e. the caller is holding a **partial** result set. Callers that would
         otherwise report ``pass`` must treat that as unverified and fail closed.
         """
@@ -327,7 +330,7 @@ class GitHubRestClient:
 
 
 def _urlopen(req: urllib.request.Request, timeout: float) -> tuple[int, bytes]:  # pragma: no cover
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - Request built only by _get(), which calls require_https
         return int(resp.status), resp.read()
 
 
@@ -415,7 +418,7 @@ def poll_for_analysis(
     clock and assert the timeout branch deterministically, without sleeping.
 
     On timeout the result carries ``timed_out=True`` and ``analysis=None``. The
-    caller MUST translate that into ``not_run`` — never ``pass``.
+    caller MUST translate that into ``not_run`` -- never ``pass``.
 
     Transport errors are recorded and retried rather than raised: a flaky API is
     indistinguishable from a slow one, and both must end in a timeout, not a
@@ -490,8 +493,8 @@ def summarize_alerts(
     the merge commit, not the head SHA, so filtering on it would silently drop
     real findings.
     """
-    by_security = {level: 0 for level in (*SECURITY_SEVERITIES, "unknown")}
-    by_sarif = {level: 0 for level in (*SARIF_SEVERITIES, "unknown")}
+    by_security = dict.fromkeys((*SECURITY_SEVERITIES, "unknown"), 0)
+    by_sarif = dict.fromkeys((*SARIF_SEVERITIES, "unknown"), 0)
     wanted = (sha or "").strip().lower()
     at_sha = 0
     rules: list[str] = []
@@ -587,7 +590,7 @@ def _float_option(options: Mapping[str, Any], key: str, default: float) -> float
 
 
 class CodeQlGate:
-    """``security`` gate — CodeQL code-scanning alerts for an exact head SHA."""
+    """``security`` gate -- CodeQL code-scanning alerts for an exact head SHA."""
 
     id = "security"
     name = "codeql"
@@ -641,7 +644,7 @@ class CodeQlGate:
             return not_run_result(
                 self.id,
                 cfg,
-                "run.headSha is empty — cannot pin the CodeQL analysis to an exact commit, "
+                "run.headSha is empty -- cannot pin the CodeQL analysis to an exact commit, "
                 "and matching on 'latest analysis' would risk a stale-alert false green.",
                 expected=expected,
             )
@@ -766,7 +769,7 @@ def _default_ref(run: Run | Mapping[str, Any] | None) -> str | None:
     """Best-effort ref for the commit under test.
 
     A PR is analysed on ``refs/pull/<n>/merge``; ``GITHUB_REF`` is authoritative
-    inside Actions. Returning ``None`` is safe — it simply widens the server-side
+    inside Actions. Returning ``None`` is safe -- it simply widens the server-side
     analyses query, and the exact ``commit_sha`` match still does the real work.
     """
     env_ref = (os.environ.get("GITHUB_REF") or "").strip()

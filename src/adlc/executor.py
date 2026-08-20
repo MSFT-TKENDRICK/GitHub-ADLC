@@ -78,7 +78,7 @@ class ExecutionReport:
 def assign_levels(graph: TaskGraph) -> dict[str, int]:
     """Kahn's algorithm. Raises :class:`GraphError` on a cycle."""
     nodes = {n["id"]: n for n in graph.get("nodes", [])}
-    indegree = {nid: 0 for nid in nodes}
+    indegree = dict.fromkeys(nodes, 0)
     dependents: dict[str, list[str]] = defaultdict(list)
 
     for nid, node in nodes.items():
@@ -240,7 +240,7 @@ def violated_write_set(patch_text: str | bytes, write_set: list[str]) -> list[st
         patch_text = patch_text.decode("utf-8", errors="replace")
     touched: set[str] = set()
     for line in patch_text.splitlines():
-        if line.startswith("+++ b/") or line.startswith("--- a/") and "/dev/null" not in line:
+        if line.startswith("+++ b/") or (line.startswith("--- a/") and "/dev/null" not in line):
             touched.add(line[6:].strip())
     allowed = set(write_set or [])
     return sorted(
@@ -329,7 +329,7 @@ class Executor:
         test_ok, test_output = True, "no test command configured"
         command = (self.cfg.raw.get("commands") or {}).get("test")
         if command and applied:
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S602 - runs commands.test/lint from .adlc/config.yaml, which agent patches cannot modify (PROTECTED_PATHS)
                 command, cwd=str(self.cfg.root), shell=True,
                 capture_output=True, text=True, check=False,
             )

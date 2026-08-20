@@ -63,7 +63,7 @@ def run_build(
     ok = not failed and not conflicts and not test_failures
 
     variants = [
-        {"key": "control", "role": "control", "commit": report.nodes and graph.get("baseSha") or "", "flagKeys": []},
+        {"key": "control", "role": "control", "commit": (report.nodes and graph.get("baseSha")) or "", "flagKeys": []},
         {
             "key": "candidate-a",
             "role": "treatment",

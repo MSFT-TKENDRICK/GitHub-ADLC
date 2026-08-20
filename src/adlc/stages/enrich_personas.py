@@ -3,7 +3,7 @@
 Renders ``<run_dir>/enrichment/personas.md`` from
 ``src/adlc/templates/personas.md.j2``.
 
-Personas are mined from the spec's own user stories — the ``As a <role>`` clause
+Personas are mined from the spec's own user stories -- the ``As a <role>`` clause
 gives the role, ``I want … so that …`` gives the goals, and the acceptance
 criteria ids inside the same story block are the ones that persona owns. That
 grounding is the whole point: a downstream subagent reading ``personas.md``
@@ -79,7 +79,7 @@ _PROFICIENCY: tuple[tuple[re.Pattern[str], str], ...] = (
             re.IGNORECASE,
         ),
         (
-            "High — comfortable in a terminal, reads API docs and logs directly, "
+            "High -- comfortable in a terminal, reads API docs and logs directly, "
             "expects keyboard shortcuts and scriptable paths."
         ),
     ),
@@ -89,7 +89,7 @@ _PROFICIENCY: tuple[tuple[re.Pattern[str], str], ...] = (
             re.IGNORECASE,
         ),
         (
-            "Medium-high — fluent with specialist tooling in their own domain, "
+            "Medium-high -- fluent with specialist tooling in their own domain, "
             "expects export/filter affordances but not a CLI."
         ),
     ),
@@ -100,13 +100,13 @@ _PROFICIENCY: tuple[tuple[re.Pattern[str], str], ...] = (
             re.IGNORECASE,
         ),
         (
-            "Medium — confident with mainstream SaaS UIs, will not debug anything; "
+            "Medium -- confident with mainstream SaaS UIs, will not debug anything; "
             "needs clear status and a reliable undo."
         ),
     ),
 )
 _PROFICIENCY_DEFAULT = (
-    "Mixed — assume the low end of the range. Must succeed on first use with no "
+    "Mixed -- assume the low end of the range. Must succeed on first use with no "
     "training, no documentation and no support contact."
 )
 
@@ -219,8 +219,7 @@ def _blocks(spec_text: str) -> list[tuple[str, str]]:
 def _clean_clause(text: str) -> str:
     clause = re.sub(r"\s+", " ", (text or "")).strip()
     clause = clause.strip("*_`").strip()
-    clause = re.sub(r"[.,;:]+$", "", clause)
-    return clause
+    return re.sub(r"[.,;:]+$", "", clause)
 
 
 def _role_key(role: str) -> str:
@@ -397,14 +396,14 @@ def extract_personas(spec_text: str) -> tuple[list[dict[str, Any]], list[str]]:
 
 
 def render(personas: list[dict[str, Any]], feature: str, unmapped: list[str]) -> str:
-    """Render the template. Raises on a template error — callers must catch."""
+    """Render the template. Raises on a template error -- callers must catch."""
     from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
         # This template renders Markdown/JSON, not HTML. HTML escaping here would
         # corrupt the output, so autoescape stays off deliberately.
-        autoescape=False,
+        autoescape=False,  # noqa: S701 - renders Markdown/JSON, not HTML
         undefined=StrictUndefined,
         trim_blocks=True,
         lstrip_blocks=True,

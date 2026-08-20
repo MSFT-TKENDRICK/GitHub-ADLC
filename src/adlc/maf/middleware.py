@@ -729,7 +729,7 @@ class GovernanceMiddleware:
 
     # MAF's class-based middleware contract.
     async def process(
-        self, context: Any, next: Callable[..., Awaitable[None]]
+        self, context: Any, next: Callable[..., Awaitable[None]]  # noqa: A002 - MAF middleware protocol names this parameter `next`
     ) -> None:
         await self(context, next)
 

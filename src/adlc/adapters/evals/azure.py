@@ -261,7 +261,7 @@ def map_azure_rows(
             elif score is None and (lowered == "score" or lowered.endswith("_score")):
                 score = coerce_score(value, scale=scale)
         if score is None:
-            for key, value in row.items():
+            for value in row.values():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     score = coerce_score(value, scale=scale)
                     break

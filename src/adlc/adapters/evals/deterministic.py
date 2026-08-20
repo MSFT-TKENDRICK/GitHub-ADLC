@@ -86,7 +86,7 @@ class DeterministicRubricRunner:
             command = check.get("target", "")
             if not command:
                 return 0.0, "no command configured"
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S602 - runs commands.test/lint from .adlc/config.yaml, which agent patches cannot modify (PROTECTED_PATHS)
                 command, cwd=str(self.root), shell=True,
                 capture_output=True, text=True, check=False,
             )

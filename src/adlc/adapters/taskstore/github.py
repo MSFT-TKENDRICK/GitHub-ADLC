@@ -43,6 +43,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from adlc.adapters._transport import require_https
 from adlc.ports import TaskGraph, TaskNode
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -190,8 +191,9 @@ class RestTransport:
     def _open(
         self, method: str, url: str, body: Mapping[str, Any] | None
     ) -> tuple[int, Any, dict[str, str]]:
+        require_https(url)
         payload = None if body is None else json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, method=method.upper())
+        req = urllib.request.Request(url, data=payload, method=method.upper())  # noqa: S310 - scheme checked above
         for key, value in self._headers().items():
             req.add_header(key, value)
 
@@ -216,7 +218,13 @@ class RestTransport:
                 # connection, or a truncated response arrives raw. Callers rely
                 # on this transport only ever emitting its own error type.
                 raise GitHubTaskStoreError(f"{method} {url} failed: {exc!r}") from exc
-        assert last is not None
+        if last is None:
+            # Unreachable while retries >= 1: every loop iteration either
+            # returns or assigns `last`. Raising rather than asserting means the
+            # invariant still holds under `python -O`, where asserts vanish.
+            raise GitHubTaskStoreError(
+                f"{method} {url} produced no response after {self.retries} attempt(s)"
+            )
         return last
 
     # -- transport protocol ----------------------------------------------
@@ -403,7 +411,7 @@ def render_node_body(
     sections = [
         node_marker(run_id, node_id),
         (
-            f"**Task `{node_id}`** — kind `{node.get('kind', 'implement')}` · "
+            f"**Task `{node_id}`** -- kind `{node.get('kind', 'implement')}` · "
             f"level `{node.get('level', 0)}` · run `{run_id}`"
         ),
         "",
@@ -480,7 +488,7 @@ def render_parent_body(
         )
     heading = f"ADLC run `{run_id}`"
     if total_parts > 1:
-        heading += f" — part {part} of {total_parts}"
+        heading += f" -- part {part} of {total_parts}"
     sections = [
         parent_marker(run_id, part),
         f"# {heading}",
@@ -727,7 +735,7 @@ class GitHubTaskStore:
                 return (
                     False,
                     (
-                        "GITHUB_REPOSITORY not set and no github.com git remote found — "
+                        "GITHUB_REPOSITORY not set and no github.com git remote found -- "
                         "falling back to sqlite task store"
                     ),
                 )
@@ -741,7 +749,7 @@ class GitHubTaskStore:
     def slug(self) -> str:
         if not self._owner or not self._repo:
             raise GitHubTaskStoreError(
-                "GitHub repository unresolved — set GITHUB_REPOSITORY as 'owner/repo'"
+                "GitHub repository unresolved -- set GITHUB_REPOSITORY as 'owner/repo'"
             )
         return f"{self._owner}/{self._repo}"
 
@@ -751,7 +759,7 @@ class GitHubTaskStore:
             token = resolve_token()
             if token is None:
                 raise GitHubTaskStoreError(
-                    "GITHUB_TOKEN not set — the GitHub task store cannot be used"
+                    "GITHUB_TOKEN not set -- the GitHub task store cannot be used"
                 )
             self._transport = RestTransport(
                 token,
@@ -1258,7 +1266,7 @@ class GitHubTaskStore:
         if not self.project_id:
             self.warnings.append(
                 "taskstore.github.enableProjects is on but no projectId/ADLC_GITHUB_PROJECT "
-                "was provided — skipping Projects v2 sync"
+                "was provided -- skipping Projects v2 sync"
             )
             return
         for node in nodes:
@@ -1339,7 +1347,7 @@ def _record(issue: Mapping[str, Any]) -> dict[str, Any]:
 def _parent_title(run_id: str, part: int, total: int) -> str:
     if total <= 1:
         return f"ADLC run {run_id}"
-    return f"ADLC run {run_id} — tasks part {part}/{total}"
+    return f"ADLC run {run_id} -- tasks part {part}/{total}"
 
 
 def _node_title(node: TaskNode) -> str:

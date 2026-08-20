@@ -120,7 +120,7 @@ def test_assert_run_refuses_when_nothing_was_judged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(assert_mod, "invoke_tool", fake_assert_cli({}))
-    with pytest.raises(EvalBackendError, match="no scores.jsonl"):
+    with pytest.raises(EvalBackendError, match=r"no scores\.jsonl"):
         AssertEvalRunner(assert_cfg).run(run_doc, rubric)
     # Nothing was written, so the gate reports not_run rather than a fabricated verdict.
     assert EvalsGate().evaluate(run_doc, assert_cfg)["status"] == "not_run"
@@ -189,5 +189,5 @@ def test_promptfoo_run_fails_loudly_when_no_results_file_appears(
         "invoke_tool",
         lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "config error"),
     )
-    with pytest.raises(EvalBackendError, match="results.json"):
+    with pytest.raises(EvalBackendError, match=r"results\.json"):
         PromptfooEvalRunner(cfg).run(run_doc, rubric)

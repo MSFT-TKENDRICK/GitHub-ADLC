@@ -105,7 +105,7 @@ def test_analysis_appearing_late_is_found(clock: FakeClock, analyses: list[dict[
         return analyses if calls["n"] >= 3 else []
 
     poll = poll_for_analysis(
-        lambda: fetch(),
+        fetch,
         sha=HEAD_SHA,
         timeout=300.0,
         interval=10.0,
@@ -125,7 +125,7 @@ def test_api_errors_are_retried_then_time_out(clock: FakeClock) -> None:
         raise GitHubApiError("HTTP 502: bad gateway", status=502)
 
     poll = poll_for_analysis(
-        lambda: fetch(),
+        fetch,
         sha=HEAD_SHA,
         timeout=20.0,
         interval=10.0,
@@ -144,7 +144,7 @@ def test_unexpected_exceptions_do_not_escape(clock: FakeClock) -> None:
         raise ValueError("something unexpected")
 
     poll = poll_for_analysis(
-        lambda: fetch(),
+        fetch,
         sha=HEAD_SHA,
         timeout=0.0,
         sleep=clock.sleep,
