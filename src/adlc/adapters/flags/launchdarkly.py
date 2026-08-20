@@ -69,14 +69,17 @@ class LaunchDarklyProvider:
 
     def __init__(
         self,
-        run_dir: Path | str | None = None,
+        path: Path | str | None = None,
         *,
         telemetry: Any = None,
         client: Any = None,
     ) -> None:
-        self._run_dir = Path(run_dir) if run_dir else None
+        #: Where :meth:`materialize` writes the manifest. Same meaning as
+        #: ``FlagdFileProvider.path``, so the two providers are interchangeable.
+        self.path = Path(path) if path else None
         self._telemetry = telemetry
         self._client = client
+        self._flag_set_id: str | None = None
 
     # -- availability -----------------------------------------------------
 
@@ -113,7 +116,7 @@ class LaunchDarklyProvider:
 
     # -- FlagProvider -----------------------------------------------------
 
-    def materialize(self, run: Run | Mapping[str, Any]) -> Path:
+    def materialize(self, run: Run) -> Path:
         """Write the flag manifest this run expects LaunchDarkly to serve.
 
         LaunchDarkly flags live server-side and an SDK key is read-only, so
@@ -144,7 +147,7 @@ class LaunchDarklyProvider:
             "schemaVersion": MANIFEST_SCHEMA_VERSION,
             "provider": self.name,
             "runId": run_id,
-            "flagSetId": run_id,
+            "flagSetId": f"adlc/{run_id}",
             "project": os.environ.get(PROJECT_ENV) or None,
             "environment": os.environ.get(ENVIRONMENT_ENV) or None,
             "credentialSource": SDK_KEY_ENV,
@@ -156,12 +159,14 @@ class LaunchDarklyProvider:
             "flags": list(flags.values()),
         }
 
-        path = self._manifest_path(run_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        target = self.path or Path(".adlc") / "runs" / run_id / MANIFEST_NAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        return path
+        self.path = target
+        self._flag_set_id = str(manifest["flagSetId"])
+        return target
 
     def evaluate(self, key: str, ctx: dict[str, Any]) -> FlagResult:
         """Evaluate one flag through the OpenFeature client.
@@ -173,7 +178,10 @@ class LaunchDarklyProvider:
             accessor (bool → ``get_boolean_details`` and so on). Defaults to
             ``False``.
         ``flagSetId``
-            Recorded on the emitted telemetry as ``feature_flag.set.id``.
+            Recorded on the emitted telemetry as ``feature_flag.set.id``; falls
+            back to the flag set named by the last :meth:`materialize` call.
+
+        Neither is forwarded to LaunchDarkly as a context attribute.
 
         Never raises: an evaluation error is returned as a ``FlagResult`` with
         ``reason`` set to ``ERROR``, because a flag backend outage must not fail
@@ -181,8 +189,6 @@ class LaunchDarklyProvider:
         """
         context = dict(ctx or {})
         default = context.pop("default", False)
-        flag_set_id = context.pop("flagSetId", None)
-        targeting_key = context.get("targetingKey") or context.get("key")
 
         try:
             client = self._openfeature_client()
@@ -197,26 +203,22 @@ class LaunchDarklyProvider:
             _LOG.warning("LaunchDarkly evaluation of '%s' failed: %s", key, exc)
             result = {"key": key, "value": default, "variant": None, "reason": "ERROR"}
 
-        self._emit_evaluation(result, targeting_key, flag_set_id)
+        self._emit_evaluation(result, ctx or {})
         return result  # type: ignore[return-value]
 
     # -- telemetry --------------------------------------------------------
 
-    def evaluation_attributes(
-        self,
-        result: Mapping[str, Any],
-        *,
-        context_id: str | None = None,
-        flag_set_id: str | None = None,
-    ) -> dict[str, Any]:
-        """OTel attributes for one evaluation, using current semconv names.
+    def span_attributes(self, result: FlagResult, ctx: dict[str, Any]) -> dict[str, Any]:
+        """OTel feature-flag semconv attributes for this evaluation.
 
-        Delegates to :func:`adlc.stages.experiment.flag_evaluation_attributes` so
-        every provider emits identical attribute keys: ``feature_flag.key``,
+        Same signature and same output shape as
+        ``FlagdFileProvider.span_attributes``, so a caller can emit spans for
+        either provider without special-casing. Delegates to
+        :func:`adlc.stages.experiment.flag_evaluation_attributes` so the attribute
+        names have exactly one definition: ``feature_flag.key``,
         ``feature_flag.provider.name`` (dotted — the ``provider_name`` spelling is
-        obsolete), ``feature_flag.result.variant``, ``feature_flag.result.value``,
-        ``feature_flag.result.reason``, ``feature_flag.context.id`` and
-        ``feature_flag.set.id``.
+        obsolete), ``feature_flag.result.variant`` / ``.value`` / ``.reason``,
+        ``feature_flag.context.id`` and ``feature_flag.set.id``.
         """
         return flag_evaluation_attributes(
             str(result.get("key")),
@@ -224,36 +226,32 @@ class LaunchDarklyProvider:
             value=result.get("value"),
             variant=result.get("variant"),
             reason=result.get("reason"),
-            context_id=context_id,
-            flag_set_id=flag_set_id,
+            context_id=ctx.get("targetingKey") or ctx.get("id") or ctx.get("key"),
+            flag_set_id=ctx.get("flagSetId") or self._flag_set_id,
         )
 
-    def _emit_evaluation(
-        self, result: Mapping[str, Any], context_id: Any, flag_set_id: Any
-    ) -> None:
+    def _emit_evaluation(self, result: Mapping[str, Any], ctx: Mapping[str, Any]) -> None:
         if self._telemetry is None:
             return
-        attributes = self.evaluation_attributes(
-            result,
-            context_id=str(context_id) if context_id else None,
-            flag_set_id=str(flag_set_id) if flag_set_id else None,
-        )
+        attributes = self.span_attributes(result, dict(ctx))  # type: ignore[arg-type]
+        builder = getattr(self._telemetry, "emit_flag_evaluation", None)
         try:
-            self._telemetry.emit({"name": "feature_flag.evaluation", "attributes": attributes})
+            if builder is not None:
+                builder(
+                    key=str(result.get("key")),
+                    variant=result.get("variant") or "",
+                    value=result.get("value"),
+                    reason=str(result.get("reason") or ""),
+                    provider=self.name,
+                    context_id=attributes.get("feature_flag.context.id"),
+                    flag_set_id=attributes.get("feature_flag.set.id"),
+                )
+            else:
+                self._telemetry.emit({"name": "feature_flag.evaluation", **attributes})
         except Exception:  # noqa: BLE001 - telemetry is never load-bearing
             _LOG.debug("telemetry emit failed for flag '%s'", result.get("key"), exc_info=True)
 
     # -- internals --------------------------------------------------------
-
-    def _manifest_path(self, run_id: str) -> Path:
-        if self._run_dir is not None:
-            return self._run_dir / MANIFEST_NAME
-        override = os.environ.get("ADLC_RUN_DIR")
-        if override:
-            return Path(override) / MANIFEST_NAME
-        from adlc.config import Config as _Config
-
-        return Path(_Config.load().run_dir(run_id)) / MANIFEST_NAME
 
     def _openfeature_client(self) -> Any:
         """Bind the OpenFeature LaunchDarkly provider once, then reuse the client.
@@ -293,9 +291,18 @@ class LaunchDarklyProvider:
         return accessor(key, default, evaluation_context)
 
 
+#: Context keys that are ADLC conveniences or the targeting key itself. None of
+#: them may be forwarded to LaunchDarkly as a custom context attribute.
+RESERVED_CONTEXT_KEYS = ("targetingKey", "key", "default", "flagSetId")
+
+
+def _context_attributes(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Custom attributes to send, with ADLC-only keys stripped."""
+    return {k: v for k, v in context.items() if k not in RESERVED_CONTEXT_KEYS}
+
+
 def _evaluation_context(context: Mapping[str, Any]) -> Any:
     """Build an OpenFeature ``EvaluationContext``, tolerating an absent SDK."""
-    attributes = {k: v for k, v in context.items() if k not in ("targetingKey", "key")}
     targeting_key = context.get("targetingKey") or context.get("key")
     try:
         from openfeature.evaluation_context import EvaluationContext
@@ -303,7 +310,7 @@ def _evaluation_context(context: Mapping[str, Any]) -> Any:
         return None
     return EvaluationContext(
         targeting_key=str(targeting_key) if targeting_key else None,
-        attributes=attributes,
+        attributes=_context_attributes(context),
     )
 
 

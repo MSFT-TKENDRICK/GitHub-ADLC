@@ -101,6 +101,11 @@ from adlc.adapters.export.oes import is_comparative
 ok, reason = is_comparative(run)
 ```
 
+`adlc export oes RUN` calls `OesExporter().export(load_run(rd), rd.path / "oes.json")`.
+Because `export()` must return a `Path`, refusal has to be an exception; a CLI that
+wants a tidy one-line message rather than a traceback should catch `OesExportError` and
+exit non-zero with `str(exc)`.
+
 **Nothing is ever fabricated.** The exporter emits no `pValue`, `qValue`,
 `standardError`, `confidenceInterval`, `credibleInterval`,
 `statisticalPowerObserved`, `probabilityOfImprovement`, `expectedLoss`, `power`,
@@ -218,10 +223,22 @@ Three checks are **synthesized** by the exporter:
 
 ## 5. The experiment stage
 
-`adlc.stages.experiment` has three phases. Each appends a new immutable attempt at
-`runs/<run>/stages/experiment.<attempt>.json`; **none of them writes `run.json`** —
-only `adlc reduce` may, which is what makes parallel Actions jobs race-free. The stage
-enforces this itself: its writer refuses any path named `run.json`.
+`adlc.stages.experiment` has three phases. Each appends a new immutable attempt via
+`RunDir.write_stage("experiment", ...)`, so history stays append-only; **none of them
+writes `run.json`** — only `adlc reduce` may, which is what makes parallel Actions jobs
+race-free. The stage enforces this itself: `_write_output` refuses any path named
+`run.json`.
+
+All three follow the spine's stage convention, `(cfg: Config, rd: RunDir, ...)`:
+
+```python
+from adlc.stages.experiment import plan, expose, analyze, run_experiment
+
+plan(cfg, rd)                                  # phase "plan"
+expose(cfg, rd, provider=provider)             # phase "run"
+analyze(cfg, rd, measurements)                 # phase "analyze"
+run_experiment(cfg, rd, "analyze", measurements=rows)   # dispatcher
+```
 
 ### `plan` — the pre-registration
 
@@ -257,13 +274,19 @@ missing or broken flag adapter is recorded, never raised — and when the auto-s
 adapter reports itself *unavailable*, `exposure.providerNote` says so, so the record
 never implies flags were served when they were not.
 
+The provider is handed the `adlc-run/v1` variant shape (`key`, `role`, `commit`,
+`flagKeys`), not the OES-flavoured one the plan stores, so the spine's flagd file
+provider works unchanged. The commit is recovered from `codeReferences` when needed.
+
 ### `analyze` — measured results
 
-Loads measurements — from an argument, `experiment/measurements.json`, or
-`evidence/<variant>/metrics.json` — re-verifies the pre-registration digest, and
-computes per-metric comparisons against the baseline variant (`control`, else
-`baseline`, else the first declared variant). Writes `experiment/analysis.json`. Returns
-`fail` if the pre-registration changed after it was written.
+Loads measurements — from an argument, `experiment/measurements.json`, or the evidence
+stage's own `evidence/<variant>/*-measurements.json` rows (a plain
+`evidence/<variant>/metrics.json` map of `{metricId: value}` also works) — re-verifies
+the pre-registration digest, and computes per-metric comparisons against the baseline
+variant (`control`, else `baseline`, else the first declared variant). Writes
+`experiment/analysis.json`. Returns `fail` if the pre-registration changed after it was
+written.
 
 ### Candidates are commits, not flag variants
 
@@ -282,7 +305,11 @@ would be decorative. That is why:
 ### Flag telemetry uses current OpenTelemetry semantic conventions
 
 `adlc.stages.experiment.flag_evaluation_attributes()` is the single vendor-neutral
-builder every provider funnels through, so attribute names cannot drift apart:
+builder every provider funnels through, so attribute names cannot drift apart. Both
+`FlagdFileProvider.span_attributes(result, ctx)` and
+`LaunchDarklyProvider.span_attributes(result, ctx)` produce the same shape, and spans
+are emitted **flat** (not nested under `attributes`), matching
+`OtelFileTelemetry.emit_flag_evaluation`:
 
 | Attribute | Meaning |
 |---|---|
@@ -290,9 +317,13 @@ builder every provider funnels through, so attribute names cannot drift apart:
 | `feature_flag.provider.name` | **dotted** — the older `feature_flag.provider_name` spelling is obsolete |
 | `feature_flag.result.variant` | the variant returned |
 | `feature_flag.result.value` | the value returned |
-| `feature_flag.result.reason` | e.g. `TARGETING_MATCH`, `STATIC`, `ERROR` |
+| `feature_flag.result.reason` | lower-cased, e.g. `targeting_match`, `static`, `error` |
 | `feature_flag.context.id` | the evaluation context's targeting key |
 | `feature_flag.set.id` | the flag set — ADLC uses the experiment id |
+
+When the telemetry sink offers `emit_flag_evaluation(...)`, the stage and the adapter
+both prefer it so the spine owns span construction; otherwise the identical flat dict
+goes through the plain `Telemetry.emit` port.
 
 ---
 
@@ -386,15 +417,22 @@ Terraform / LD API step) provisions from, and it is hashable evidence of what th
 intended to serve. The manifest names `LAUNCHDARKLY_SDK_KEY`; it never contains its
 value.
 
+The constructor takes `path` with exactly the same meaning as
+`FlagdFileProvider(path=...)` — the file to write — defaulting to
+`.adlc/runs/<run-id>/flags.launchdarkly.json`, so the two providers are drop-in
+interchangeable.
+
 ### `evaluate()`
 
 Evaluates through the OpenFeature client, choosing the typed accessor from the type of
 `ctx["default"]`. It **never raises**: a backend outage returns the default value with
-`reason: "ERROR"`, because a flag outage must not fail a build. Every evaluation emits
-the semantic-convention attributes in §5 to the injected `Telemetry`, if any.
+`reason: "ERROR"`, because a flag outage must not fail a build. `default` and
+`flagSetId` are ADLC conveniences and are stripped before the context reaches
+LaunchDarkly. Every evaluation emits the semantic-convention attributes in §5 to the
+injected `Telemetry`, if any.
 
 ```python
-provider = LaunchDarklyProvider(run_dir=run_dir, telemetry=telemetry)
+provider = LaunchDarklyProvider(rd.path / "flags.launchdarkly.json", telemetry=telemetry)
 provider.materialize(run)
 provider.evaluate("adlc.exp.a1b2", {"targetingKey": "ci-runner-7", "default": "control"})
 ```
@@ -417,11 +455,17 @@ provider.evaluate("adlc.exp.a1b2", {"targetingKey": "ci-runner-7", "default": "c
 - `test_launchdarkly_provider.py` — `detect()` returns `(False, reason)` with no key,
   never raises, and opens no socket; manifest and evaluation behaviour is exercised
   through an injected fake OpenFeature client.
-- `test_experiment_stage.py` — append-only attempts, `run.json` untouched, tamper
-  detection, stage results validated against the frozen `stageResult` schema, and an
-  end-to-end plan → run → analyze → reduce → export that validates as OES.
+- `test_experiment_stage.py` — append-only attempts through `RunDir.write_stage`,
+  `run.json` untouched, tamper detection, stage results validated against the frozen
+  `stageResult` schema, interoperability with the spine's real `FlagdFileProvider` and
+  `OtelFileTelemetry`, and an end-to-end plan → expose → analyze → `reduce_run` → export
+  that validates as OES.
 
 ```bash
+# All 10 leaves share one interpreter, so select this worktree explicitly rather
+# than relying on an editable install that another session may have overwritten.
+$env:PYTHONPATH = "<worktree>\src"
 python -m pytest tests/l7_experiment -q
-ruff check src/adlc/adapters/flags src/adlc/adapters/export src/adlc/stages/experiment.py
+ruff check src/adlc/adapters/flags/launchdarkly.py src/adlc/adapters/export/oes.py \
+           src/adlc/stages/experiment.py
 ```

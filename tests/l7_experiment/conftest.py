@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from adlc.config import Config
+from adlc.runs import RunDir
 
 DATA = Path(__file__).parent / "data"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -65,19 +66,30 @@ def cfg(tmp_path: Path) -> Config:
     return Config.load(tmp_path)
 
 
+@pytest.fixture
+def rd(cfg: Config) -> RunDir:
+    """A ``RunDir`` for the golden run id, with the standard sub-directories."""
+    run_dir = RunDir(cfg, "2026-08-19-a1b2")
+    for directory in (run_dir.stages_dir, run_dir.enrichment_dir, run_dir.evidence_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 @pytest.fixture(autouse=True)
 def _no_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Guarantee the whole suite runs credential-free and reproducibly.
+    """Guarantee the whole suite runs credential-free, reproducibly and in a sandbox.
 
-    ``ADLC_RUN_DIR`` is pointed at a temporary directory rather than unset, so a
-    provider that resolves its own output path can never write into the checkout.
+    The working directory is moved into ``tmp_path`` because both flag providers
+    fall back to a **cwd-relative** ``.adlc/runs/<id>/`` when no explicit path is
+    given; without this a test would write into the checkout.
     """
     for name in (
         "LAUNCHDARKLY_SDK_KEY",
         "LAUNCHDARKLY_PROJECT",
         "LAUNCHDARKLY_ENVIRONMENT",
         "ADLC_OES_SCHEMA",
+        "ADLC_RUN_DIR",
         "SOURCE_DATE_EPOCH",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ADLC_RUN_DIR", str(tmp_path / "adlc-run-dir"))
+    monkeypatch.chdir(tmp_path)

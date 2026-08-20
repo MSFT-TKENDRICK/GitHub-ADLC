@@ -8,6 +8,7 @@ client so it can be tested without an SDK key or a network connection.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from adlc.adapters.flags.launchdarkly import (
     REQUIRED_MODULES,
     SDK_KEY_ENV,
     LaunchDarklyProvider,
+    _context_attributes,
 )
 from adlc.config import Config
 from adlc.ports import FlagProvider
@@ -149,12 +151,12 @@ def test_provider_satisfies_the_frozen_protocol() -> None:
 
 
 def test_materialize_writes_the_variant_to_flag_mapping(tmp_path: Path) -> None:
-    path = LaunchDarklyProvider(run_dir=tmp_path).materialize(RUN)
+    path = LaunchDarklyProvider(tmp_path / MANIFEST_NAME).materialize(RUN)
     assert path == tmp_path / MANIFEST_NAME
     manifest = json.loads(path.read_text(encoding="utf-8"))
     assert manifest["provider"] == "launchdarkly"
     assert manifest["runId"] == "2026-08-19-a1b2"
-    assert manifest["flagSetId"] == "2026-08-19-a1b2"
+    assert manifest["flagSetId"] == "adlc/2026-08-19-a1b2"
     flag = manifest["flags"][0]
     assert flag["key"] == "adlc.exp.a1b2"
     assert flag["variations"] == ["candidate-a"]
@@ -166,24 +168,44 @@ def test_materialize_never_writes_the_credential(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(SDK_KEY_ENV, "sdk-super-secret-value")
-    path = LaunchDarklyProvider(run_dir=tmp_path).materialize(RUN)
+    path = LaunchDarklyProvider(tmp_path / MANIFEST_NAME).materialize(RUN)
     body = path.read_text(encoding="utf-8")
     assert "sdk-super-secret-value" not in body
     assert SDK_KEY_ENV in body, "the manifest names the env var, never its value"
 
 
-def test_materialize_honours_the_run_dir_environment_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ADLC_RUN_DIR", str(tmp_path / "elsewhere"))
-    path = LaunchDarklyProvider().materialize(RUN)
-    assert path == tmp_path / "elsewhere" / MANIFEST_NAME
+def test_materialize_defaults_to_the_run_directory(tmp_path: Path) -> None:
+    """Same default layout as the spine's flagd file provider."""
+    provider = LaunchDarklyProvider()
+    path = provider.materialize(RUN)
+    assert path == Path(".adlc") / "runs" / "2026-08-19-a1b2" / MANIFEST_NAME
     assert path.is_file()
+    # The resolved location is remembered, exactly like FlagdFileProvider.path.
+    assert provider.path == path
 
 
 def test_materialize_handles_a_run_with_no_flags(tmp_path: Path) -> None:
-    path = LaunchDarklyProvider(run_dir=tmp_path).materialize({"runId": "r1", "variants": []})
+    path = LaunchDarklyProvider(tmp_path / MANIFEST_NAME).materialize(
+        {"runId": "r1", "variants": []}
+    )
     assert json.loads(path.read_text(encoding="utf-8"))["flags"] == []
+
+
+def test_provider_surface_matches_the_spine_default() -> None:
+    """A caller must be able to swap flagd-file for LaunchDarkly with no changes."""
+    from adlc.adapters.flags.flagd_file import FlagdFileProvider
+
+    for method in ("detect", "materialize", "evaluate", "span_attributes"):
+        assert hasattr(LaunchDarklyProvider, method)
+    assert inspect.signature(LaunchDarklyProvider.span_attributes) == inspect.signature(
+        FlagdFileProvider.span_attributes
+    )
+    assert inspect.signature(LaunchDarklyProvider.evaluate) == inspect.signature(
+        FlagdFileProvider.evaluate
+    )
+    assert inspect.signature(LaunchDarklyProvider.materialize) == inspect.signature(
+        FlagdFileProvider.materialize
+    )
 
 
 # -- evaluate -----------------------------------------------------------------
@@ -236,32 +258,81 @@ def test_telemetry_uses_current_semconv_attribute_names() -> None:
     )
 
     (span,) = telemetry.spans
-    assert span["name"] == "feature_flag.evaluation"
-    attributes = span["attributes"]
-    assert attributes == {
+    assert span == {
+        "name": "feature_flag.evaluation",
         "feature_flag.key": "adlc.exp.a1b2",
         "feature_flag.provider.name": "launchdarkly",
         "feature_flag.result.value": "candidate-a",
         "feature_flag.result.variant": "candidate-a",
-        "feature_flag.result.reason": "TARGETING_MATCH",
+        "feature_flag.result.reason": "targeting_match",
         "feature_flag.context.id": "ci-runner-7",
         "feature_flag.set.id": "exp-a1b2",
     }
-    assert set(attributes) <= set(FLAG_ATTRIBUTES)
+    assert set(span) - {"name"} <= set(FLAG_ATTRIBUTES)
+
+
+def test_span_attributes_match_the_spine_shape() -> None:
+    """Identical keys to ``FlagdFileProvider.span_attributes`` for the same input."""
+    from adlc.adapters.flags.flagd_file import FlagdFileProvider
+
+    result = {
+        "key": "adlc.exp.a1b2",
+        "value": "candidate-a",
+        "variant": "candidate-a",
+        "reason": "TARGETING_MATCH",
+    }
+    ctx = {"targetingKey": "ci-runner-7"}
+    ours = LaunchDarklyProvider().span_attributes(result, ctx)
+    theirs = FlagdFileProvider().span_attributes(result, ctx)
+
+    assert set(ours) == set(theirs)
+    assert ours["feature_flag.provider.name"] == "launchdarkly"
+    assert ours["feature_flag.result.reason"] == "targeting_match"
+    assert ours["feature_flag.context.id"] == "ci-runner-7"
+
+
+def test_flag_set_id_falls_back_to_the_materialized_manifest(tmp_path: Path) -> None:
+    provider = LaunchDarklyProvider(tmp_path / "flags.json", client=_FakeClient())
+    provider.materialize(
+        {"runId": "2026-08-19-a1b2", "variants": [{"key": "a", "flagKeys": ["f"]}]}
+    )
+    attributes = provider.span_attributes({"key": "f", "reason": "DEFAULT"}, {})
+    assert attributes["feature_flag.set.id"] == "adlc/2026-08-19-a1b2"
+
+
+def test_adlc_only_context_keys_are_not_sent_to_launchdarkly() -> None:
+    """``default`` and ``flagSetId`` are ADLC conveniences, not LD context attributes."""
+    attributes = _context_attributes(
+        {"targetingKey": "ci", "default": "control", "flagSetId": "exp-a1b2", "tier": "gold"}
+    )
+    assert attributes == {"tier": "gold"}
 
 
 def test_obsolete_semconv_spellings_are_never_emitted() -> None:
     telemetry = _RecordingTelemetry()
     provider = LaunchDarklyProvider(client=_FakeClient(), telemetry=telemetry)
     provider.evaluate("adlc.exp.a1b2", {"targetingKey": "ci", "default": "control"})
-    attributes = telemetry.spans[0]["attributes"]
+    span = telemetry.spans[0]
     for obsolete in (
         "feature_flag.provider_name",
         "feature_flag.variant",
         "feature_flag.evaluation.reason",
         "feature_flag.context.key",
     ):
-        assert obsolete not in attributes
+        assert obsolete not in span
+
+
+def test_telemetry_prefers_the_spine_builder(tmp_path: Path) -> None:
+    from adlc.adapters.telemetry.otel_file import OtelFileTelemetry
+
+    telemetry = OtelFileTelemetry(tmp_path / "otel.jsonl")
+    provider = LaunchDarklyProvider(client=_FakeClient(), telemetry=telemetry)
+    provider.evaluate("adlc.exp.a1b2", {"targetingKey": "ci", "default": "control"})
+
+    span = json.loads((tmp_path / "otel.jsonl").read_text(encoding="utf-8").strip())
+    assert span["name"] == "feature_flag.evaluation"
+    assert span["feature_flag.provider.name"] == "launchdarkly"
+    assert span["feature_flag.result.reason"] == "targeting_match"
 
 
 def test_telemetry_failure_does_not_break_evaluation() -> None:

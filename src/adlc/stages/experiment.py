@@ -24,28 +24,30 @@ Three phases, each appended as a new immutable attempt:
     Loads measured outcomes, re-verifies the pre-registration digest and computes
     per-metric comparisons against the baseline variant.
 
-Every phase returns a :class:`~adlc.ports.StageResult` and writes **only** to
-``runs/<run>/stages/experiment.<attempt>.json`` plus its own outputs under
-``runs/<run>/experiment/``. It never writes ``run.json`` — only ``adlc reduce``
-may do that, which is what keeps parallel Actions jobs race-free.
+Every phase returns a :class:`~adlc.ports.StageResult` written through
+``RunDir.write_stage``, which appends ``stages/experiment.<attempt>.json`` and
+never overwrites. Its own outputs live under ``runs/<run>/experiment/``. It never
+writes ``run.json`` — only ``adlc reduce`` may do that, which is what keeps
+parallel Actions jobs race-free — and ``_write_output`` refuses that filename
+outright rather than relying on reviewer discipline.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import subprocess
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from adlc.reduce import load_run
+from adlc.runs import RunDir, utcnow, write_json
+
 if TYPE_CHECKING:  # pragma: no cover
     from adlc.config import Config
-    from adlc.ports import StageResult
+    from adlc.ports import Run, StageResult
 
 _LOG = logging.getLogger(__name__)
 
@@ -156,20 +158,21 @@ def flag_evaluation_attributes(
 
     Vendor-neutral on purpose: the LaunchDarkly adapter, the spine's flagd file
     provider and this stage all funnel through here so the attribute names can
-    never drift apart. Keys with no value are omitted rather than emitted null.
+    never drift apart.
+
+    Shape matches ``FlagdFileProvider.span_attributes`` exactly — all seven keys
+    are always present (``OtelFileTelemetry.emit`` strips the ``None`` ones on
+    write), and ``reason`` is lower-cased the same way the spine lower-cases it.
     """
-    attrs: dict[str, Any] = {ATTR_FLAG_KEY: key, ATTR_FLAG_PROVIDER_NAME: provider_name}
-    if value is not None:
-        attrs[ATTR_FLAG_RESULT_VALUE] = value
-    if variant is not None:
-        attrs[ATTR_FLAG_RESULT_VARIANT] = variant
-    if reason is not None:
-        attrs[ATTR_FLAG_RESULT_REASON] = reason
-    if context_id is not None:
-        attrs[ATTR_FLAG_CONTEXT_ID] = context_id
-    if flag_set_id is not None:
-        attrs[ATTR_FLAG_SET_ID] = flag_set_id
-    return attrs
+    return {
+        ATTR_FLAG_KEY: key,
+        ATTR_FLAG_PROVIDER_NAME: provider_name,
+        ATTR_FLAG_RESULT_VARIANT: variant,
+        ATTR_FLAG_RESULT_VALUE: value,
+        ATTR_FLAG_RESULT_REASON: (reason or "").lower() or None,
+        ATTR_FLAG_CONTEXT_ID: context_id,
+        ATTR_FLAG_SET_ID: flag_set_id,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -440,10 +443,6 @@ def _iter_definitions(
 # ---------------------------------------------------------------------------
 
 
-def _utcnow() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def _sha256_bytes(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -458,62 +457,38 @@ def _load_structured(path: Path) -> Any:
         return None
 
 
-def _write_json(path: Path, payload: Any) -> bytes:
+def _write_output(rd: RunDir, relative: str, payload: Any) -> bytes:
+    """Write one of this stage's own outputs, and never ``run.json``.
+
+    ``adlc reduce`` is the only writer of ``run.json`` — that is what eliminates
+    concurrent-write races across parallel Actions jobs — so the guard is here
+    rather than left to reviewer discipline.
+    """
+    path = rd.path / relative
     if path.name == "run.json":
         raise RuntimeError(
             "the experiment stage must never write run.json; only `adlc reduce` may"
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    path.write_bytes(encoded)
-    return encoded
+    write_json(path, payload)
+    return path.read_bytes()
 
 
-def _run_dir(cfg: Config, run_id: str) -> Path:
-    return Path(cfg.run_dir(run_id))
-
-
-def _load_run(cfg: Config, run_id: str) -> dict[str, Any]:
-    """Read the reduced ``run.json`` if one exists yet. Read-only, always."""
-    document = _load_structured(_run_dir(cfg, run_id) / "run.json")
+def _safe_load_run(rd: RunDir) -> dict[str, Any]:
+    """Read the reduced run (or its seed) if one exists yet. Read-only, always."""
+    try:
+        document = load_run(rd)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
     return dict(document) if isinstance(document, Mapping) else {}
 
 
-def _stage_files(run_dir: Path) -> list[Path]:
-    stages = run_dir / "stages"
-    if not stages.is_dir():
-        return []
-    files = []
-    for path in stages.glob(f"{STAGE}.*.json"):
-        middle = path.name[len(STAGE) + 1 : -len(".json")]
-        if middle.isdigit():
-            files.append((int(middle), path))
-    return [path for _, path in sorted(files)]
-
-
-def _next_attempt(run_dir: Path) -> int:
-    attempts = []
-    for path in _stage_files(run_dir):
-        middle = path.name[len(STAGE) + 1 : -len(".json")]
-        attempts.append(int(middle))
-    return max(attempts, default=0) + 1
-
-
-def _prior_results(run_dir: Path) -> list[dict[str, Any]]:
-    """Previously recorded attempts of this stage, oldest first."""
-    out = []
-    for path in _stage_files(run_dir):
-        document = _load_structured(path)
-        if isinstance(document, Mapping):
-            out.append(dict(document))
-    return out
-
-
-def _phase_result(run_dir: Path, phase: str) -> dict[str, Any] | None:
-    """Most recent attempt of a given phase."""
-    for document in reversed(_prior_results(run_dir)):
-        if (document.get("data") or {}).get("phase") == phase:
-            return document
+def _phase_result(rd: RunDir, phase: str) -> dict[str, Any] | None:
+    """Most recent attempt of a given phase of this stage."""
+    for result in reversed(rd.stage_results()):
+        if result.get("stage") != STAGE:
+            continue
+        if (result.get("data") or {}).get("phase") == phase:
+            return dict(result)
     return None
 
 
@@ -526,20 +501,12 @@ def _git_sha(root: Path) -> str | None:
     """
     if not (root / ".git").exists():
         return None
+    from adlc.runs import current_sha
+
     try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        return current_sha(root) or None
     except Exception:  # noqa: BLE001 - git may be absent; never fail the stage
         return None
-    if completed.returncode != 0:
-        return None
-    return completed.stdout.strip() or None
 
 
 def _emit(telemetry: Any, span: Mapping[str, Any]) -> None:
@@ -551,35 +518,31 @@ def _emit(telemetry: Any, span: Mapping[str, Any]) -> None:
         _LOG.debug("telemetry emit failed for span %s", span.get("name"), exc_info=True)
 
 
-def _stage_result(
-    *,
-    attempt: int,
-    status: str,
-    started_at: str,
-    outputs: Sequence[str] = (),
-    digest: str = "",
-    message: str = "",
-    data: Mapping[str, Any] | None = None,
-) -> StageResult:
-    result: dict[str, Any] = {
-        "stage": STAGE,
-        "attempt": attempt,
-        "status": status,
-        "startedAt": started_at,
-        "endedAt": _utcnow(),
-        "outputs": list(outputs),
-        "message": message,
-        "data": dict(data or {}),
-    }
-    if digest:
-        result["digest"] = digest
-    return result  # type: ignore[return-value]
+def _emit_flag_evaluation(telemetry: Any, attributes: Mapping[str, Any]) -> None:
+    """Emit a flag-evaluation span in the spine's flat, semconv-named shape.
 
-
-def _record(run_dir: Path, result: Mapping[str, Any]) -> Path:
-    path = run_dir / "stages" / f"{STAGE}.{result['attempt']}.json"
-    _write_json(path, dict(result))
-    return path
+    Prefers ``OtelFileTelemetry.emit_flag_evaluation`` when the sink offers it so
+    the spine owns the span construction, and otherwise emits the identical flat
+    dict through the plain ``Telemetry.emit`` port.
+    """
+    if telemetry is None:
+        return
+    builder = getattr(telemetry, "emit_flag_evaluation", None)
+    if builder is not None:
+        try:
+            builder(
+                key=attributes[ATTR_FLAG_KEY],
+                variant=attributes.get(ATTR_FLAG_RESULT_VARIANT) or "",
+                value=attributes.get(ATTR_FLAG_RESULT_VALUE),
+                reason=attributes.get(ATTR_FLAG_RESULT_REASON) or "",
+                provider=attributes.get(ATTR_FLAG_PROVIDER_NAME) or "",
+                context_id=attributes.get(ATTR_FLAG_CONTEXT_ID),
+                flag_set_id=attributes.get(ATTR_FLAG_SET_ID),
+            )
+            return
+        except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+            _LOG.debug("emit_flag_evaluation failed", exc_info=True)
+    _emit(telemetry, {"name": "feature_flag.evaluation", **dict(attributes)})
 
 
 # ---------------------------------------------------------------------------
@@ -589,12 +552,12 @@ def _record(run_dir: Path, result: Mapping[str, Any]) -> Path:
 
 def plan(
     cfg: Config,
-    run_id: str,
+    rd: RunDir,
     spec: Mapping[str, Any] | None = None,
     *,
     telemetry: Any = None,
 ) -> StageResult:
-    """Write the pre-registration for ``run_id`` **before** anything is measured.
+    """Write the pre-registration **before** anything is measured.
 
     ``spec`` may be supplied directly; otherwise an operator-authored
     ``experiment.yaml`` in the run directory is used, and failing that the plan
@@ -604,14 +567,13 @@ def plan(
     than two variants, because a single-candidate build run is simply not an
     experiment.
     """
-    started_at = _utcnow()
-    run_dir = _run_dir(cfg, run_id)
-    attempt = _next_attempt(run_dir)
-    run_document = _load_run(cfg, run_id)
+    started_at = utcnow()
+    run_id = rd.run_id
+    run_document = _safe_load_run(rd)
 
     if spec is None:
         for candidate in PREREGISTRATION_INPUTS:
-            loaded = _load_structured(run_dir / candidate)
+            loaded = _load_structured(rd.path / candidate)
             if isinstance(loaded, Mapping):
                 spec = loaded
                 break
@@ -628,18 +590,16 @@ def plan(
     ]
 
     if len(variants) < 2:
-        result = _stage_result(
-            attempt=attempt,
+        return rd.write_stage(
+            STAGE,
             status="skipped",
-            started_at=started_at,
             message=(
                 f"run '{run_id}' declares {len(variants)} variant(s); a run with fewer than 2 "
                 "is not an experiment, so no pre-registration was written"
             ),
             data={"phase": "plan", "variants": variants},
+            started_at=started_at,
         )
-        _record(run_dir, result)
-        return result
 
     metrics: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -649,7 +609,7 @@ def plan(
             if normalized and normalized["id"] not in seen:
                 seen.add(normalized["id"])
                 metrics.append(normalized)
-    for normalized in metrics_from_enrichment(run_dir):
+    for normalized in metrics_from_enrichment(rd.path):
         if normalized["id"] not in seen:
             seen.add(normalized["id"])
             metrics.append(normalized)
@@ -717,15 +677,12 @@ def plan(
         "metrics": metrics,
         "analysis": analysis,
     }
-    encoded = _write_json(run_dir / PLAN_PATH, plan_document)
-    digest = _sha256_bytes(encoded)
+    digest = _sha256_bytes(_write_output(rd, PLAN_PATH, plan_document))
 
-    result = _stage_result(
-        attempt=attempt,
+    result = rd.write_stage(
+        STAGE,
         status="ok",
-        started_at=started_at,
         outputs=[PLAN_PATH],
-        digest=digest,
         message=(
             f"pre-registered {len(variants)} variants and {len(metrics)} metrics "
             f"for experiment '{experiment['id']}'"
@@ -744,20 +701,20 @@ def plan(
                 "path": PLAN_PATH,
             },
         },
+        started_at=started_at,
     )
-    _record(run_dir, result)
-    _emit(telemetry, {"name": "adlc.experiment.plan", "attributes": {"adlc.run.id": run_id}})
+    _emit(telemetry, {"name": "adlc.experiment.plan", "adlc.run.id": run_id})
     return result
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — run (exposure)
+# Phase 2 — expose (which flags back which variant)
 # ---------------------------------------------------------------------------
 
 
-def run(
+def expose(
     cfg: Config,
-    run_id: str,
+    rd: RunDir,
     *,
     provider: Any = None,
     telemetry: Any = None,
@@ -774,15 +731,14 @@ def run(
     Live evaluation happens only when ``evaluate=True``; otherwise the phase
     records the *intended* exposure without contacting any flag backend.
     """
-    started_at = _utcnow()
-    run_dir = _run_dir(cfg, run_id)
-    attempt = _next_attempt(run_dir)
+    started_at = utcnow()
+    run_id = rd.run_id
 
-    plan_result = _phase_result(run_dir, "plan")
+    plan_result = _phase_result(rd, "plan")
     plan_data = (plan_result or {}).get("data") or {}
     variants = plan_data.get("variants") or []
     if not variants:
-        run_document = _load_run(cfg, run_id)
+        run_document = _safe_load_run(rd)
         variants = [
             normalize_variant(v, run_document.get("repo"))
             for v in run_document.get("variants") or []
@@ -797,22 +753,18 @@ def run(
     declared_flags = sorted({key for keys in flag_map.values() for key in keys})
 
     if not declared_flags:
-        result = _stage_result(
-            attempt=attempt,
+        return rd.write_stage(
+            STAGE,
             status="skipped",
-            started_at=started_at,
             message=(
                 "no variant declares a feature flag key; candidates are compared as build "
                 "artifacts at commits and no flag backend was contacted"
             ),
             data={"phase": "run", "exposure": {"variants": flag_map, "flagKeys": []}},
+            started_at=started_at,
         )
-        _record(run_dir, result)
-        return result
 
-    provider_name, manifest, provider_note = _resolve_provider(
-        cfg, provider, run_id, run_dir, variants
-    )
+    provider_name, manifest, provider_note = _resolve_provider(cfg, provider, rd, variants)
 
     evaluations: list[dict[str, Any]] = []
     if evaluate and provider is not None:
@@ -833,29 +785,25 @@ def run(
     outputs = [EXPOSURE_PATH]
     if manifest:
         outputs.append(manifest)
-    encoded = _write_json(run_dir / EXPOSURE_PATH, exposure)
+    _write_output(rd, EXPOSURE_PATH, exposure)
 
-    result = _stage_result(
-        attempt=attempt,
+    return rd.write_stage(
+        STAGE,
         status="ok",
-        started_at=started_at,
         outputs=outputs,
-        digest=_sha256_bytes(encoded),
         message=(
             f"recorded exposure for {len(declared_flags)} flag key(s) via provider "
             f"'{provider_name}'"
         ),
         data={"phase": "run", "exposure": exposure},
+        started_at=started_at,
     )
-    _record(run_dir, result)
-    return result
 
 
 def _resolve_provider(
     cfg: Config,
     provider: Any,
-    run_id: str,
-    run_dir: Path,
+    rd: RunDir,
     variants: Sequence[Mapping[str, Any]],
 ) -> tuple[str, str | None, str]:
     """Return ``(provider_name, manifest_relpath, note)``, degrading gracefully.
@@ -879,26 +827,40 @@ def _resolve_provider(
     materialize = getattr(provider, "materialize", None)
     if materialize is None:
         return provider_name, None, "provider does not implement materialize()"
-    run_view = {
-        "runId": run_id,
+    # The flagd file provider reads `variants[].key` / `.role`, so hand it the
+    # `adlc-run/v1` variant shape rather than the OES-flavoured one the plan
+    # stored (where the commit lives inside `codeReferences`).
+    run_view: Run = {
+        "runId": rd.run_id,
         "variants": [
             {
                 "key": variant.get("key"),
                 "role": variant.get("role"),
-                "flagKeys": list(variant.get("featureFlagKeys") or []),
+                "commit": _variant_commit(variant),
+                "flagKeys": list(variant.get("featureFlagKeys") or variant.get("flagKeys") or []),
             }
             for variant in variants
+            if variant.get("key")
         ],
-    }
+    }  # type: ignore[typeddict-item]
     try:
         path = Path(materialize(run_view))
     except Exception as exc:  # noqa: BLE001
         return provider_name, None, f"materialize() failed: {exc}"
-    try:
-        relative = path.relative_to(run_dir).as_posix()
-    except ValueError:
-        relative = path.as_posix()
-    return provider_name, relative, note
+    return provider_name, rd.rel(path), note
+
+
+def _variant_commit(variant: Mapping[str, Any]) -> str | None:
+    """Recover the commit from either the run shape or the OES ``codeReferences``."""
+    commit = variant.get("commit")
+    if commit:
+        return str(commit)
+    for reference in variant.get("codeReferences") or []:
+        if isinstance(reference, Mapping) and reference.get("type") == "git_commit":
+            value = reference.get("value")
+            if value:
+                return str(value)
+    return None
 
 
 def _availability_note(cfg: Config, provider: Any) -> str:
@@ -946,10 +908,7 @@ def _evaluate_flag(
         context_id=context.get("targetingKey") or context.get("key"),
         flag_set_id=flag_set_id,
     )
-    span: dict[str, Any] = {"name": "feature_flag.evaluation", "attributes": attributes}
-    if telemetry_error:
-        span["error"] = telemetry_error
-    _emit(telemetry, span)
+    _emit_flag_evaluation(telemetry, attributes)
     return {"attributes": attributes, "error": telemetry_error}
 
 
@@ -960,7 +919,7 @@ def _evaluate_flag(
 
 def analyze(
     cfg: Config,
-    run_id: str,
+    rd: RunDir,
     measurements: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None = None,
     *,
     telemetry: Any = None,
@@ -972,37 +931,34 @@ def analyze(
     and ``exposures``, which are passed through verbatim and never synthesized).
     When omitted, ``experiment/measurements.json`` is read.
     """
-    started_at = _utcnow()
-    run_dir = _run_dir(cfg, run_id)
-    attempt = _next_attempt(run_dir)
+    started_at = utcnow()
+    run_id = rd.run_id
 
-    plan_result = _phase_result(run_dir, "plan")
-    plan_document = _load_structured(run_dir / PLAN_PATH)
+    plan_result = _phase_result(rd, "plan")
+    plan_document = _load_structured(rd.path / PLAN_PATH)
     if plan_result is None or not isinstance(plan_document, Mapping):
-        result = _stage_result(
-            attempt=attempt,
+        return rd.write_stage(
+            STAGE,
             status="skipped",
-            started_at=started_at,
             message=(
                 f"no pre-registration at {PLAN_PATH}; run the `plan` phase before `analyze` "
                 "so that metrics are declared before they are measured"
             ),
             data={"phase": "analyze", "preRegistration": {"present": False}},
+            started_at=started_at,
         )
-        _record(run_dir, result)
-        return result
 
     recorded = (plan_result.get("data") or {}).get("preRegistration", {})
     recorded_digest = str(recorded.get("digest") or "")
-    current_digest = _sha256_bytes((run_dir / PLAN_PATH).read_bytes())
+    current_digest = _sha256_bytes((rd.path / PLAN_PATH).read_bytes())
     unchanged = bool(recorded_digest) and recorded_digest == current_digest
 
     payload = measurements
     if payload is None:
-        payload = _load_structured(run_dir / MEASUREMENTS_PATH)
+        payload = _load_structured(rd.path / MEASUREMENTS_PATH)
     rows, sample_sizes, exposures = _split_measurements(payload)
     if not rows:
-        rows = _measurements_from_evidence(run_dir, plan_document)
+        rows = _measurements_from_evidence(rd, plan_document)
 
     metrics = [dict(m) for m in plan_document.get("metrics") or []]
     variants = [dict(v) for v in plan_document.get("variants") or []]
@@ -1047,7 +1003,7 @@ def analyze(
         "results": results,
         "analysis": analysis,
     }
-    encoded = _write_json(run_dir / ANALYSIS_PATH, analysis_document)
+    _write_output(rd, ANALYSIS_PATH, analysis_document)
 
     if not unchanged:
         status = "fail"
@@ -1068,12 +1024,10 @@ def analyze(
             f"OES export will refuse this run"
         )
 
-    result = _stage_result(
-        attempt=attempt,
+    return rd.write_stage(
+        STAGE,
         status=status,
-        started_at=started_at,
         outputs=[ANALYSIS_PATH],
-        digest=_sha256_bytes(encoded),
         message=message,
         data={
             "phase": "analyze",
@@ -1087,10 +1041,8 @@ def analyze(
             "preRegistration": pre_registration,
             "baselineVariantKey": baseline,
         },
+        started_at=started_at,
     )
-    _record(run_dir, result)
-    _emit(telemetry, {"name": "adlc.experiment.analyze", "attributes": {"adlc.run.id": run_id}})
-    return result
 
 
 def _split_measurements(
@@ -1115,27 +1067,53 @@ def _split_measurements(
 
 
 def _measurements_from_evidence(
-    run_dir: Path, plan_document: Mapping[str, Any]
+    rd: RunDir, plan_document: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """Fall back to ``evidence/<variant>/metrics.json`` maps of ``{metricId: value}``."""
+    """Reuse whatever the evidence stage already measured, per variant.
+
+    Primary source is the spine's ``evidence/<variant>/*-measurements.json``
+    (the same rows ``adlc evidence`` normalizes into the review pack), so a run
+    that captured evidence needs no separate measurement file. A simple
+    ``metrics.json`` map of ``{metricId: value}`` is accepted as a fallback.
+    """
     rows: list[dict[str, Any]] = []
     for variant in plan_document.get("variants") or []:
         key = variant.get("key")
         if not key:
             continue
-        document = _load_structured(run_dir / "evidence" / str(key) / "metrics.json")
-        if not isinstance(document, Mapping):
+        variant_dir = rd.evidence_dir / str(key)
+        if not variant_dir.is_dir():
             continue
-        for metric_id, value in document.items():
-            if isinstance(value, int | float):
+
+        for path in sorted(variant_dir.glob("*-measurements.json")):
+            items = _load_structured(path)
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, Mapping) or not item.get("metricId"):
+                    continue
+                if not isinstance(item.get("value"), int | float):
+                    continue
                 rows.append(
                     {
-                        "metricId": str(metric_id),
+                        "metricId": str(item["metricId"]),
                         "variantKey": str(key),
-                        "value": value,
-                        "collector": "evidence",
+                        "value": item["value"],
+                        "collector": str(item.get("collector") or "evidence"),
+                        "artifactSha256": str(item.get("artifactSha256") or ""),
                     }
                 )
+
+        document = _load_structured(variant_dir / "metrics.json")
+        if isinstance(document, Mapping):
+            for metric_id, value in document.items():
+                if isinstance(value, int | float):
+                    rows.append(
+                        {
+                            "metricId": str(metric_id),
+                            "variantKey": str(key),
+                            "value": value,
+                            "collector": "evidence",
+                        }
+                    )
     return rows
 
 
@@ -1143,9 +1121,19 @@ def _measurements_from_evidence(
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+#: Phase name -> implementation. The phase strings are what land in
+#: ``StageResult.data.phase`` and what the OES exporter folds on.
+_PHASE_FUNCTIONS = {"plan": plan, "run": expose, "analyze": analyze}
 
-def execute(cfg: Config, run_id: str, phase: str, **kwargs: Any) -> StageResult:
-    """Run one phase by name — the seam a generic CLI can call."""
-    if phase not in PHASES:
-        raise ValueError(f"unknown experiment phase '{phase}'; expected one of {', '.join(PHASES)}")
-    return {"plan": plan, "run": run, "analyze": analyze}[phase](cfg, run_id, **kwargs)
+
+def run_experiment(cfg: Config, rd: RunDir, phase: str = "plan", **kwargs: Any) -> StageResult:
+    """Run one phase of the experiment stage — the spine-shaped entry point.
+
+    Mirrors ``run_evidence(cfg, rd, ...)`` and friends so a CLI command can call
+    it without knowing which phase functions exist.
+    """
+    if phase not in _PHASE_FUNCTIONS:
+        raise ValueError(
+            f"unknown experiment phase '{phase}'; expected one of {', '.join(PHASES)}"
+        )
+    return _PHASE_FUNCTIONS[phase](cfg, rd, **kwargs)
