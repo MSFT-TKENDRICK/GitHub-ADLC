@@ -1,18 +1,29 @@
 # Reviewer squads (L8)
 
-> GitHub Agentic Workflows (`gh-aw`) + two `GateRunner`s.
+> GitHub Agentic Workflows (`gh-aw`) + three `GateRunner`s.
 > Sources: `.github/workflows/adlc-*.md` · compiled: `.github/workflows/adlc-*.lock.yml`
 > Members: `.github/agents/*.agent.md` · config: `templates/.adlc/squads.yaml`
-> Gates: `src/adlc/adapters/gate/{adversarial_review,evidence_review}.py`
+> Gates: `src/adlc/adapters/gate/{adversarial_review,evidence_review,feature_completeness}.py`
 
-This workstream adds the two *judgement* seams of the ADLC — an adversarial code
-review squad and an evidence review squad — plus the two outer-loop workflows
-that feed the pipeline (`autoresearch`, `intake`).
+This workstream adds the three *judgement* seams of the ADLC — an adversarial
+code review squad, an evidence review squad, and a code-blind
+feature-completeness squad — plus the two outer-loop workflows that feed the
+pipeline (`autoresearch`, `intake`).
 
-Everything here is a **pure addition**. Both gates are `required_by_default =
-False`, both `detect()` cheaply and honestly, and both report `not_run` with a
-specific reason when they have nothing to score. Nothing in this leaf can break
-the credential-free conformance suite.
+The three sit at different distances from the change, and that distance is the
+design:
+
+| Squad | Sees | Asks |
+|---|---|---|
+| `adversarial_review` | the diff | How does *this change* break? |
+| `evidence_review` | the evidence pack | Does the evidence back each requirement? |
+| `feature_completeness` | the evidence pack, and nothing else — no code, no sessions, no reasoning | Did we demonstrate the thing that was asked for? |
+
+Everything here is a **pure addition**. All three gates are `required_by_default
+= False`, all three `detect()` cheaply and honestly, and all three report
+`not_run` with a specific reason when they have nothing to score. Nothing in this
+leaf can break the credential-free conformance suite.
+
 
 ---
 
@@ -122,8 +133,9 @@ Every workflow sets all three. `test_every_cost_cap_is_set` enforces it.
 | `adlc-intake` | 15 | 25 | 250 |
 | `adlc-adversarial` | 30 | 90 | 900 |
 | `adlc-evidence-review` | 20 | 30 | 300 |
+| `adlc-feature-completeness` | 25 | 45 | 450 |
 
-`network:` is an explicit firewall allowlist on all four (`allowed: [defaults]`),
+`network:` is an explicit firewall allowlist on all five (`allowed: [defaults]`),
 never a bare `*` — which `strict: true` rejects anyway.
 
 ---
@@ -192,6 +204,18 @@ only channels off the runner are safe-outputs and that artifact.
 ### 3.4 `adlc-evidence-review.md` — the evidence squad
 
 See §4. This is the one that matters.
+
+### 3.5 `adlc-feature-completeness.md` — the code-blind completeness squad
+
+The last question in the lifecycle, and the only one asked from entirely outside
+it: *having built and gated all of that, did we demonstrate the thing that was
+asked for?*
+
+It reuses §4's sandbox verbatim — `checkout: false`, `toolsets: [issues]`,
+`read-only: true`, no web tools, a trivial `bash` allowlist, one `add-comment`
+— and adds one exclusion the evidence squad does not need (§4.3). Its input is
+`completeness-pack.json`, not `evidence-review-pack.json`, and unlike the
+evidence squad **its verdict blocks** (§8.3).
 
 ---
 
@@ -269,6 +293,49 @@ Then the prompt tells the reviewer to treat every string in the pack as **data,
 never instruction**, and to file an attempted injection as a `critical` finding
 rather than complying. That instruction is the *last* layer, not the first.
 
+### 4.3 The completeness squad excludes one more thing: the reasoning
+
+The evidence squad is blindfolded to the **code**. The completeness squad
+(§3.5) is blindfolded to the code *and* to every trace of how the run reached
+its conclusions: agent sessions, transcripts, chains of thought, stage
+rationales, patches, replay scripts.
+
+The reason is narrower than "more isolation is better". This squad's job is to
+judge whether the *artifacts* demonstrate the *brief*. An agent's reasoning is
+the most persuasive possible account of why the work is sufficient — it was
+written by the party with an interest in that conclusion, and it explains away
+exactly the gaps the reviewer is hired to find. A reviewer who reads "I chose
+not to capture a reload screenshot because the unit test already covers
+persistence" will not then ask why there is no reload screenshot. The argument
+is not wrong; it is simply not evidence, and this reviewer's entire remit is
+evidence.
+
+So the exclusion is enforced where the pack is *built*, not where it is read.
+`adlc.stages.complete.build_pack` constructs the pack by allowlist — nothing is
+copied in unless a field explicitly asks for it — and then
+`assert_sanitised()` re-checks the serialised result against `LEAK_MARKERS`
+(`diff --git`, `@@ -`, `thinking`, `<thought`, `tool_call`, `system prompt`, …).
+On a hit, `run_complete` **refuses to write the pack at all** rather than
+writing a redacted one: a pack that had to be scrubbed is a pack whose
+construction is wrong, and the next leak might not have a marker.
+
+The pack also declares what it left out, in `excluded[]`, as `{what, why}`
+pairs. The reviewer is told what it cannot see, so that "I cannot judge this
+from the evidence alone" is available to it as an honest answer instead of a
+gap it silently fills with inference.
+
+| Excluded | Why |
+|---|---|
+| Source code and diffs | A reviewer who has read the implementation grades the implementation. |
+| Agent sessions, transcripts and reasoning | The most persuasive account of sufficiency, written by the interested party. |
+| Stage internals and gate rationales | Same failure mode, one layer up: the run explaining itself. |
+| Raw traces, HAR and console text | Attacker-controlled, and a prompt-injection carrier. Digests and kinds only. |
+
+`tests/l8_squads/test_completeness_pack.py` puts a real patch (with a fake
+token), an agent transcript containing `thinking`, and a Playwright replay
+script on disk in the run directory, then asserts that none of it reaches the
+pack — and separately parametrises over every `LEAK_MARKERS` entry.
+
 ---
 
 ## 5. Squad members
@@ -282,6 +349,9 @@ rather than complying. That instruction is the *last* layer, not the first.
 | `performance-adversary` | `adversarial_review` | The incident this change will cause. Must name the breaking input *scale* and the *mechanism*. Micro-optimisation is explicitly out of scope. |
 | `accessibility-adversary` | `adversarial_review` | The user who cannot use a mouse or see the screen. Scoped to what a scanner structurally cannot catch — focus order and return, announcement quality, error recovery — because `axe` already gates the rest. |
 | `requirements-auditor` | `evidence_review` | Judges evidence against requirements without code access. Hunts evidence that *exists but does not demonstrate*. |
+| `completeness-auditor` | `feature_completeness` | Walks the brief's requirements one at a time and asks what artifact would convince a sceptic. Owns "nothing demonstrates this". |
+| `grounding-auditor` | `feature_completeness` | Checks that each claim in the pack is traceable to a digest in the pack. Owns "this is asserted, not shown". |
+| `relevance-auditor` | `feature_completeness` | Asks whether the evidence is *about* the request. Owns "this is real evidence for a different feature". |
 
 Each prompt is written to be genuinely adversarial: hunt the specific ways *this*
 change fails, never summarise it. Each also says, explicitly, that **zero
@@ -315,6 +385,12 @@ squads:
     quorum: "1/1"
     citation: artifact-sha256
     members: [requirements-auditor]
+  feature_completeness:
+    blocking: true           # nothing deterministic sits underneath this one
+    quorum: "2/3"
+    citation: artifact-sha256
+    routesTo: outer          # feedback reopens the design, not the diff
+    members: [completeness-auditor, grounding-auditor, relevance-auditor]
 ```
 
 **A member casts a blocking vote only when it both declared `verdict: block`
@@ -345,18 +421,25 @@ A member that filed no verdict is an **abstention**, never a pass
 > **A finding that cites no evidence is discarded before the quorum is counted.**
 
 This is not a style rule. An uncited LLM claim is unfalsifiable: no human can
-check it, so it must never be able to block a merge. The two squads use
-different citation shapes because they review different things:
+check it, so it must never be able to block a merge. The squads use different
+citation shapes because they review different things:
 
 **`adversarial_review` — `file-line`.** `path/to/file.ext:L88-L104` or
 `path/to/file.ext:L88`. A *bare path is not a citation*: "this file is bad" is
 not evidence, and accepting it would make the rule cosmetic.
 
-**`evidence_review` — `artifact-sha256`.** A bare 64-hex digest that **actually
-appears in the pack**. A hallucinated digest is treated as worse than no
-citation — it looks checkable — so a finding survives only if at least one of its
-cited hashes is genuinely in the pack. Fabrications are recorded in
-`observed.advisory.fabricatedCitations`.
+**`evidence_review` and `feature_completeness` — `artifact-sha256`.** A bare
+64-hex digest that **actually appears in the pack**. A hallucinated digest is
+treated as worse than no citation — it looks checkable — so a finding survives
+only if at least one of its cited hashes is genuinely in the pack. Fabrications
+are recorded in `observed.advisory.fabricatedCitations` (`evidence_review`) or
+`observed.review.fabricatedCitations` (`feature_completeness`).
+
+Both evidence-facing gates import the *same* `_pack_hashes` / `_screen_citations`
+from `evidence_review.py` rather than each implementing the rule. If they
+diverged, a claim one gate discards would survive in the other, and the
+guarantee would silently become "whichever gate happened to read it".
+
 
 Discarded findings are never hidden; they are listed in
 `observed.discardedFindings` with the member, severity, title and reason, and
@@ -369,7 +452,7 @@ visible.
 ## 8. The gates
 
 Both are registered in `pyproject.toml` and implement `adlc.ports.GateRunner`.
-`required_by_default = False`; the `full` profile marks both required.
+`required_by_default = False`; the `full` profile marks all three required.
 
 ### 8.1 `AdversarialReviewGate` (`id="adversarial_review"`)
 
@@ -430,13 +513,54 @@ cited digest actually exists. If the pack is missing or unparseable while the
 precondition passed, the advisory verdict is discarded rather than trusted: an
 unscreenable claim is an uncited claim.
 
-### 8.3 Fail-closed
+### 8.3 `FeatureCompletenessGate` (`id="feature_completeness"`)
+
+The one squad gate that **blocks on its own judgement**, and the only one whose
+failure routes to the **outer** loop.
+
+Both departures follow from the same fact: there is nothing deterministic
+underneath it. `evidence_review` is advisory because `evidence_completeness`
+already hashes every requirement and owns the blocking decision — the squad adds
+nuance to a verdict that has already been reached. No equivalent check exists
+for *"does this evidence show what the brief asked for"*. It is a judgement, and
+a judgement that cannot stop the run is a comment, not a gate.
+
+And when it does stop the run, patching the code is guessing. If the evidence
+does not answer the brief, either the brief was misread, the design does not
+deliver it, or nobody planned to capture proof of it. All three are outer-loop
+problems — spec, design, evidence plan — so the message says so explicitly
+rather than dropping the run into the inner repair loop where it would produce a
+diff nobody asked for.
+
+Input is `runs/<run>/completeness-pack.json` (§4.3), written by `adlc complete`
+from the **reduced** run, so it must run after the first `reduce_run()`.
+
+| Situation | Status |
+|---|---|
+| no `runId` | `not_run` |
+| pack missing, unreadable, or not a JSON object | `not_run` + the reason, naming `adlc complete` |
+| pack declares `counts.requirements == 0` | `not_run` — no statement of intent to review against |
+| pack `runId` ≠ run `runId` | **`fail`** — a review of another run's evidence says nothing about this one |
+| no verdict files | `not_run` — "nobody has confirmed the evidence answers the brief" |
+| quorum met on *cited, non-fabricated* findings | **`fail`**, severity `high`, routed to the outer loop |
+| `len(membersMissing) >= threshold` | `not_run` — quorum unreachable, not a clean bill of health |
+| otherwise | `pass`, with discards and fabrications reported in the message |
+
+The order matters. Identity is checked before verdicts, so a stale pack cannot
+be rescued by a squad that liked it; and the missing-member check runs *after*
+the quorum check, so a squad that did reach quorum still blocks even if a third
+member never filed.
+
+### 8.4 Fail-closed
 
 Per `docs/PLAN.md` §4.2, **`required: true` + `not_run` ⇒ the aggregate fails.**
-Both gates therefore return `not_run` with a specific, human-readable reason
+All three gates therefore return `not_run` with a specific, human-readable reason
 rather than inventing a `pass`, in every degraded case: no squad config, no
-verdict files, no pack, unparseable pack, no `runId`. Neither gate ever returns
+verdict files, no pack, unparseable pack, no `runId`. No gate ever returns
 `pass` for something it did not actually verify.
+
+"We could not check whether we built the right thing" is not "we built the right
+thing".
 
 ---
 
@@ -456,9 +580,11 @@ Verify in an isolated environment that no sibling can clobber:
 python -m venv --system-site-packages .venv-l8
 .venv-l8/bin/python -m pip install -e . --no-deps
 .venv-l8/bin/python -m pytest tests/conformance -q   # 41 passed
-.venv-l8/bin/python -m pytest tests/l8_squads  -q    # 176 passed
+.venv-l8/bin/python -m pytest tests/l8_squads  -q    # 227 passed
 ruff check src/adlc/adapters/gate/adversarial_review.py \
-           src/adlc/adapters/gate/evidence_review.py tests/l8_squads/
+           src/adlc/adapters/gate/evidence_review.py \
+           src/adlc/adapters/gate/feature_completeness.py \
+           src/adlc/stages/complete.py tests/l8_squads/
 ```
 
 Confirm the binding first — it must print *your* worktree:
@@ -480,4 +606,6 @@ workstream at once.
 | `test_delegation.py` | that the blocking check is **delegated, not duplicated** (including a source scan for `sha256_file`/`evidence_dir`); precondition absent/`not_run`/`fail`/`pass`; that an LLM `pass` cannot rescue a red precondition and an LLM `warn` cannot fail a build |
 | `test_detect.py` | `detect()` contract, `GateRunner` protocol conformance, `GateResult` shape, every `not_run` degrade path, profile-driven `required` |
 | `test_spine_integration.py` | the spine's real `run_gates` driving both gates over a real run directory, against a **real** `evidence_completeness` verdict — including a genuinely hash-mismatched pack — plus entry-point registration and hostile-input degradation |
-| `test_workflows.py` | frontmatter of all four workflows; cost caps; read-only permissions; **the evidence sandbox asserted against the compiled `.lock.yml`**; the leak-marker screen kept in lockstep with the spine's conformance test; agent profiles; `squads.yaml` |
+| `test_workflows.py` | frontmatter of all five workflows; cost caps; read-only permissions; **the evidence sandbox asserted against the compiled `.lock.yml`**; the leak-marker screen kept in lockstep with the spine's conformance test; agent profiles; `squads.yaml` |
+| `test_completeness_pack.py` | that no code, diff, transcript, chain of thought or replay script reaches `completeness-pack.json`; every `LEAK_MARKERS` entry enforced; the refusal-to-write path; the `excluded[]` declaration; brief truncation and count consistency |
+| `test_feature_completeness_gate.py` | the blocking gate: every fail-closed path; pack identity; quorum on cited findings and the outer-loop routing in the message; uncited and fabricated citations discarded; unreachable quorum reported as `not_run` rather than `pass` |

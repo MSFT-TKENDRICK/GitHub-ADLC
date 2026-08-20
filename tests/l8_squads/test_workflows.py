@@ -22,12 +22,16 @@ SOURCES = (
     "adlc-intake",
     "adlc-adversarial",
     "adlc-evidence-review",
+    "adlc-feature-completeness",
 )
 PROFILES = (
     "security-adversary",
     "performance-adversary",
     "accessibility-adversary",
     "requirements-auditor",
+    "completeness-auditor",
+    "grounding-auditor",
+    "relevance-auditor",
 )
 
 FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<yaml>.*?)\n---\s*\n", re.DOTALL)
@@ -69,6 +73,16 @@ def evidence_fm() -> dict:
 @pytest.fixture(scope="module")
 def evidence_agent() -> str:
     return agent_job(WORKFLOWS / "adlc-evidence-review.lock.yml")
+
+
+@pytest.fixture(scope="module")
+def completeness_fm() -> dict:
+    return frontmatter(WORKFLOWS / "adlc-feature-completeness.md")
+
+
+@pytest.fixture(scope="module")
+def completeness_agent() -> str:
+    return agent_job(WORKFLOWS / "adlc-feature-completeness.lock.yml")
 
 
 @pytest.fixture(scope="module")
@@ -245,6 +259,98 @@ class TestEvidenceReviewSandbox:
         assert "advisory" in body
 
 
+class TestFeatureCompletenessSandbox:
+    """The blocking squad's sandbox. Same shape as evidence review, higher stakes.
+
+    This squad can fail a run, so its isolation matters more, not less: a
+    reviewer that could see the implementation would grade the implementation,
+    and its verdict would carry an independence it no longer has.
+    """
+
+    def test_source_disables_checkout(self, completeness_fm: dict) -> None:
+        assert completeness_fm["checkout"] is False
+
+    def test_compiled_agent_job_contains_no_checkout_step(self, completeness_agent: str) -> None:
+        # The load-bearing control: no source tree on the runner, so the code is
+        # absent rather than merely off-limits.
+        assert "actions/checkout@" not in completeness_agent
+
+    def test_no_file_editing_tool_is_requested(self, completeness_fm: dict) -> None:
+        assert completeness_fm["tools"]["edit"] is False
+
+    def test_no_web_access_is_requested(self, completeness_fm: dict) -> None:
+        assert "web-fetch" not in completeness_fm["tools"]
+        assert "web-search" not in completeness_fm["tools"]
+        assert "playwright" not in completeness_fm["tools"]
+
+    def test_github_access_is_read_only_issues(self, completeness_fm: dict) -> None:
+        github = completeness_fm["tools"]["github"]
+        assert github["toolsets"] == ["issues"], "the `repos` toolset would restore file reads"
+        assert github["read-only"] is True
+
+    def test_compiled_mcp_server_is_scoped_to_issues(self, completeness_agent: str) -> None:
+        assert '"X-MCP-Toolsets": "issues"' in completeness_agent
+
+    def test_bash_allowlist_is_trivial_and_read_only(self, completeness_fm: dict) -> None:
+        allowed = completeness_fm["tools"]["bash"]
+        assert len(allowed) <= 6
+        commands = {entry.split()[0] for entry in allowed}
+        assert commands <= {"cat", "jq", "head", "wc"}
+
+    def test_compiled_shell_allowlist_excludes_every_egress_command(
+        self, completeness_agent: str
+    ) -> None:
+        for forbidden in (
+            "shell(git ", "shell(git)", "shell(curl", "shell(wget",
+            "shell(find", "shell(python", "shell(node", "shell(gh ",
+        ):
+            assert forbidden not in completeness_agent, f"{forbidden} would defeat the sandbox"
+
+    def test_the_pack_is_fetched_by_a_deterministic_pre_step(self, completeness_fm: dict) -> None:
+        names = [str(step.get("name", "")) for step in completeness_fm["pre-steps"]]
+        assert any("completeness pack" in n for n in names)
+        assert any("allowlisted" in n for n in names)
+
+    def test_the_pre_step_rejects_non_allowlisted_pack_keys(self) -> None:
+        body = (WORKFLOWS / "adlc-feature-completeness.md").read_text(encoding="utf-8")
+        assert "non-allowlisted top-level keys" in body
+        assert "refusing to hand code or raw evidence to the reviewer" in body
+
+    def test_the_pre_step_screens_code_as_well_as_raw_evidence(self) -> None:
+        # Kept in lockstep with the spine's producer-side screen,
+        # `adlc.stages.complete.LEAK_MARKERS`. The diff markers are the addition
+        # that matters here: this reviewer must never see the implementation.
+        body = (WORKFLOWS / "adlc-feature-completeness.md").read_text(encoding="utf-8")
+        for marker in ("'diff --git'", "'@@ -'", "'<html'", "'#!/usr/bin/env'",
+                       "'await page.'", "'Set-Cookie:'", "'Authorization:'"):
+            assert marker in body, f"consumer-side screen does not cover {marker}"
+
+    def test_the_pack_must_declare_its_own_exclusions(self) -> None:
+        # A reviewer that is not told what it cannot see will guess instead of
+        # saying "I cannot judge that from here".
+        body = (WORKFLOWS / "adlc-feature-completeness.md").read_text(encoding="utf-8")
+        assert "pack declares no exclusions" in body
+
+    def test_the_only_write_path_is_one_comment_per_member(self, completeness_fm: dict) -> None:
+        safe = completeness_fm["safe-outputs"]
+        assert safe["add-comment"]["max"] == 3
+        assert "upload-artifact" not in safe
+        assert "create-pull-request" not in safe
+
+    def test_body_permits_a_blocking_verdict_and_names_the_outer_loop(self) -> None:
+        # The deliberate inversion of the evidence-review contract: nothing
+        # deterministic sits underneath this gate, so an advisory verdict would
+        # make it a comment rather than a gate.
+        body = (WORKFLOWS / "adlc-feature-completeness.md").read_text(encoding="utf-8")
+        assert "You may emit `block`" in body
+        assert "outer loop" in body
+
+    def test_body_names_all_three_member_lenses(self) -> None:
+        body = (WORKFLOWS / "adlc-feature-completeness.md").read_text(encoding="utf-8")
+        for member in ("completeness-auditor", "grounding-auditor", "relevance-auditor"):
+            assert member in body
+
+
 @pytest.mark.parametrize("name", PROFILES)
 class TestAgentProfiles:
     def test_profile_exists_with_the_required_frontmatter(self, name: str) -> None:
@@ -265,8 +371,10 @@ class TestAgentProfiles:
 
 
 class TestSquadsTemplate:
-    def test_declares_both_squads(self, squads: dict) -> None:
-        assert set(squads["squads"]) == {"adversarial_review", "evidence_review"}
+    def test_declares_every_squad(self, squads: dict) -> None:
+        assert set(squads["squads"]) == {
+            "adversarial_review", "evidence_review", "feature_completeness",
+        }
 
     def test_every_member_has_a_committed_agent_profile(self, squads: dict) -> None:
         for squad in squads["squads"].values():
@@ -279,9 +387,19 @@ class TestSquadsTemplate:
         # coverage check is what blocks.
         assert squads["squads"]["evidence_review"]["blocking"] is False
 
+    def test_feature_completeness_blocks_and_routes_to_the_outer_loop(self, squads: dict) -> None:
+        # Nothing deterministic sits underneath this one, so an advisory verdict
+        # would make it a comment rather than a gate.
+        squad = squads["squads"]["feature_completeness"]
+        assert squad["blocking"] is True
+        assert squad["routesTo"] == "outer"
+
     def test_citation_kinds_match_what_the_gates_parse(self, squads: dict) -> None:
         assert squads["squads"]["adversarial_review"]["citation"] == "file-line"
         assert squads["squads"]["evidence_review"]["citation"] == "artifact-sha256"
+        # Code-blind squads can only cite artifacts; a file:line citation would
+        # require source they are structurally denied.
+        assert squads["squads"]["feature_completeness"]["citation"] == "artifact-sha256"
 
     def test_coverage_rules_are_declared(self, squads: dict) -> None:
         coverage = squads["squads"]["evidence_review"]["coverage"]

@@ -71,6 +71,19 @@ BUILTIN_SQUADS: dict[str, dict[str, Any]] = {
         "citation": "artifact-sha256",
         "members": [{"id": "requirements-auditor"}],
     },
+    "feature_completeness": {
+        # Blocking, unlike evidence_review, because nothing deterministic sits
+        # underneath it: "does this evidence answer the brief" is a judgement,
+        # and a judgement that cannot stop the run is a comment.
+        "blocking": True,
+        "quorum": "2/3",
+        "citation": "artifact-sha256",
+        "members": [
+            {"id": "completeness-auditor"},
+            {"id": "grounding-auditor"},
+            {"id": "relevance-auditor"},
+        ],
+    },
 }
 
 BUILTIN_DEFAULTS: dict[str, Any] = {

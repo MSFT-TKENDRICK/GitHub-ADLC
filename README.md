@@ -9,7 +9,8 @@ change comes out, with every decision recorded as an auditable ADR.
 
 ```
 brief → qualify → spec → enrich → task graph → parallel build → evidence
-      → evals → gates → interactive report → native PR review → ADR → merge
+      → evals → gates → completeness review → interactive report
+      → native PR review → ADR → merge
 ```
 
 ## Why this exists
@@ -66,6 +67,9 @@ adlc build latest --max-parallel 4       # isolated worktrees, patch barriers
 adlc evidence latest --variant candidate-a
 adlc eval latest                         # rubric score
 adlc gate latest                         # fail-closed aggregate
+adlc reduce latest                       # stages → run.json
+adlc personas latest                     # persona walkthroughs, recorded as evidence
+adlc complete latest                     # code-blind "did we build the right thing?"
 adlc report latest --open                # self-contained interactive HTML
 ```
 
@@ -74,7 +78,7 @@ security scanning and real cloud services are opt-in adapters.
 
 ## Design
 
-Four decisions carry the weight.
+Six decisions carry the weight.
 
 ### 1. Immutable stage results, one reducer
 
@@ -107,6 +111,43 @@ agent receives only `evidence-review-pack.json`: requirement ids, normalised
 measurements, coverage claims and artifact hashes. The **blocking** check is
 deterministic (every requirement backed by a hash-verified artifact); the LLM
 verdict is advisory and must cite artifact hashes or it is discarded.
+
+### 5. One gate asks whether we built the right thing
+
+Every other gate checks the *change*. `feature_completeness` checks the *run*:
+having built and gated all of that, does the evidence demonstrate what was asked
+for?
+
+It is answered by a squad that has seen the brief and the evidence and **nothing
+else** — no code, no diffs, no agent sessions, and no chains of thought. The last
+exclusion is the one people find surprising. An agent's reasoning is the most
+persuasive available account of why the work is sufficient, written by the party
+with an interest in that conclusion, and it explains away exactly the gaps the
+reviewer exists to find. It is not evidence.
+
+The isolation is structural, not a prompt: `checkout: false`, no `repos` MCP
+toolset, no web tools, and a pack built by allowlist that the pipeline **refuses
+to write at all** if a leak marker survives. And it **blocks** — nothing
+deterministic sits underneath it, and a judgement that cannot stop the run is a
+comment, not a gate.
+
+A failure here routes to the **outer** loop, not the inner one. If the evidence
+does not answer the brief, patching the code is guessing.
+
+### 6. The report is one file with no backend
+
+`report.html` inlines every asset and computes every summary, diff and layout
+coordinate in Python at render time, so opening it costs a parse and a render.
+It opens from `file://` in six months with no network.
+
+It leads with the end-to-end recording, then a before/after slideshow that
+**states how each pair was matched and how confident that is**. A clickable
+gitgraph — levels as columns, because a level really was a parallel wave — hangs
+each node's gates, decisions, artifacts and diff off a single click, with a
+≤150-character summary that is too short to hedge. Decisions carry a citations
+pane, and personas show their reasoning, not just their verdict.
+
+See [docs/report.md](docs/report.md).
 
 ## Task isolation
 
@@ -170,7 +211,9 @@ otherwise silently opt you in.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The architecture and its rationale,
 including the adversarial critique that reshaped it, are in
-[docs/PLAN.md](docs/PLAN.md).
+[docs/PLAN.md](docs/PLAN.md). The reviewer squads are in
+[docs/squads.md](docs/squads.md); the evidence report is in
+[docs/report.md](docs/report.md).
 
 ```bash
 PYTHONPATH=src python -m pytest tests/conformance -q
@@ -179,5 +222,6 @@ PYTHONPATH=src python -m pytest tests/conformance -q
 The conformance suite runs with no credentials and no optional tooling. It
 covers the happy path and — more importantly — the refusals: a required gate
 that did not run fails the build, write-set conflicts are rejected at graph
-time, stale capsules fail their node, protected paths cannot be written, and the
-review pack leaks no raw evidence.
+time, stale capsules fail their node, protected paths cannot be written, the
+review pack leaks no raw evidence, and the completeness pack leaks no code,
+diff, transcript or chain of thought.

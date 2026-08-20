@@ -78,7 +78,7 @@ PROFILE_REQUIRED_GATES: dict[str, tuple[str, ...]] = {
     "full": (
         "tests", "secrets_local", "deps_local", "evidence_completeness",
         "security", "code_quality", "evals", "governance",
-        "adversarial_review", "evidence_review",
+        "adversarial_review", "evidence_review", "feature_completeness",
     ),
 }
 
