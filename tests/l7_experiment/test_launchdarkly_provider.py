@@ -18,9 +18,11 @@ import pytest
 from adlc.adapters.flags.launchdarkly import (
     MANIFEST_NAME,
     REQUIRED_MODULES,
+    RUN_DIR_ENV,
     SDK_KEY_ENV,
     LaunchDarklyProvider,
     _context_attributes,
+    default_manifest_path,
 )
 from adlc.config import Config
 from adlc.ports import FlagProvider
@@ -174,14 +176,61 @@ def test_materialize_never_writes_the_credential(
     assert SDK_KEY_ENV in body, "the manifest names the env var, never its value"
 
 
-def test_materialize_defaults_to_the_run_directory(tmp_path: Path) -> None:
-    """Same default layout as the spine's flagd file provider."""
+def test_materialize_defaults_to_the_configured_run_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no explicit path, the manifest lands in the run directory."""
+    monkeypatch.setenv(RUN_DIR_ENV, str(tmp_path / "runs" / "2026-08-19-a1b2"))
     provider = LaunchDarklyProvider()
     path = provider.materialize(RUN)
-    assert path == Path(".adlc") / "runs" / "2026-08-19-a1b2" / MANIFEST_NAME
+    assert path == tmp_path / "runs" / "2026-08-19-a1b2" / MANIFEST_NAME
     assert path.is_file()
     # The resolved location is remembered, exactly like FlagdFileProvider.path.
     assert provider.path == path
+
+
+def test_manifest_path_prefers_an_explicit_path_over_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUN_DIR_ENV, str(tmp_path / "from-env"))
+    explicit = tmp_path / "explicit" / MANIFEST_NAME
+    path = LaunchDarklyProvider(explicit).materialize(RUN)
+    assert path == explicit
+
+
+def test_manifest_path_is_independent_of_the_process_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug the env override exists for.
+
+    ``materialize(run)`` carries no run directory, so a bare ``.adlc/...``
+    default resolves against the process cwd — wrong in a container, in an
+    Actions job with a custom ``working-directory``, or after any chdir.
+    """
+    monkeypatch.setenv(RUN_DIR_ENV, str(tmp_path / "runs" / "2026-08-19-a1b2"))
+    elsewhere = tmp_path / "some" / "other" / "cwd"
+    elsewhere.mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+
+    path = LaunchDarklyProvider().materialize(RUN)
+    assert path.is_absolute()
+    assert path == tmp_path / "runs" / "2026-08-19-a1b2" / MANIFEST_NAME
+    assert not (elsewhere / ".adlc").exists(), "manifest must not follow the cwd"
+
+
+def test_manifest_path_falls_back_without_config_or_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Last resort stays cwd-relative, but is only reached with nothing to consult."""
+    monkeypatch.delenv(RUN_DIR_ENV, raising=False)
+    monkeypatch.setattr(
+        "adlc.config.Config.load",
+        staticmethod(lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("no config"))),
+    )
+    monkeypatch.chdir(tmp_path)
+    assert default_manifest_path("r1", MANIFEST_NAME) == (
+        Path(".adlc") / "runs" / "r1" / MANIFEST_NAME
+    )
 
 
 def test_materialize_handles_a_run_with_no_flags(tmp_path: Path) -> None:

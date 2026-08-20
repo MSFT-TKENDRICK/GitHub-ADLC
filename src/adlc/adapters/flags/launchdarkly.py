@@ -57,6 +57,32 @@ MANIFEST_NAME = "flags.launchdarkly.json"
 
 MANIFEST_SCHEMA_VERSION = "adlc-flag-manifest/v1"
 
+#: Overrides the run directory a provider writes into when it was constructed
+#: without an explicit path. Needed because the frozen ``materialize(run)``
+#: signature carries no run directory, and a bare ``.adlc/...`` default is
+#: resolved against the **process cwd** — which is not the repo root in a
+#: container, an Actions job with a custom ``working-directory``, or any caller
+#: that chdir'd. See ``docs/experiments.md`` §8.
+RUN_DIR_ENV = "ADLC_RUN_DIR"
+
+
+def default_manifest_path(run_id: str, filename: str) -> Path:
+    """Resolve where a flag provider should write when given no explicit path.
+
+    Ordering: ``ADLC_RUN_DIR`` → the configured run directory → a cwd-relative
+    default. Only the last is cwd-dependent, and it is reached only when there is
+    no config to consult at all.
+    """
+    override = (os.environ.get(RUN_DIR_ENV) or "").strip()
+    if override:
+        return Path(override) / filename
+    try:
+        from adlc.config import Config
+
+        return Path(Config.load().run_dir(run_id)) / filename
+    except Exception:  # noqa: BLE001 - never fail materialize() over path discovery
+        return Path(".adlc") / "runs" / run_id / filename
+
 
 class LaunchDarklyProvider:
     """Deliver ADLC experiment flags via LaunchDarkly through OpenFeature.
@@ -159,7 +185,7 @@ class LaunchDarklyProvider:
             "flags": list(flags.values()),
         }
 
-        target = self.path or Path(".adlc") / "runs" / run_id / MANIFEST_NAME
+        target = self.path or default_manifest_path(run_id, MANIFEST_NAME)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
