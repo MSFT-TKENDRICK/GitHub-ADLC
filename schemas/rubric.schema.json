@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/rubric.schema.json",
+  "title": "ADLC rubric",
+  "description": "Eval criteria. Every EvalRunner adapter normalises its output to RubricScore against this.",
+  "type": "object",
+  "required": ["id", "threshold", "criteria"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string" },
+    "description": { "type": "string" },
+    "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "statement", "weight"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "statement": { "type": "string", "description": "What must be true." },
+          "weight": { "type": "number", "exclusiveMinimum": 0 },
+          "kind": {
+            "enum": ["deterministic", "llm-rubric", "measurement"],
+            "default": "deterministic"
+          },
+          "check": {
+            "type": "object",
+            "description": "For kind=deterministic|measurement: how to evaluate without an LLM.",
+            "additionalProperties": true,
+            "properties": {
+              "type": { "enum": ["file_exists", "command_exit_zero", "metric_within_budget", "regex_in_file"] },
+              "target": { "type": "string" },
+              "metricId": { "type": "string" },
+              "budget": { "type": "number" },
+              "pattern": { "type": "string" }
+            }
+          },
+          "acceptanceRefs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

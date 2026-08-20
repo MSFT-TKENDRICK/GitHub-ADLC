@@ -1,0 +1,27 @@
+# ADLC configuration for the ADLC framework itself (dogfooding).
+version: 1
+profile: minimal
+
+commands:
+  test: "python -m pytest tests/conformance -q"
+  lint: "ruff check src/"
+  build: ""
+
+adapters: {}
+
+limits:
+  maxParallel: 4
+  maxInnerIterations: 2
+  maxOuterIterations: 1
+  maxTurns: 200
+  maxAiCredits: 500
+
+gates:
+  required: null
+  depsMaxSeverity: high
+
+qualify:
+  minScore: 50
+
+eval:
+  threshold: 0.7

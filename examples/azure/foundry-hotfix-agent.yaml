@@ -1,0 +1,56 @@
+# DISABLED EXAMPLE - requires an Azure subscription. Nothing here is applied
+# by ADLC; `adlc doctor` reports this adapter unavailable without Azure env.
+#
+# SUBSTITUTION: no Microsoft Foundry 'SWE agent' SKU was found in the docs we searched
+# (2026-08-19); this runs our own `adlc hotfix` CLI instead. The non-existence of such a product
+# is UNVERIFIED as a negative claim - we found no page asserting it either way.
+# PROTOCOL SHIM NOT SHIPPED: a hosted agent must serve its declared `protocols` over HTTP, and
+# `startupCommand` is documented as the command that starts the agent *server*. `adlc hotfix` is
+# a CLI that exits when done. Running this as a hosted agent requires an HTTP shim in the image
+# that ADLC does not provide.
+# REAL ALTERNATIVE: the plain container-job form (entrypoint `adlc hotfix --incident FILE`)
+# needs no shim and is the supported path.
+# FORMAT: azure.yaml is current. agent.yaml / agent.manifest.yaml are documented as deprecated
+# as of the azure.ai.agents 1.0.0-beta.1 azd extension; FoundryHotfixAgent.agent_manifest()
+# still renders that older shape.
+#
+# Documented azd commands (this file is not executed by ADLC):
+#   azd ai agent init
+#   azd ai agent run
+#   azd up
+#
+# Container entrypoint (the part that is real):
+#   adlc hotfix --incident /var/adlc/incident.json
+name: adlc-day2
+services:
+  ai-project:
+    host: azure.ai.project
+  adlc-hotfix:
+    host: azure.ai.agent
+    kind: hosted
+    name: adlc-hotfix
+    displayName: ADLC hotfix
+    description: Runs the ADLC hotfix pipeline (adlc hotfix --incident FILE) against
+      an incident raised by Azure SRE Agent.
+    uses:
+    - ai-project
+    protocols:
+    - protocol: invocations
+      version: 2.0.0
+    env:
+      ADLC_INCIDENT_FILE: /var/adlc/incident.json
+      ADLC_PROFILE: ${ADLC_PROFILE}
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+    container:
+      resources:
+        cpu: '1.0'
+        memory: 2.0Gi
+    metadata:
+      adlc.stage: hotfix
+      adlc.tier: documented-disabled-example
+      adlc.docs: docs/day2-operations.md
+    project: src/adlc-hotfix
+    language: docker
+    startupCommand: adlc hotfix --incident /var/adlc/incident.json

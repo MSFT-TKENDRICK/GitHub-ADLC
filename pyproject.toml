@@ -1,0 +1,119 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adlc"
+version = "0.1.0"
+description = "Agentic Development Lifecycle framework — governed, evidence-producing agentic SDLC for any GitHub repo"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "jsonschema>=4.22",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+copilot = ["github-copilot-sdk>=0.1"]
+governance = ["agent-framework", "agent-governance-toolkit[full]"]
+evals = ["assert-ai"]
+azure = ["azure-ai-evaluation", "azure-monitor-opentelemetry"]
+flags = ["openfeature-sdk>=0.7", "launchdarkly-server-sdk>=9.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[project.scripts]
+adlc = "adlc.cli:app"
+
+# ---------------------------------------------------------------------------
+# Adapter registry.
+#
+# EVERY adapter -- spine default and leaf alike -- is pre-declared here so that
+# no workstream ever has to edit this file. `adlc.config.load_adapters` swallows
+# ImportError, so an entry point whose module does not exist yet is simply
+# undiscoverable rather than fatal. This is what lets 11 workstreams land in
+# parallel without a merge conflict on pyproject.toml.
+#
+# Each adapter implements a Protocol from `adlc.ports` plus a static detect().
+# ---------------------------------------------------------------------------
+[project.entry-points."adlc.agents"]
+fake = "adlc.adapters.agents.fake:FakeAgentRunner"              # spine default
+copilot-sdk = "adlc.adapters.agents.copilot_sdk:CopilotSdkRunner"     # L1
+agent-task = "adlc.adapters.agents.agent_task:AgentTaskRunner"        # L1
+gh-aw = "adlc.adapters.agents.gh_aw:GhAwRunner"                       # L1
+maf = "adlc.adapters.agents.maf_governed:MafGovernedRunner"           # L2
+
+[project.entry-points."adlc.taskstore"]
+sqlite = "adlc.adapters.taskstore.sqlite:SqliteTaskStore"       # spine default
+github = "adlc.adapters.taskstore.github:GitHubTaskStore"             # L5
+
+[project.entry-points."adlc.evals"]
+deterministic = "adlc.adapters.evals.deterministic:DeterministicRubricRunner"  # spine default
+assert-ai = "adlc.adapters.evals.assert_:AssertEvalRunner"            # L3
+promptfoo = "adlc.adapters.evals.promptfoo:PromptfooEvalRunner"       # L3
+azure = "adlc.adapters.evals.azure:AzureEvalRunner"                   # L3
+
+[project.entry-points."adlc.evidence"]
+local = "adlc.adapters.evidence.local:LocalEvidenceCollector"          # spine default
+playwright = "adlc.adapters.evidence.playwright:PlaywrightCollector"  # spine, when installed
+lighthouse = "adlc.adapters.evidence.lighthouse:LighthouseCollector"  # L6
+k6 = "adlc.adapters.evidence.k6:K6Collector"                          # L6
+axe = "adlc.adapters.evidence.axe:AxeCollector"                       # L6
+
+[project.entry-points."adlc.flags"]
+flagd-file = "adlc.adapters.flags.flagd_file:FlagdFileProvider"  # spine default
+launchdarkly = "adlc.adapters.flags.launchdarkly:LaunchDarklyProvider"  # L7
+
+[project.entry-points."adlc.telemetry"]
+otel-file = "adlc.adapters.telemetry.otel_file:OtelFileTelemetry"  # spine default
+appinsights = "adlc.adapters.telemetry.appinsights:AppInsightsTelemetry"  # L10
+
+[project.entry-points."adlc.export"]
+oes = "adlc.adapters.export.oes:OesExporter"                          # L7
+
+[project.entry-points."adlc.daytwo"]
+sre-agent = "adlc.adapters.daytwo.sre_agent:SreAgentReceiver"         # L10
+foundry = "adlc.adapters.daytwo.foundry:FoundryHotfixAgent"           # L10
+
+[project.entry-points."adlc.gate"]
+# spine defaults -- credential-free, required in the `minimal` profile
+tests = "adlc.adapters.gate.tests:TestsGate"
+secrets_local = "adlc.adapters.gate.secrets_local:SecretsLocalGate"
+deps_local = "adlc.adapters.gate.deps_local:DepsLocalGate"
+evidence_completeness = "adlc.adapters.gate.evidence_completeness:EvidenceCompletenessGate"
+# leaves
+security = "adlc.adapters.gate.codeql:CodeQlGate"                     # L4
+code_quality = "adlc.adapters.gate.code_quality:CodeQualityGate"      # L4
+dependency = "adlc.adapters.gate.dependency:DependencyReviewGate"     # L4
+evals = "adlc.adapters.gate.evals:EvalsGate"                          # L3
+governance = "adlc.adapters.gate.governance:GovernanceGate"           # L2
+adversarial_review = "adlc.adapters.gate.adversarial_review:AdversarialReviewGate"  # L8
+evidence_review = "adlc.adapters.gate.evidence_review:EvidenceReviewGate"           # L8
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adlc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+ignore = [
+    # typer expresses CLI parameters as call-valued defaults; this is the idiom.
+    "B008",
+    # Skipping a file we cannot read or parse is deliberate, not a swallowed bug.
+    "S112",
+    # `__enter__` returning the concrete class is intentional and useful here.
+    "PYI034",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on internals and use long, explicit fixtures.
+"tests/**" = ["S101", "SLF001", "PLR2004"]

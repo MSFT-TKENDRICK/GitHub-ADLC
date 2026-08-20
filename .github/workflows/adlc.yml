@@ -1,0 +1,162 @@
+# ADLC reusable workflow.
+#
+# Consumer repos call this with a thin caller (see `adlc init`):
+#
+#   jobs:
+#     adlc:
+#       uses: MSFT-TKENDRICK/GitHub-ADLC/.github/workflows/adlc.yml@v0
+#
+# NOTE: cross-repository reusable workflows MUST live in `.github/workflows/`.
+# Putting them anywhere else silently fails to resolve.
+#
+# Trust model (see docs/PLAN.md 4.8):
+#   * `build` runs agent-authored code. It gets `contents: read`, NO secrets, and
+#     never publishes anything.
+#   * Publication (checks, PR comments) happens in a separate job triggered by
+#     `workflow_run`, so untrusted code and write tokens never share a job.
+
+name: ADLC
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "minimal | full"
+        type: string
+        default: minimal
+      brief:
+        description: "Path to a brief markdown file"
+        type: string
+        required: false
+      runner:
+        description: "Agent runner adapter (fake | copilot-sdk | agent-task)"
+        type: string
+        default: fake
+      python-version:
+        type: string
+        default: "3.11"
+    outputs:
+      run-id:
+        description: "The ADLC run id"
+        value: ${{ jobs.pipeline.outputs.run-id }}
+      passed:
+        description: "Whether all required gates passed"
+        value: ${{ jobs.pipeline.outputs.passed }}
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    name: ADLC pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      run-id: ${{ steps.run.outputs.run-id }}
+      passed: ${{ steps.gates.outputs.passed }}
+    steps:
+      - name: Check out the caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the ADLC framework
+        uses: actions/checkout@v4
+        with:
+          repository: MSFT-TKENDRICK/GitHub-ADLC
+          path: .adlc-framework
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install ADLC
+        run: pip install --disable-pip-version-check ./.adlc-framework
+
+      - name: Capability detection
+        run: adlc doctor
+
+      - name: Create run
+        id: run
+        env:
+          ADLC_PROFILE: ${{ inputs.profile }}
+        run: |
+          BRIEF="${{ inputs.brief }}"
+          if [ -z "$BRIEF" ] || [ ! -f "$BRIEF" ]; then
+            BRIEF="$RUNNER_TEMP/brief.md"
+            {
+              echo "# ${{ github.event.pull_request.title || github.workflow }}"
+              echo
+              echo "${{ github.event.pull_request.body || 'Automated ADLC run for this change.' }}"
+            } > "$BRIEF"
+          fi
+          RUN_ID=$(adlc run new --brief "$BRIEF" --json | python -c "import sys,json;print(json.load(sys.stdin)['runId'])")
+          echo "run-id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Specify, enrich and compile the task graph
+        env:
+          ADLC_PROFILE: ${{ inputs.profile }}
+        run: |
+          RUN=${{ steps.run.outputs.run-id }}
+          adlc qualify "$RUN" || echo "::warning::brief did not meet the qualification threshold"
+          adlc spec "$RUN"
+          adlc enrich "$RUN"
+          adlc graph "$RUN"
+
+      # Agent-authored code runs here. No secrets, read-only token, no publishing.
+      - name: Build candidate
+        env:
+          ADLC_PROFILE: ${{ inputs.profile }}
+        run: adlc build ${{ steps.run.outputs.run-id }} --runner ${{ inputs.runner }}
+
+      - name: Capture evidence
+        env:
+          ADLC_PROFILE: ${{ inputs.profile }}
+          ADLC_TEST_COMMAND: ${{ vars.ADLC_TEST_COMMAND }}
+        run: adlc evidence ${{ steps.run.outputs.run-id }} --variant candidate-a
+
+      - name: Evaluate against the rubric
+        env:
+          ADLC_PROFILE: ${{ inputs.profile }}
+        run: adlc eval ${{ steps.run.outputs.run-id }}
+
+      - name: Gates
+        id: gates
+        env:
+          ADLC_PROFILE: ${{ inputs.profile }}
+        run: |
+          if adlc gate ${{ steps.run.outputs.run-id }}; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::required ADLC gates did not pass"
+          fi
+
+      - name: Report
+        if: always()
+        env:
+          ADLC_PROFILE: ${{ inputs.profile }}
+        run: |
+          adlc reduce ${{ steps.run.outputs.run-id }}
+          adlc report ${{ steps.run.outputs.run-id }}
+          adlc validate ${{ steps.run.outputs.run-id }}
+
+      - name: Upload evidence and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adlc-${{ steps.run.outputs.run-id }}
+          path: .adlc/runs/${{ steps.run.outputs.run-id }}
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Fail the job last, so evidence is always uploaded first.
+      - name: Enforce required gates
+        if: always() && steps.gates.outputs.passed != 'true'
+        run: |
+          echo "Required gates failed. A required gate that did not run counts as a failure."
+          exit 1

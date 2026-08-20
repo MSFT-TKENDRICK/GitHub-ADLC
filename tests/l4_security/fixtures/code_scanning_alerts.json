@@ -1,0 +1,107 @@
+{
+  "_comment": "Recorded shape of GET /repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/42/merge&state=open. Note that most_recent_instance.commit_sha is the MERGE commit, not the PR head SHA -- which is exactly why the gate must not filter the blocking set on instance SHA. Note also that the maintainability rule has security_severity_level: null, the documented proxy for a non-security rule.",
+  "clean": [
+    {
+      "number": 11,
+      "state": "open",
+      "created_at": "2026-08-19T10:03:20Z",
+      "rule": {
+        "id": "py/unused-import",
+        "name": "py/unused-import",
+        "severity": "note",
+        "security_severity_level": null,
+        "description": "Unused import",
+        "tags": ["maintainability"]
+      },
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "most_recent_instance": {
+        "ref": "refs/pull/42/merge",
+        "commit_sha": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+        "category": ".github/workflows/codeql.yml:analyze/language:python",
+        "state": "open"
+      }
+    },
+    {
+      "number": 12,
+      "state": "open",
+      "created_at": "2026-08-19T10:03:21Z",
+      "rule": {
+        "id": "py/weak-sensitive-data-hashing",
+        "name": "py/weak-sensitive-data-hashing",
+        "severity": "warning",
+        "security_severity_level": "medium",
+        "description": "Use of a broken or weak cryptographic hashing algorithm",
+        "tags": ["security", "external/cwe/cwe-327"]
+      },
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "most_recent_instance": {
+        "ref": "refs/pull/42/merge",
+        "commit_sha": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+        "category": ".github/workflows/codeql.yml:analyze/language:python",
+        "state": "open"
+      }
+    }
+  ],
+  "breaching": [
+    {
+      "number": 21,
+      "state": "open",
+      "created_at": "2026-08-19T10:03:22Z",
+      "rule": {
+        "id": "py/sql-injection",
+        "name": "py/sql-injection",
+        "severity": "error",
+        "security_severity_level": "critical",
+        "description": "SQL query built from user-controlled sources",
+        "tags": ["security", "external/cwe/cwe-089"]
+      },
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "most_recent_instance": {
+        "ref": "refs/pull/42/merge",
+        "commit_sha": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+        "category": ".github/workflows/codeql.yml:analyze/language:python",
+        "state": "open"
+      }
+    },
+    {
+      "number": 22,
+      "state": "open",
+      "created_at": "2026-08-19T10:03:23Z",
+      "rule": {
+        "id": "py/command-line-injection",
+        "name": "py/command-line-injection",
+        "severity": "error",
+        "security_severity_level": "high",
+        "description": "Uncontrolled command line",
+        "tags": ["security", "external/cwe/cwe-078"]
+      },
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "most_recent_instance": {
+        "ref": "refs/pull/42/merge",
+        "commit_sha": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+        "category": ".github/workflows/codeql.yml:analyze/language:python",
+        "state": "open"
+      }
+    },
+    {
+      "number": 23,
+      "state": "open",
+      "created_at": "2026-08-19T10:03:24Z",
+      "rule": {
+        "id": "py/clear-text-logging-sensitive-data",
+        "name": "py/clear-text-logging-sensitive-data",
+        "severity": "warning",
+        "security_severity_level": "low",
+        "description": "Clear-text logging of sensitive information",
+        "tags": ["security", "external/cwe/cwe-312"]
+      },
+      "tool": { "name": "CodeQL", "guid": null, "version": "2.20.3" },
+      "most_recent_instance": {
+        "ref": "refs/pull/42/merge",
+        "commit_sha": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+        "category": ".github/workflows/codeql.yml:analyze/language:python",
+        "state": "open"
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+
+# ADLC run artifacts
+.adlc/runs/
+.adlc/tasks.db
+.adlc/capabilities.json
+.adlc/.lastrun
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+
+# Scratch worktrees and local venvs used during development
+adlc-diag-*/
+

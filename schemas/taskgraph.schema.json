@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/taskgraph.schema.json",
+  "title": "ADLC task graph",
+  "description": "Parallel-optimised DAG with bounded context capsules. Capsules are a cache, never the source of truth.",
+  "type": "object",
+  "required": ["runId", "baseSha", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "runId": { "type": "string" },
+    "baseSha": { "type": "string" },
+    "specDigest": { "type": "string" },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["id", "title", "kind", "dependsOn", "level", "writeSet"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^T[0-9]{3,}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["implement", "test", "doc", "infra"] },
+        "dependsOn": { "type": "array", "items": { "type": "string" } },
+        "level": { "type": "integer", "minimum": 0 },
+        "writeSet": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "Declared up front. Overlap at the same level is a compile-time graph error."
+        },
+        "acceptance": { "type": "array", "items": { "type": "string" } },
+        "rubricIds": { "type": "array", "items": { "type": "string" } },
+        "adrRefs": { "type": "array", "items": { "type": "string" } },
+        "context": { "$ref": "#/$defs/capsule" }
+      }
+    },
+    "capsule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "refs": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/ref" } },
+        "interfaces": { "type": "string" },
+        "conventions": { "type": "string" },
+        "commands": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "properties": {
+            "test": { "type": "string" },
+            "lint": { "type": "string" },
+            "build": { "type": "string" }
+          }
+        },
+        "doNotTouch": { "type": "array", "items": { "type": "string" } },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxTotalBytes": { "type": "integer", "maximum": 65536 },
+            "maxFileBytes": { "type": "integer", "maximum": 8192 },
+            "maxFiles": { "type": "integer", "maximum": 12 }
+          }
+        }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "required": ["path", "blobSha"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "blobSha": {
+          "type": "string",
+          "description": "git blob SHA. A mismatch at execution time fails the node and triggers replan."
+        },
+        "lines": {
+          "type": "array",
+          "items": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer" } }
+        },
+        "symbols": { "type": "array", "items": { "type": "string" } },
+        "excerpt": { "type": "string", "maxLength": 8192 }
+      }
+    }
+  }
+}

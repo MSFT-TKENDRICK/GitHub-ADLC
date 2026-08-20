@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/adlc-run.schema.json",
+  "title": "adlc-run/v1",
+  "description": "Canonical ADLC run record. Written ONLY by `adlc reduce`.",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "createdAt", "repo", "status", "profile", "stages"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "adlc-run/v1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "referencesRun": { "type": ["string", "null"] },
+    "repo": { "type": "string" },
+    "baseSha": { "type": ["string", "null"] },
+    "headSha": { "type": ["string", "null"] },
+    "prNumber": { "type": ["integer", "null"] },
+    "status": {
+      "enum": ["draft", "specced", "built", "evaluated", "gated", "reported", "decided", "abandoned"]
+    },
+    "profile": { "enum": ["minimal", "full"] },
+    "capabilities": { "type": "object", "additionalProperties": { "type": "string" } },
+    "stages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stageResult" }
+    },
+    "variants": { "type": "array", "items": { "$ref": "#/$defs/variant" } },
+    "gates": { "type": "array", "items": { "$ref": "#/$defs/gateResult" } },
+    "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactRef" } },
+    "decision": { "oneOf": [{ "$ref": "#/$defs/decision" }, { "type": "null" }] },
+    "experimentRef": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "stageResult": {
+      "type": "object",
+      "required": ["stage", "attempt", "status", "startedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "stage": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["ok", "fail", "skipped"] },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": ["string", "null"], "format": "date-time" },
+        "outputs": { "type": "array", "items": { "type": "string" } },
+        "digest": { "type": "string" },
+        "message": { "type": "string" },
+        "data": { "type": "object" }
+      }
+    },
+    "variant": {
+      "type": "object",
+      "required": ["key", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" },
+        "role": { "enum": ["control", "treatment"] },
+        "commit": { "type": ["string", "null"] },
+        "flagKeys": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "gateResult": {
+      "type": "object",
+      "required": ["id", "required", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "required": { "type": "boolean" },
+        "status": { "enum": ["pass", "fail", "not_run"] },
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "observed": { "type": "object" },
+        "expected": { "type": "object" },
+        "message": { "type": "string" },
+        "evidence": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "required": ["path", "kind", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "kind": { "type": "string" },
+        "mimeType": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["outcome", "decidedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": { "enum": ["ship", "do_not_ship", "iterate", "rerun"] },
+        "rationale": { "type": "string" },
+        "decidedBy": { "type": "string" },
+        "decidedAt": { "type": "string", "format": "date-time" },
+        "reviewSha": { "type": "string" },
+        "adr": { "type": "string" }
+      }
+    }
+  }
+}
