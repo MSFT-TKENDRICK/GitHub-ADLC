@@ -127,6 +127,7 @@ def apply_review(cfg: Config, rd: RunDir, event: dict[str, Any]) -> dict[str, An
                 + (f"\n### Inline annotations\n\n{annotations}\n" if annotations else "")
             ),
             references_run=rd.run_id,
+            route=route,
         )
 
     rd.write_stage(

@@ -351,6 +351,11 @@ class Run(TypedDict, total=False):
     runId: str
     createdAt: str
     referencesRun: str | None
+    #: Which loop a successor run re-enters. ``outer`` re-specs from the brief;
+    #: ``inner`` rebuilds against the existing spec. ``None`` for an original run.
+    #: This is read by :func:`adlc.stages.feedback.retrigger_loop`, so it is a
+    #: control value, not a label.
+    route: str | None
     repo: str
     baseSha: str
     headSha: str

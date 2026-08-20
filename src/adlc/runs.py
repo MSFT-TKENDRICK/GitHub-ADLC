@@ -168,7 +168,14 @@ class RunDir:
             return path.as_posix()
 
     # -- lifecycle --------------------------------------------------------
-    def create(self, *, profile: str, brief_text: str, references_run: str | None = None) -> Run:
+    def create(
+        self,
+        *,
+        profile: str,
+        brief_text: str,
+        references_run: str | None = None,
+        route: str | None = None,
+    ) -> Run:
         for directory in (
             self.stages_dir, self.spec_dir, self.enrichment_dir, self.patches_dir,
             self.evidence_dir, self.evals_dir, self.gates_dir, self.reviews_dir,
@@ -181,6 +188,7 @@ class RunDir:
             "runId": self.run_id,
             "createdAt": utcnow(),
             "referencesRun": references_run,
+            "route": route,
             "repo": detect_repo(self.cfg.root),
             "baseSha": current_sha(self.cfg.root),
             "headSha": current_sha(self.cfg.root),
