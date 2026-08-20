@@ -142,6 +142,27 @@ The cross-check is a **development-time** tool, not part of the suite: it needs
 npm and a mermaid install, and `tests/l9_enrich` must pass with no network. Re-run
 it by hand if you change the validator or the diagram builders.
 
+### Surviving `report.py`
+
+`src/adlc/stages/report.py` embeds Mermaid as `escape(source)` inside
+`<div class="mermaid">`, then either lets mermaid.js read `el.textContent` or —
+when the CDN is unreachable — copies that same `textContent` into a `<pre>`.
+Both paths HTML-unescape, so the round-trip must be lossless. It is, and
+`test_diagrams_survive_the_report_html_escape_roundtrip` holds that line.
+
+This is why `sanitize_label()` has the allowlist it does. Everything it strips
+(`< > # | " [ ] { } ( ) `` ; \ ~`) breaks either the Mermaid grammar or the HTML
+embed; everything it keeps (`& + % ? ! ' : / , . -`) was confirmed to parse
+inside a quoted label by mermaid 11's own parser, and to survive
+`html.escape`/`unescape` unchanged. `#` is stripped because it opens a Mermaid
+entity code; `&` is safe because a quoted label tolerates it and the escape
+round-trip restores it exactly.
+
+> **Not yet wired up:** `report.py` currently renders only the *task graph*
+> diagram. It does not read `enrichment/*.mmd`, so these diagrams do not appear
+> in `report.html` yet. That file is spine-owned; the artifacts are valid and
+> ready whenever the spine adds the section.
+
 Generated labels are pushed through `sanitize_label()`, which strips everything
 outside `[\w \-.,:/'&+%?!]`, collapses whitespace and truncates. Node ids come
 from `mermaid_id()`, which slugifies and prefixes so a label can never collide

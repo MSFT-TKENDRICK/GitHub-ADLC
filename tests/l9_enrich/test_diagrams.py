@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape, unescape
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,51 @@ def test_er_name_normalises() -> None:
 def test_mermaid_id_is_keyword_free() -> None:
     assert ed.mermaid_id("n", "end", 3) not in ed.RESERVED_IDS
     assert ed.mermaid_id("n", "", 1) == "n1"
+
+
+# ---------------------------------------------------------------------------
+# The spine's report.py rendering path
+# ---------------------------------------------------------------------------
+
+#: Characters that break a Mermaid node label, an HTML embed, or both.
+BANNED_IN_LABELS = "<>#|\"[]{}()`;\\~"
+
+
+def test_sanitize_label_strips_everything_that_breaks_mermaid_or_html() -> None:
+    raw = (
+        "Search & Filter 50% done? Yes! a+b c/d e,f g.h i:j it's -x- "
+        "<script> #hash |pipe| \"q\" [b] {c} (d) `t` ; \\ ~"
+    )
+    label = ed.sanitize_label(raw, limit=200)
+    for char in BANNED_IN_LABELS:
+        assert char not in label, f"{char!r} survived sanitisation"
+    # The safe punctuation is deliberately kept -- all of it is verified to
+    # parse inside a quoted label by mermaid 11's own parser.
+    for char in "&+%?!':/,.-":
+        assert char in label, f"{char!r} was stripped but is safe"
+    ok, errors = ed.validate_mermaid(f'flowchart TB\n    n1["{label}"] --> n2["b"]\n')
+    assert ok, errors
+
+
+def test_diagrams_survive_the_report_html_escape_roundtrip(
+    run_dir: Path, spec_text: str, cfg
+) -> None:
+    """``report.py`` embeds Mermaid as ``escape(source)`` inside a div and hands
+    ``el.textContent`` to mermaid.js (or to a ``<pre>`` when the CDN is down).
+    Both paths HTML-unescape, so the round-trip must be lossless."""
+    for path in ed.generate(run_dir, spec_text, cfg):
+        source = path.read_text(encoding="utf-8")
+        round_tripped = unescape(escape(source))
+        assert round_tripped == source, f"{path.name} is altered by HTML escaping"
+        ok, errors = ed.validate_mermaid(round_tripped)
+        assert ok, f"{path.name} invalid after escape round-trip: {errors}"
+
+
+def test_escape_roundtrip_survives_ampersands_and_quotes() -> None:
+    label = ed.sanitize_label("Tom & Jerry 100% \"quoted\"")
+    diagram = f'flowchart LR\n    n1["{label}"] --> n2["b"]\n'
+    assert ed.validate_mermaid(diagram)[0]
+    assert unescape(escape(diagram)) == diagram
 
 
 # ---------------------------------------------------------------------------
