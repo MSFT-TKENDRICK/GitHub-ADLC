@@ -1,0 +1,455 @@
+{
+  "schemaVersion": "adlc-run/v1",
+  "runId": "2026-08-19-a1b2",
+  "createdAt": "2026-08-19T09:00:00Z",
+  "referencesRun": null,
+  "repo": "octo-org/octo-app",
+  "baseSha": "3f1a9c7e2b4d6081a5c3e7f902b4d6081a5c3e7f",
+  "headSha": "c7e2b4d6081a5c3e7f902b4d6081a5c3e7f90213",
+  "prNumber": 42,
+  "status": "reported",
+  "profile": "full",
+  "capabilities": {
+    "agents": "fake",
+    "flags": "flagd-file",
+    "evals": "deterministic",
+    "evidence": "playwright",
+    "export": "oes"
+  },
+  "stages": [
+    {
+      "stage": "intake",
+      "attempt": 1,
+      "status": "ok",
+      "startedAt": "2026-08-19T09:00:00Z",
+      "endedAt": "2026-08-19T09:00:04Z",
+      "outputs": ["brief.md"],
+      "message": "brief accepted from issue #118",
+      "data": { "issue": 118 }
+    },
+    {
+      "stage": "experiment",
+      "attempt": 1,
+      "status": "ok",
+      "startedAt": "2026-08-19T09:10:00Z",
+      "endedAt": "2026-08-19T09:10:01Z",
+      "outputs": ["experiment/plan.json"],
+      "digest": "sha256:1d1f0b6f3f7c9a2e4b8d0c5a7e9f1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e",
+      "message": "pre-registered 2 variants and 4 metrics for experiment 'exp-dark-mode-a1b2'",
+      "data": {
+        "phase": "plan",
+        "experiment": {
+          "id": "exp-dark-mode-a1b2",
+          "title": "Dark mode: token-driven theme vs. duplicated stylesheet",
+          "status": "planned",
+          "hypothesis": "Deriving the dark theme from design tokens lowers Largest Contentful Paint and removes the remaining contrast violations, without regressing bundle size beyond budget.",
+          "summary": "Two build candidates at two commits, compared on a fixed evidence suite.",
+          "tags": ["ui", "accessibility"]
+        },
+        "design": {
+          "type": "quasi_experiment",
+          "analysisUnit": "build_run",
+          "assignmentMethod": "deterministic_build_variant",
+          "exposureDefinition": "each variant is a build artifact at a commit; exposure is a CI evaluation, not live user traffic"
+        },
+        "variants": [
+          {
+            "id": "control",
+            "key": "control",
+            "role": "control",
+            "codeReferences": [
+              {
+                "type": "git_commit",
+                "value": "3f1a9c7e2b4d6081a5c3e7f902b4d6081a5c3e7f",
+                "repo": "octo-org/octo-app"
+              }
+            ]
+          },
+          {
+            "id": "candidate-a",
+            "key": "candidate-a",
+            "role": "treatment",
+            "featureFlagKeys": ["adlc.exp.a1b2"],
+            "codeReferences": [
+              {
+                "type": "git_commit",
+                "value": "c7e2b4d6081a5c3e7f902b4d6081a5c3e7f90213",
+                "repo": "octo-org/octo-app"
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "id": "lcp_ms",
+            "name": "Largest Contentful Paint",
+            "role": "primary",
+            "direction": "decrease_is_good",
+            "type": "duration",
+            "unit": "ms",
+            "budget": 2500,
+            "source": "benchmarks.yaml"
+          },
+          {
+            "id": "a11y_violations",
+            "name": "Axe critical violations",
+            "role": "guardrail",
+            "direction": "decrease_is_good",
+            "type": "count",
+            "budget": 0,
+            "source": "benchmarks.yaml"
+          },
+          {
+            "id": "rubric_overall",
+            "name": "Rubric overall score",
+            "role": "secondary",
+            "direction": "increase_is_good",
+            "type": "ratio",
+            "source": "rubric.yaml"
+          },
+          {
+            "id": "bundle_kb",
+            "name": "Client bundle size",
+            "role": "secondary",
+            "direction": "decrease_is_good",
+            "type": "count",
+            "unit": "kB",
+            "budget": 240,
+            "source": "benchmarks.yaml"
+          }
+        ],
+        "analysis": {
+          "method": "custom",
+          "model": "adlc-deterministic-comparison"
+        },
+        "preRegistration": {
+          "digest": "sha256:1d1f0b6f3f7c9a2e4b8d0c5a7e9f1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e",
+          "plannedAt": "2026-08-19T09:10:00Z",
+          "gitSha": "3f1a9c7e2b4d6081a5c3e7f902b4d6081a5c3e7f",
+          "path": "experiment/plan.json"
+        }
+      }
+    },
+    {
+      "stage": "experiment",
+      "attempt": 2,
+      "status": "ok",
+      "startedAt": "2026-08-19T09:20:00Z",
+      "endedAt": "2026-08-19T09:20:02Z",
+      "outputs": ["experiment/exposure.json"],
+      "message": "recorded exposure for 1 flag key(s) via provider 'flagd-file'",
+      "data": {
+        "phase": "run",
+        "exposure": {
+          "provider": "flagd-file",
+          "providerNote": "flag definitions materialized",
+          "manifest": "flags.flagd.json",
+          "variants": { "control": [], "candidate-a": ["adlc.exp.a1b2"] },
+          "flagKeys": ["adlc.exp.a1b2"],
+          "evaluations": []
+        }
+      }
+    },
+    {
+      "stage": "experiment",
+      "attempt": 3,
+      "status": "ok",
+      "startedAt": "2026-08-19T10:05:00Z",
+      "endedAt": "2026-08-19T10:05:03Z",
+      "outputs": ["experiment/analysis.json"],
+      "digest": "sha256:7c9a2e4b8d0c5a7e9f1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e1d1f0b6f3f",
+      "message": "4 comparison(s) computed against baseline 'control' from 8 measurement(s)",
+      "data": {
+        "phase": "analyze",
+        "baselineVariantKey": "control",
+        "experiment": {
+          "id": "exp-dark-mode-a1b2",
+          "title": "Dark mode: token-driven theme vs. duplicated stylesheet",
+          "status": "analyzed",
+          "hypothesis": "Deriving the dark theme from design tokens lowers Largest Contentful Paint and removes the remaining contrast violations, without regressing bundle size beyond budget.",
+          "summary": "Two build candidates at two commits, compared on a fixed evidence suite.",
+          "tags": ["ui", "accessibility"]
+        },
+        "analysis": {
+          "method": "custom",
+          "model": "adlc-deterministic-comparison",
+          "generatedAt": "2026-08-19T10:05:00Z"
+        },
+        "measurements": [
+          {
+            "metricId": "lcp_ms",
+            "variantKey": "control",
+            "value": 2000,
+            "collector": "lighthouse",
+            "artifactSha256": "b1946ac92492d2347c6235b4d2611184b1946ac92492d2347c6235b4d2611184"
+          },
+          {
+            "metricId": "a11y_violations",
+            "variantKey": "control",
+            "value": 2,
+            "collector": "axe"
+          },
+          { "metricId": "rubric_overall", "variantKey": "control", "value": 0.5, "collector": "deterministic" },
+          { "metricId": "bundle_kb", "variantKey": "control", "value": 200, "collector": "build" },
+          {
+            "metricId": "lcp_ms",
+            "variantKey": "candidate-a",
+            "value": 1750,
+            "collector": "lighthouse",
+            "artifactSha256": "c3499c2729730a7f807efb8676a92dcb6f8a3f8fc3499c2729730a7f807efb86"
+          },
+          {
+            "metricId": "a11y_violations",
+            "variantKey": "candidate-a",
+            "value": 0,
+            "collector": "axe"
+          },
+          { "metricId": "rubric_overall", "variantKey": "candidate-a", "value": 0.75, "collector": "deterministic" },
+          { "metricId": "bundle_kb", "variantKey": "candidate-a", "value": 250, "collector": "build" }
+        ],
+        "results": {
+          "metricResults": [
+            {
+              "metricId": "lcp_ms",
+              "role": "primary",
+              "comparison": { "baselineVariantId": "control", "variantId": "candidate-a" },
+              "baselineValue": 2000.0,
+              "variantValue": 1750.0,
+              "absoluteDifference": -250.0,
+              "relativeDifference": -0.125,
+              "resultStatus": "positive",
+              "decisionImpact": "supports_ship",
+              "adlc:measurementBasis": "deterministic_single_measurement",
+              "adlc:budget": 2500,
+              "adlc:budgetPassed": true,
+              "adlc:collector": "lighthouse",
+              "adlc:artifactSha256": "c3499c2729730a7f807efb8676a92dcb6f8a3f8fc3499c2729730a7f807efb86"
+            },
+            {
+              "metricId": "a11y_violations",
+              "role": "guardrail",
+              "comparison": { "baselineVariantId": "control", "variantId": "candidate-a" },
+              "baselineValue": 2.0,
+              "variantValue": 0.0,
+              "absoluteDifference": -2.0,
+              "relativeDifference": -1.0,
+              "resultStatus": "positive",
+              "decisionImpact": "informational",
+              "adlc:measurementBasis": "deterministic_single_measurement",
+              "adlc:budget": 0,
+              "adlc:budgetPassed": true,
+              "adlc:collector": "axe"
+            },
+            {
+              "metricId": "rubric_overall",
+              "role": "secondary",
+              "comparison": { "baselineVariantId": "control", "variantId": "candidate-a" },
+              "baselineValue": 0.5,
+              "variantValue": 0.75,
+              "absoluteDifference": 0.25,
+              "relativeDifference": 0.5,
+              "resultStatus": "positive",
+              "decisionImpact": "informational",
+              "adlc:measurementBasis": "deterministic_single_measurement",
+              "adlc:collector": "deterministic"
+            },
+            {
+              "metricId": "bundle_kb",
+              "role": "secondary",
+              "comparison": { "baselineVariantId": "control", "variantId": "candidate-a" },
+              "baselineValue": 200.0,
+              "variantValue": 250.0,
+              "absoluteDifference": 50.0,
+              "relativeDifference": 0.25,
+              "resultStatus": "negative",
+              "decisionImpact": "needs_followup",
+              "adlc:measurementBasis": "deterministic_single_measurement",
+              "adlc:budget": 240,
+              "adlc:budgetPassed": false,
+              "adlc:collector": "build"
+            }
+          ]
+        },
+        "preRegistration": {
+          "present": true,
+          "path": "experiment/plan.json",
+          "digest": "sha256:1d1f0b6f3f7c9a2e4b8d0c5a7e9f1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e",
+          "recordedDigest": "sha256:1d1f0b6f3f7c9a2e4b8d0c5a7e9f1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e",
+          "unchanged": true,
+          "plannedAt": "2026-08-19T09:10:00Z",
+          "analyzedAt": "2026-08-19T10:05:00Z",
+          "gitSha": "3f1a9c7e2b4d6081a5c3e7f902b4d6081a5c3e7f"
+        }
+      }
+    }
+  ],
+  "variants": [
+    {
+      "key": "control",
+      "role": "control",
+      "commit": "3f1a9c7e2b4d6081a5c3e7f902b4d6081a5c3e7f",
+      "flagKeys": []
+    },
+    {
+      "key": "candidate-a",
+      "role": "treatment",
+      "commit": "c7e2b4d6081a5c3e7f902b4d6081a5c3e7f90213",
+      "flagKeys": ["adlc.exp.a1b2"]
+    }
+  ],
+  "gates": [
+    {
+      "id": "tests",
+      "required": true,
+      "status": "pass",
+      "severity": "high",
+      "observed": { "passed": 214, "failed": 0 },
+      "expected": { "failed": 0 },
+      "message": "214 tests passed",
+      "evidence": ["gates/tests.json"]
+    },
+    {
+      "id": "secrets_local",
+      "required": true,
+      "status": "pass",
+      "severity": "critical",
+      "observed": { "findings": 0 },
+      "expected": { "findings": 0 },
+      "message": "gitleaks found no secrets",
+      "evidence": ["gates/secrets_local.json"]
+    },
+    {
+      "id": "deps_local",
+      "required": true,
+      "status": "pass",
+      "severity": "high",
+      "observed": { "vulnerable": 0 },
+      "expected": { "vulnerable": 0 },
+      "message": "pip-audit reported no vulnerable dependencies",
+      "evidence": ["gates/deps_local.json"]
+    },
+    {
+      "id": "evidence_completeness",
+      "required": true,
+      "status": "pass",
+      "severity": "high",
+      "observed": { "requirementsCovered": 6, "requirements": 6 },
+      "expected": { "requirementsCovered": 6 },
+      "message": "every requirement has at least one hash-verified artifact",
+      "evidence": ["gates/evidence_completeness.json"]
+    },
+    {
+      "id": "security",
+      "required": true,
+      "status": "pass",
+      "severity": "critical",
+      "observed": { "alerts": 0, "headSha": "c7e2b4d6081a5c3e7f902b4d6081a5c3e7f90213" },
+      "expected": { "alerts": 0 },
+      "message": "CodeQL reported no alerts at the exact head SHA",
+      "evidence": ["gates/security.json"]
+    },
+    {
+      "id": "code_quality",
+      "required": true,
+      "status": "pass",
+      "severity": "medium",
+      "observed": { "alerts": 1 },
+      "expected": { "alerts": 5 },
+      "message": "GitHub Code Quality reported 1 advisory alert",
+      "evidence": ["gates/code_quality.json"]
+    },
+    {
+      "id": "evals",
+      "required": true,
+      "status": "pass",
+      "severity": "medium",
+      "observed": { "overall": 0.75, "threshold": 0.7 },
+      "expected": { "threshold": 0.7 },
+      "message": "rubric overall 0.75 meets threshold 0.7",
+      "evidence": ["gates/evals.json"]
+    },
+    {
+      "id": "adversarial_review",
+      "required": true,
+      "status": "pass",
+      "severity": "medium",
+      "observed": { "quorum": 2, "reviewers": 3 },
+      "expected": { "quorum": 2 },
+      "message": "adversarial squad reached quorum with no blocking findings",
+      "evidence": ["reviews/adversarial.md"]
+    },
+    {
+      "id": "evidence_review",
+      "required": true,
+      "status": "pass",
+      "severity": "medium",
+      "observed": { "citedArtifacts": 4 },
+      "expected": { "citedArtifacts": 1 },
+      "message": "evidence squad verdict cited 4 artifact hashes",
+      "evidence": ["reviews/evidence.md"]
+    },
+    {
+      "id": "governance",
+      "required": false,
+      "status": "not_run",
+      "severity": "medium",
+      "observed": {},
+      "expected": {},
+      "message": "agent-governance-toolkit is not installed; `agt verify` did not run",
+      "evidence": []
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "evidence/candidate-a/trace.zip",
+      "kind": "playwright_trace",
+      "mimeType": "application/zip",
+      "sha256": "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+      "bytes": 481233
+    },
+    {
+      "path": "evidence/candidate-a/network.har",
+      "kind": "har",
+      "mimeType": "application/json",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+      "bytes": 90211
+    },
+    {
+      "path": "evidence/candidate-a/console.jsonl",
+      "kind": "console_log",
+      "mimeType": "application/x-ndjson",
+      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+      "bytes": 4120
+    },
+    {
+      "path": "evidence/candidate-a/screenshots/home-dark.png",
+      "kind": "screenshot",
+      "mimeType": "image/png",
+      "sha256": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
+      "bytes": 152044
+    },
+    {
+      "path": "report.html",
+      "kind": "report_html",
+      "mimeType": "text/html",
+      "sha256": "e7f6c011776e8db7cd330b54174fd76f7d0216b612387a5ffcfb81e6f0919683",
+      "bytes": 88213
+    },
+    {
+      "path": "evals/scores.csv",
+      "kind": "csv",
+      "mimeType": "text/csv",
+      "sha256": "7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451",
+      "bytes": 1042
+    }
+  ],
+  "decision": {
+    "outcome": "ship",
+    "rationale": "LCP and accessibility improve and every required gate passed; the bundle-size regression is over budget but tracked as a follow-up.",
+    "decidedBy": "octocat",
+    "decidedAt": "2026-08-19T11:30:00Z",
+    "reviewSha": "c7e2b4d6081a5c3e7f902b4d6081a5c3e7f90213",
+    "adr": "0004"
+  },
+  "experimentRef": "exp-dark-mode-a1b2"
+}
