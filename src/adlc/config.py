@@ -28,7 +28,7 @@ SPINE_DEFAULTS: dict[str, str] = {
     "agents": "fake",
     "taskstore": "sqlite",
     "evals": "deterministic",
-    "evidence": "playwright",
+    "evidence": "local",
     "flags": "flagd-file",
     "telemetry": "otel-file",
 }

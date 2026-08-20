@@ -57,7 +57,8 @@ promptfoo = "adlc.adapters.evals.promptfoo:PromptfooEvalRunner"       # L3
 azure = "adlc.adapters.evals.azure:AzureEvalRunner"                   # L3
 
 [project.entry-points."adlc.evidence"]
-playwright = "adlc.adapters.evidence.playwright:PlaywrightCollector"  # spine default
+local = "adlc.adapters.evidence.local:LocalEvidenceCollector"          # spine default
+playwright = "adlc.adapters.evidence.playwright:PlaywrightCollector"  # spine, when installed
 lighthouse = "adlc.adapters.evidence.lighthouse:LighthouseCollector"  # L6
 k6 = "adlc.adapters.evidence.k6:K6Collector"                          # L6
 axe = "adlc.adapters.evidence.axe:AxeCollector"                       # L6
