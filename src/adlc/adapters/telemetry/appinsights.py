@@ -129,7 +129,7 @@ class AppInsightsTelemetry:
             if missing:
                 return False, (
                     f"{CONNECTION_STRING_ENV} is set but {', '.join(missing)} "
-                    "is not importable — install `adlc[azure]` "
+                    "is not importable - install `adlc[azure]` "
                     "(pip install azure-monitor-opentelemetry)"
                 )
             return True, (

@@ -62,6 +62,21 @@ def test_detect_makes_no_network_call(adapter, cfg: Config, monkeypatch) -> None
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=ADAPTER_IDS)
+def test_detect_reason_is_console_safe(adapter, cfg: Config, monkeypatch) -> None:
+    """Reasons are printed by `adlc doctor` and stored in capabilities.json.
+
+    A non-ASCII character renders as a replacement glyph on a default Windows
+    console, which makes a diagnostic message look like corruption at exactly
+    the moment someone is debugging.
+    """
+    monkeypatch.setenv(CONNECTION_STRING_ENV, "InstrumentationKey=x")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://example.invalid/p")
+    monkeypatch.setenv("ADLC_INCIDENT_FILE", "/nope/missing.json")
+    for reason in (adapter.detect(cfg)[1], adapter.detect(None)[1]):  # type: ignore[arg-type]
+        assert reason.isascii(), f"non-ASCII in {adapter.__name__} reason: {reason!r}"
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=ADAPTER_IDS)
 def test_detect_does_not_raise_on_a_hostile_config(adapter) -> None:
     """Rule 5: must not raise. A garbage config is still not an exception."""
     assert adapter.detect(None)[0] is False  # type: ignore[arg-type]
