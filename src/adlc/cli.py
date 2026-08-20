@@ -344,6 +344,15 @@ def reduce(
 def report(
     run_id: str = typer.Argument("latest"),
     open_browser: bool = typer.Option(False, "--open"),
+    cdn_diagrams: bool = typer.Option(
+        False,
+        "--cdn-diagrams",
+        help=(
+            "Render diagrams with Mermaid from a CDN. Off by default: the report is "
+            "an evidence artifact and should stay readable without a third party "
+            "being online and unmodified."
+        ),
+    ),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
     """Render the self-contained interactive HTML report."""
@@ -352,7 +361,7 @@ def report(
     cfg = _cfg()
     rd = _rd(cfg, run_id)
     reduce_run(cfg, rd)
-    result = run_report(cfg, rd)
+    result = run_report(cfg, rd, cdn_diagrams=cdn_diagrams)
     reduce_run(cfg, rd)
     if open_browser:
         import webbrowser

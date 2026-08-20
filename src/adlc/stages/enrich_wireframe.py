@@ -529,6 +529,8 @@ def build_document(spec_text: str) -> dict[str, Any]:
     elements = build_elements(spec_text)
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
+        # This template renders Markdown/JSON, not HTML. HTML escaping here would
+        # corrupt the output, so autoescape stays off deliberately.
         autoescape=False,
         undefined=StrictUndefined,
         trim_blocks=True,
