@@ -131,9 +131,9 @@
             "pattern": "^[a-z][a-z0-9_]*$"
           },
           "collector": {
-            "description": "Which evidence collector produces this metric.",
+            "description": "Which evidence collector produces this metric. Known values: lighthouse, k6, axe (workstream L6), playwright and local (spine defaults). Deliberately a pattern rather than an enum so a new evidence adapter does not invalidate an existing benchmarks.yaml.",
             "type": "string",
-            "enum": ["lighthouse", "k6", "axe"]
+            "pattern": "^[a-z][a-z0-9_-]*$"
           },
           "budget": {
             "description": "Threshold the measured value is compared against.",

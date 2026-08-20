@@ -36,7 +36,7 @@ from adlc.adapters.evidence.lighthouse import (
     target_urls,
     timeout_for,
     write_json,
-    write_measurements,
+    write_measurement_files,
 )
 from adlc.ports import ArtifactRef, Run
 
@@ -212,6 +212,7 @@ class AxeCollector:
         "axe.json",
         "axe-[0-9]*.json",
         "axe-measurements.json",
+        "axe-unmeasured.json",
         "axe-scan.cjs",
         "axe-scan.config.json",
         "axe-scan.raw.json",
@@ -252,7 +253,7 @@ class AxeCollector:
         benchmarks = load_benchmarks(run_dir)
         specs = metrics_for(benchmarks, self.name)
         options = collector_options(benchmarks, self.name)
-        urls = target_urls(benchmarks, self.name)
+        urls = target_urls(benchmarks, self.name, run)
 
         artifacts: list[ArtifactRef] = []
         available, reason = self.detect(cfg)  # type: ignore[arg-type]
@@ -349,12 +350,12 @@ class AxeCollector:
         )
         if isinstance(scan_errors, list) and scan_errors:
             tool = {**tool, "scanErrors": redact(scan_errors)}
-        measurements_path = write_measurements(
+        for path in write_measurement_files(
             out, self.name, run, variant, tool, measurements, unmeasured
-        )
-        artifacts.append(
-            artifact_ref(measurements_path, run_dir, "evidence_measurements", "application/json")
-        )
+        ):
+            artifacts.append(
+                artifact_ref(path, run_dir, "evidence_measurements", "application/json")
+            )
         return artifacts
 
     # -- helpers ---------------------------------------------------------
@@ -389,6 +390,6 @@ class AxeCollector:
             specs, {}, self.name, "", {}, default_reason=(cause, reason),
         )
         info: ToolResult = tool or {"ran": False, "cause": cause, "reason": reason}
-        path = write_measurements(out, self.name, run, variant, info, [], unmeasured)
-        result.append(artifact_ref(path, run_dir, "evidence_measurements", "application/json"))
+        for path in write_measurement_files(out, self.name, run, variant, info, [], unmeasured):
+            result.append(artifact_ref(path, run_dir, "evidence_measurements", "application/json"))
         return result

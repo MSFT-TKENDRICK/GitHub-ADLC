@@ -43,7 +43,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "LIGHTHOUSE_CATALOGUE",
-    "MEASUREMENTS_SCHEMA_VERSION",
+    "UNMEASURED_SCHEMA_VERSION",
     "LighthouseCollector",
     "Measurement",
     "MetricSpec",
@@ -73,10 +73,13 @@ __all__ = [
     "target_urls",
     "timeout_for",
     "write_json",
+    "write_measurement_files",
     "write_measurements",
+    "write_unmeasured",
 ]
 
-MEASUREMENTS_SCHEMA_VERSION = "adlc-measurements/v1"
+#: Sidecar document recording budgets that could not be measured.
+UNMEASURED_SCHEMA_VERSION = "adlc-unmeasured/v1"
 REDACTED = "[REDACTED]"
 DEFAULT_TIMEOUT_SECONDS = 600
 MAX_CAPTURED_OUTPUT = 8_000
@@ -553,12 +556,14 @@ def timeout_for(doc: dict[str, Any], collector: str, default: int = DEFAULT_TIME
     return default
 
 
-def target_urls(doc: dict[str, Any], collector: str) -> list[str]:
+def target_urls(doc: dict[str, Any], collector: str, run: Run | None = None) -> list[str]:
     """Resolve the URLs a browser collector should visit.
 
     Precedence: ``ADLC_TARGET_URL`` env var → ``collectors.<name>.urls`` →
-    ``target.url``. Returns ``[]`` when no target is configured; the collector
-    then reports ``not_run`` rather than guessing an address.
+    ``target.url`` → ``run["capabilities"]["targetUrl"]`` (the same field the
+    spine's Playwright collector reads). Returns ``[]`` when no target is
+    configured; the collector then reports ``not_run`` rather than guessing an
+    address.
     """
     env_url = (os.environ.get("ADLC_TARGET_URL") or "").strip()
     if env_url:
@@ -579,6 +584,9 @@ def target_urls(doc: dict[str, Any], collector: str) -> list[str]:
         base = target.get("url")
         if isinstance(base, str) and base.strip():
             return [base.strip()]
+    capability = ((run or {}).get("capabilities") or {}).get("targetUrl")
+    if isinstance(capability, str) and capability.strip() and capability.strip() != "about:blank":
+        return [capability.strip()]
     return []
 
 
@@ -659,7 +667,48 @@ def build_measurements(
     return measured, unmeasured
 
 
-def write_measurements(
+def write_measurements(out: Path, collector: str, measurements: list[Measurement]) -> Path:
+    """Write ``<collector>-measurements.json`` as a **bare JSON array**.
+
+    The spine reads ``*-measurements.json`` as a list — see
+    ``adlc.stages.evidence.collect_measurements`` and
+    ``adlc.adapters.evals.deterministic.DeterministicRubricRunner._measurements``
+    — matching the shape its own ``local`` collector emits. Every item is
+    key-for-key compatible with ``evidence-review-pack.schema.json``.
+    """
+    return write_json(out / f"{collector}-measurements.json", measurements)
+
+
+def write_unmeasured(
+    out: Path,
+    collector: str,
+    run: Run,
+    variant: str,
+    tool: ToolResult,
+    unmeasured: list[Unmeasured],
+) -> Path:
+    """Write ``<collector>-unmeasured.json`` — budgets that could **not** be measured.
+
+    Deliberately a different filename. A not-run entry has no ``value``, so it
+    must never appear in ``*-measurements.json``: the spine would either drop it
+    or emit ``value: null`` and invalidate the review pack. Its *absence* from
+    the measurements array is exactly what makes the budget check fail —
+    ``metric_within_budget`` scores ``0.0`` for a metric with no measurement.
+    This file records **why**, so the failure is actionable rather than mute.
+    """
+    payload = {
+        "schemaVersion": UNMEASURED_SCHEMA_VERSION,
+        "collector": collector,
+        "runId": (run or {}).get("runId", ""),
+        "variant": variant,
+        "generatedAt": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "tool": tool,
+        "unmeasured": unmeasured,
+    }
+    return write_json(out / f"{collector}-unmeasured.json", payload)
+
+
+def write_measurement_files(
     out: Path,
     collector: str,
     run: Run,
@@ -667,19 +716,12 @@ def write_measurements(
     tool: ToolResult,
     measurements: list[Measurement],
     unmeasured: list[Unmeasured],
-) -> Path:
-    """Write ``<collector>-measurements.json`` and return its path."""
-    payload = {
-        "schemaVersion": MEASUREMENTS_SCHEMA_VERSION,
-        "collector": collector,
-        "runId": (run or {}).get("runId", ""),
-        "variant": variant,
-        "generatedAt": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "tool": tool,
-        "measurements": measurements,
-        "unmeasured": unmeasured,
-    }
-    return write_json(out / f"{collector}-measurements.json", payload)
+) -> list[Path]:
+    """Emit both halves of the normalised record, measured first."""
+    paths = [write_measurements(out, collector, measurements)]
+    if unmeasured:
+        paths.append(write_unmeasured(out, collector, run, variant, tool, unmeasured))
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +946,7 @@ class LighthouseCollector:
         "lighthouse.json",
         "lighthouse-[0-9]*.json",
         "lighthouse-measurements.json",
+        "lighthouse-unmeasured.json",
         "lighthouserc.json",
         _LHCI_WORKDIR,
     )
@@ -929,7 +972,7 @@ class LighthouseCollector:
         benchmarks = load_benchmarks(run_dir)
         specs = metrics_for(benchmarks, self.name)
         options = collector_options(benchmarks, self.name)
-        urls = target_urls(benchmarks, self.name)
+        urls = target_urls(benchmarks, self.name, run)
 
         artifacts: list[ArtifactRef] = []
         available, reason = self.detect(cfg)  # type: ignore[arg-type]
@@ -994,14 +1037,12 @@ class LighthouseCollector:
         measurements, unmeasured = build_measurements(
             specs, values, self.name, primary_sha["sha256"], reasons,
         )
-        measurements_path = write_measurements(
+        for path in write_measurement_files(
             out, self.name, run, variant, tool, measurements, unmeasured
-        )
-        artifacts.append(
-            artifact_ref(
-                measurements_path, run_dir, "evidence_measurements", "application/json"
+        ):
+            artifacts.append(
+                artifact_ref(path, run_dir, "evidence_measurements", "application/json")
             )
-        )
         return artifacts
 
     # -- helpers ---------------------------------------------------------
@@ -1026,10 +1067,10 @@ class LighthouseCollector:
             specs, {}, self.name, "", {}, default_reason=(cause, reason),
         )
         info: ToolResult = tool or {"ran": False, "cause": cause, "reason": reason}
-        path = write_measurements(out, self.name, run, variant, info, [], unmeasured)
-        result.append(
-            artifact_ref(path, run_dir, "evidence_measurements", "application/json")
-        )
+        for path in write_measurement_files(out, self.name, run, variant, info, [], unmeasured):
+            result.append(
+                artifact_ref(path, run_dir, "evidence_measurements", "application/json")
+            )
         return result
 
     def _write_config(

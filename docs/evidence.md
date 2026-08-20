@@ -36,22 +36,28 @@ the **deterministic** half of the evidence gate. Budgets come from
 | `k6` | `K6Collector` | `k6` binary | `k6.json`, `k6-script.js`, `k6-measurements.json` |
 | `axe` | `AxeCollector` | Node + `@axe-core/playwright` + `playwright` | `axe.json`, `axe-scan.cjs`, `axe-scan.config.json`, `axe-measurements.json` |
 
-All are pre-registered in `pyproject.toml` under `[project.entry-points."adlc.evidence"]`.
-Files land in `.adlc/runs/<run-id>/evidence/<variant>/` (plan §4.1).
+Each also writes `<collector>-unmeasured.json` when a declared budget could not
+be measured. All are pre-registered in `pyproject.toml` under
+`[project.entry-points."adlc.evidence"]`. Files land in
+`.adlc/runs/<run-id>/evidence/<variant>/` (plan §4.1).
 
-> **Selection note.** `adlc.config.select_adapter` returns the first *detected*
-> adapter for a kind, preferring it over the spine default. On a machine that
-> happens to have `lhci` or `k6` installed that means one of these collectors is
-> selected instead of `playwright`. Pin the choice explicitly in
-> `.adlc/config.yaml` when you want a specific one:
+> **Selection note.** The spine default is `local` (always available, no
+> browser); `playwright` takes over when installed. `evidence` is deliberately
+> **not** in `adlc.config.EXPLICIT_ONLY_KINDS` — it is an observational,
+> read-only kind, so `select_adapter` is allowed to upgrade to the first
+> *detected* collector, and `adlc.stages.evidence.run_evidence` runs exactly
+> **one** collector per run. On a machine that happens to have `lhci` or `k6`
+> installed that means one of these is selected instead of `local`/`playwright`,
+> and the run gets budget evidence but no trace/console bundle. Pin the choice
+> explicitly in `.adlc/config.yaml` when you want both kinds of evidence:
 >
 > ```yaml
 > adapters:
->   evidence: playwright   # or lighthouse | k6 | axe
+>   evidence: local   # or playwright | lighthouse | k6 | axe
 > ```
 >
-> On a credential-free CI runner none of the three is detected, so the spine's
-> Playwright default is used and the conformance suite is unaffected.
+> On a credential-free CI runner none of the three is detected, so `local` is
+> used and the conformance suite is unaffected.
 
 ### `lighthouse` — Lighthouse CI
 
@@ -189,7 +195,7 @@ metrics:
 | Field | Required | Meaning |
 |---|---|---|
 | `id` | ✅ | `^[a-z][a-z0-9_]*$`. A built-in id is extracted automatically; anything else **must** declare `source`. |
-| `collector` | ✅ | `lighthouse` \| `k6` \| `axe`. |
+| `collector` | ✅ | Which collector produces it. Known values: `lighthouse`, `k6`, `axe` (this workstream), `playwright` and `local` (spine defaults). A pattern rather than an enum, so a new evidence adapter cannot invalidate an existing file. |
 | `budget` | ✅ | The threshold the measured value is compared against. |
 | `direction` | ✅ | `lower_is_better` (passes when `value <= budget`) or `higher_is_better` (passes when `value >= budget`). Required on purpose — there is no safe default, and a wrong direction is a silent false pass. |
 | `source` | | RFC 6901 JSON Pointer into the collector's raw output, e.g. `/audits/dom-size/numericValue` or `/metrics/http_req_duration/p(95)`. Overrides the built-in catalogue. |
@@ -199,45 +205,71 @@ metrics:
 | `optional` | | Advisory: a failing optional metric is reported but is not intended to block the gate. **Absence is still `not_run`, never a pass.** |
 
 **Target resolution order:** `ADLC_TARGET_URL` env var → `collectors.<name>.urls`
-/ `collectors.<name>.url` → `target.url`. With none set the collector reports
-`not_run` rather than guessing an address.
+/ `collectors.<name>.url` → `target.url` → `run["capabilities"]["targetUrl"]`
+(the same field the spine's Playwright collector reads; `about:blank` is treated
+as unset). With none set the collector reports `not_run` rather than guessing an
+address.
+
+The spine's `adlc enrich` seeds this file with `lcp_ms` (lighthouse),
+`a11y_critical_violations` (axe) and `console_errors` (playwright). All three are
+built-in ids for their collector, and a test asserts the seeded document
+validates against this schema.
 
 ## Normalised measurements
 
-Each collector writes `<collector>-measurements.json` next to its raw output so
-the spine can build `evidence-review-pack.json` (§4.6) **without parsing
-tool-specific JSON**:
+Each collector writes **two** files next to its raw output.
+
+### `<collector>-measurements.json` — a bare JSON array
+
+This is the file the spine reads. `adlc.stages.evidence.collect_measurements`
+and the deterministic rubric runner's `metric_within_budget` check both glob
+`*-measurements.json` and parse it as a **list**, matching the shape the spine's
+own `local` collector emits — so the top level is an array, not an object:
+
+```jsonc
+[
+  { "metricId": "lcp_ms", "value": 1820.4, "budget": 2500, "passed": true,
+    "collector": "lighthouse", "artifactSha256": "…" }
+]
+```
+
+Entries are **key-for-key identical** to `evidence-review-pack.schema.json`
+`#/properties/measurements/items` (which is `additionalProperties: false`), so
+the spine can copy them into the sanitised pack verbatim. `artifactSha256` is
+the hash of the raw artifact the value was read from, which is what makes an LLM
+squad's citation checkable.
+
+Only *real* measurements appear here. A metric with no value never does.
+
+### `<collector>-unmeasured.json` — why a budget could not be measured
 
 ```jsonc
 {
-  "schemaVersion": "adlc-measurements/v1",
+  "schemaVersion": "adlc-unmeasured/v1",
   "collector": "lighthouse",
   "runId": "2026-08-19-a1b2",
   "variant": "candidate-a",
   "generatedAt": "2026-08-19T18:00:00Z",
-  "tool": { "ran": true, "exitCode": 0, "command": ["…"], "durationSeconds": 31.4 },
-
-  "measurements": [
-    { "metricId": "lcp_ms", "value": 1820.4, "budget": 2500, "passed": true,
-      "collector": "lighthouse", "artifactSha256": "…" }
-  ],
-
+  "tool": { "ran": false, "cause": "tool_unavailable",
+            "reason": "lhci not on PATH — install with `npm i -g @lhci/cli` …" },
   "unmeasured": [
-    { "metricId": "pwa_score", "collector": "lighthouse", "budget": 50,
-      "direction": "higher_is_better", "status": "not_run",
-      "cause": "metric_absent",
-      "reason": "metric not present in tool output" }
+    { "metricId": "lcp_ms", "collector": "lighthouse", "budget": 2500,
+      "direction": "lower_is_better", "status": "not_run",
+      "cause": "tool_unavailable",
+      "reason": "lhci not on PATH — install with `npm i -g @lhci/cli` …" }
   ]
 }
 ```
 
-`measurements[]` entries are **key-for-key identical** to
-`evidence-review-pack.schema.json` `#/properties/measurements/items` (which is
-`additionalProperties: false`), so the spine can copy them into the sanitised
-pack verbatim. `artifactSha256` is the hash of the raw artifact the value was
-read from, which is what makes an LLM squad's citation checkable.
+The filename deliberately does **not** match the spine's `*-measurements.json`
+glob. A not-run entry has no `value`, so putting it in the measurements array
+would either be dropped or emit `value: null` and invalidate the review pack.
+Its **absence** from the measurements array is what fails the budget:
+`metric_within_budget` scores `0.0` with "no measurement recorded for
+'<id>'". This sidecar records *why*, hash-verified, so the failure is
+actionable rather than mute.
 
-`unmeasured[]` entries deliberately carry **no `value` and no `passed`**. Causes:
+Causes:
 
 | `cause` | Meaning |
 |---|---|
@@ -250,12 +282,22 @@ read from, which is what makes an LLM squad's citation checkable.
 | `metric_unmapped` | Unknown metric id with no `source` pointer declared. |
 
 A metric declared in `benchmarks.yaml` is therefore **always** accounted for:
-either it is in `measurements[]` backed by a hashed artifact, or it is in
-`unmeasured[]` as `not_run`. Per plan §4.2, `required + not_run ⇒ the aggregate
-fails`, so a missing measurement fails closed.
+either it is in `<collector>-measurements.json` backed by a hashed artifact, or
+it is in `<collector>-unmeasured.json` as `not_run`. Per plan §4.2, `required +
+not_run ⇒ the aggregate fails`, so a missing measurement fails closed.
 
 When a collector has **no** budgets declared for it and its tool is missing, it
 writes nothing at all and returns an empty artifact list.
+
+> **Known spine limitation.** `collect_measurements` and `metric_within_budget`
+> both compare with `value <= budget` regardless of `direction`, so a
+> `higher_is_better` budget (e.g. `performance_score: 90`) is reported as failed
+> in the review pack even when it passed. The `passed` field these collectors
+> write is direction-correct; the spine recomputes it. The divergence is
+> fail-closed (a false negative, never a false positive) and is reported to the
+> spine workstream. All three metric ids the spine seeds — `lcp_ms`,
+> `a11y_critical_violations`, `console_errors` — are `lower_is_better`, so the
+> default path is unaffected.
 
 ## Redaction
 
@@ -319,19 +361,34 @@ collectors at.
 | `k6_script` | `k6-script.js` |
 | `axe` | `axe.json`, `axe-N.json` |
 | `axe_script` / `axe_config` | `axe-scan.cjs` / `axe-scan.config.json` |
-| `evidence_measurements` | `<collector>-measurements.json` |
+| `evidence_measurements` | `<collector>-measurements.json`, `<collector>-unmeasured.json` |
 
 Every entry carries a verified `sha256` and a `path` relative to the run
-directory, e.g. `evidence/candidate-a/lighthouse.json`.
+directory, e.g. `evidence/candidate-a/lighthouse.json`. Note that
+`adlc.stages.evidence.run_evidence` **re-hashes every file it finds on disk**
+rather than trusting the returned list, and derives `kind`/`mimeType` from the
+suffix — so these `ArtifactRef`s must (and do) point at files that were really
+written. It also means anything left in the evidence directory becomes an
+artifact, which is why the `.lighthouseci/` working directory and the
+intermediate axe scan payload are deleted before returning.
 
 ## Tests
 
 `tests/l6_evidence/` passes with **no tools installed and no credentials**:
 
-```bash
+```powershell
+# Do NOT use `pip install -e .` -- the whole fleet shares one Python and a
+# single editable pointer, so the last installer wins and every other
+# workstream silently imports the wrong source tree.
+$env:PYTHONPATH = "<your worktree>\src"
 python -m pytest tests/l6_evidence -q
+python -m pytest tests/conformance -q     # 41 tests, must stay green
 ruff check src/adlc/adapters/evidence/
 ```
+
+Verify the isolation with
+`python -c "import adlc.executor as e; print(e.__file__)"` — it must print your
+own worktree.
 
 It asserts the `detect() -> (False, reason)` path for all three collectors (with
 `PATH` isolated, so the result is the same on a developer machine that happens to
@@ -340,6 +397,14 @@ unit-tests the raw-JSON → normalised-measurement mapping against checked-in
 fixture outputs from each tool in `tests/l6_evidence/fixtures/`. The `collect()`
 path is exercised end-to-end with only the subprocess boundary stubbed, so
 harvesting, redaction, budget comparison and artifact hashing all really run.
+
+`tests/l6_evidence/test_spine_interop.py` calls the **real** spine functions —
+`adlc.stages.evidence.collect_measurements` and
+`DeterministicRubricRunner.run` with a `metric_within_budget` criterion — against
+files these collectors actually wrote, so a change to the spine's measurement
+contract fails loudly here instead of silently yielding zero measurements. It
+also asserts the "tool did not run ⇒ failing budget check, never a pass"
+guarantee end-to-end.
 
 ## Implementation note
 

@@ -35,7 +35,7 @@ from adlc.adapters.evidence.lighthouse import (
     target_urls,
     timeout_for,
     write_json,
-    write_measurements,
+    write_measurement_files,
 )
 from adlc.ports import ArtifactRef, Run
 
@@ -135,7 +135,7 @@ class K6Collector:
     kind = "evidence"
 
     #: Outputs owned by this collector, cleared before every attempt.
-    OUTPUTS = ("k6.json", "k6-script.js", "k6-measurements.json")
+    OUTPUTS = ("k6.json", "k6-script.js", "k6-measurements.json", "k6-unmeasured.json")
 
     INSTALL_HINT = "install from https://k6.io/docs/get-started/installation/"
 
@@ -164,7 +164,9 @@ class K6Collector:
         if not available:
             return self._abort(run, variant, out, run_dir, specs, "tool_unavailable", reason)
 
-        script_path, script_reason = self._resolve_script(benchmarks, options, out, run_dir, cfg)
+        script_path, script_reason = self._resolve_script(
+            benchmarks, options, out, run_dir, cfg, run
+        )
         if script_path is None:
             return self._abort(run, variant, out, run_dir, specs, "output_missing", script_reason)
         artifacts.append(artifact_ref(script_path, run_dir, "k6_script", "text/javascript"))
@@ -229,12 +231,12 @@ class K6Collector:
         measurements, unmeasured = build_measurements(
             specs, values, self.name, summary_ref["sha256"], reasons,
         )
-        measurements_path = write_measurements(
+        for path in write_measurement_files(
             out, self.name, run, variant, tool, measurements, unmeasured
-        )
-        artifacts.append(
-            artifact_ref(measurements_path, run_dir, "evidence_measurements", "application/json")
-        )
+        ):
+            artifacts.append(
+                artifact_ref(path, run_dir, "evidence_measurements", "application/json")
+            )
         return artifacts
 
     # -- helpers ---------------------------------------------------------
@@ -246,6 +248,7 @@ class K6Collector:
         out: Path,
         run_dir: Path | None,
         cfg: Config | None,
+        run: Run | None = None,
     ) -> tuple[Path | None, str]:
         """Return an existing script, or generate one from the configured target."""
         declared = options.get("script")
@@ -262,7 +265,7 @@ class K6Collector:
                 f"k6 script '{declared}' not found relative to the run directory or repo root"
             )
 
-        urls = target_urls(benchmarks, self.name)
+        urls = target_urls(benchmarks, self.name, run)
         if not urls:
             return None, (
                 "no k6 target configured — set collectors.k6.url, target.url in "
@@ -294,6 +297,6 @@ class K6Collector:
             specs, {}, self.name, "", {}, default_reason=(cause, reason),
         )
         info: ToolResult = tool or {"ran": False, "cause": cause, "reason": reason}
-        path = write_measurements(out, self.name, run, variant, info, [], unmeasured)
-        result.append(artifact_ref(path, run_dir, "evidence_measurements", "application/json"))
+        for path in write_measurement_files(out, self.name, run, variant, info, [], unmeasured):
+            result.append(artifact_ref(path, run_dir, "evidence_measurements", "application/json"))
         return result

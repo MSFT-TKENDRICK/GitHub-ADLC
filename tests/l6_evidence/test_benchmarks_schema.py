@@ -44,11 +44,39 @@ def test_schema_file_is_valid_json_schema() -> None:
     item = schema["properties"]["metrics"]["items"]
     assert set(item["required"]) == {"id", "collector", "budget", "direction"}
     assert item["additionalProperties"] is False
-    assert set(item["properties"]["collector"]["enum"]) == {"lighthouse", "k6", "axe"}
+    # A pattern, not an enum: a new evidence adapter must not invalidate an
+    # existing benchmarks.yaml. The spine's own seed uses `playwright`.
+    assert item["properties"]["collector"]["pattern"] == "^[a-z][a-z0-9_-]*$"
+    assert "enum" not in item["properties"]["collector"]
     assert set(item["properties"]["direction"]["enum"]) == {
         "lower_is_better",
         "higher_is_better",
     }
+
+
+def test_schema_accepts_the_spine_seeded_benchmarks() -> None:
+    """`adlc enrich` writes this file; my schema must not reject it."""
+    from adlc.stages.enrich import DEFAULT_BENCHMARKS
+
+    _validator().validate(DEFAULT_BENCHMARKS)
+    assert {m["collector"] for m in DEFAULT_BENCHMARKS["metrics"]} >= {
+        "lighthouse",
+        "axe",
+        "playwright",
+    }
+
+
+def test_spine_seeded_metric_ids_are_in_the_built_in_catalogues() -> None:
+    """`lcp_ms` and `a11y_critical_violations` must need no `source` pointer."""
+    from adlc.adapters.evidence.axe import AXE_CATALOGUE
+    from adlc.adapters.evidence.lighthouse import LIGHTHOUSE_CATALOGUE
+    from adlc.stages.enrich import DEFAULT_BENCHMARKS
+
+    catalogues = {"lighthouse": LIGHTHOUSE_CATALOGUE, "axe": AXE_CATALOGUE}
+    for metric in DEFAULT_BENCHMARKS["metrics"]:
+        catalogue = catalogues.get(metric["collector"])
+        if catalogue is not None:
+            assert metric["id"] in catalogue, metric["id"]
 
 
 def test_fixture_benchmarks_validates(benchmarks_doc) -> None:
@@ -62,7 +90,7 @@ def test_fixture_benchmarks_validates(benchmarks_doc) -> None:
         {"id": "x", "budget": 1, "direction": "lower_is_better"},  # no collector
         {"id": "x", "collector": "k6", "direction": "lower_is_better"},  # no budget
         {"id": "x", "collector": "k6", "budget": 1},  # no direction
-        {"id": "x", "collector": "nope", "budget": 1, "direction": "lower_is_better"},
+        {"id": "x", "collector": "Not A Collector", "budget": 1, "direction": "lower_is_better"},
         {"id": "x", "collector": "k6", "budget": 1, "direction": "smaller"},
         {"id": "X", "collector": "k6", "budget": 1, "direction": "lower_is_better"},
         {"id": "x", "collector": "k6", "budget": 1, "direction": "lower_is_better", "oops": 1},
@@ -151,6 +179,19 @@ def test_target_urls_falls_back_to_target_url() -> None:
     doc = {"target": {"url": "http://app.test/"}, "metrics": []}
     assert target_urls(doc, "axe") == ["http://app.test/"]
     assert target_urls({"metrics": []}, "axe") == []
+
+
+def test_target_urls_falls_back_to_the_run_capability(monkeypatch) -> None:
+    """The spine passes the live candidate URL as run.capabilities.targetUrl."""
+    monkeypatch.delenv("ADLC_TARGET_URL", raising=False)
+    run = {"capabilities": {"targetUrl": "http://candidate.test:8080/"}}
+    assert target_urls({"metrics": []}, "axe", run) == ["http://candidate.test:8080/"]
+    # An explicit benchmarks target still wins.
+    doc = {"target": {"url": "http://app.test/"}, "metrics": []}
+    assert target_urls(doc, "axe", run) == ["http://app.test/"]
+    # `about:blank` is the spine's placeholder, not a real target.
+    blank = {"capabilities": {"targetUrl": "about:blank"}}
+    assert target_urls({"metrics": []}, "axe", blank) == []
 
 
 def test_collector_options_and_timeout(run_dir: Path) -> None:
