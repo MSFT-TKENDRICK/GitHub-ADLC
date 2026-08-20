@@ -239,12 +239,13 @@ fallback, for the same reason.
 **How the patch is validated.** The artifact is produced by a remote workflow, so
 none of it is trusted and none of it is parsed by hand:
 
-1. `git apply --numstat -z` + `git apply --summary` enumerate the paths — git
-   unquotes C-quoted headers and reports both sides of a rename, neither of which
-   a regex scanner can see;
+1. the patch is applied to a **scratch index** and `git diff-index --no-renames`
+   enumerates the paths — git unquotes C-quoted headers and reports both sides
+   of a rename, neither of which a regex scanner can see, and neither of which
+   git's own `--summary` rendering reports unambiguously;
 2. those paths are checked against the write set and `PROTECTED_PATHS`;
-3. `git apply --index` applies it, which is what proves it is anchored to
-   `base_sha` — an unanchored patch simply will not apply;
+3. `git apply --index` applies it for real, which is what proves it is anchored
+   to `base_sha` — an unanchored patch simply will not apply;
 4. `git status` reports what actually landed and the check is repeated. If
    anything is outside the write set the patch is reversed out of the worktree
    and the task fails.
@@ -302,9 +303,21 @@ each — a patch that reported only `src/theme.ts` while creating
 |---|---|---|
 | `copilot-sdk` | `git status --porcelain -z -uall` (reports both sides of a rename) | before the diff is taken; violations are reverted |
 | `agent-task` | `git diff --name-only -z --no-renames base..head` | before the patch is written or applied |
-| `gh-aw` | `git apply --numstat -z` + `git apply --summary`, then `git status` after applying | before *and* after applying; violations are reversed out |
+| `gh-aw` | patch applied to a **scratch index**, then `git diff-index --cached --name-only -z --no-renames HEAD`; re-checked with `git status` after the real apply | before *and* after applying; violations are reversed out |
 
-`--no-renames` matters for `agent-task`: a rename record names only its
+Nor is git's *human-readable* output safe. `git apply --summary` prints renames
+brace-compressed — `docs/{decisions/0001-adr.md => guide.md}` — and splitting
+that on `" => "` yields `docs/{decisions/0001-adr.md`, which matches the allow
+glob `docs/**` while evading the deny glob `docs/decisions/**`. That laundered a
+protected path into an allowed one, and simultaneously caused ordinary
+in-write-set renames to be refused with a fabricated path. So `gh-aw` parses no
+rendered string at all: it applies the patch to a throwaway index
+(`GIT_INDEX_FILE`, never the worktree or the real index) and lets
+`git diff-index --no-renames` report the result structurally — NUL-separated,
+unquoted, both sides of every rename. That also proves the patch applies at
+`HEAD` before anything touches the worktree.
+
+`--no-renames` matters for `agent-task` too: a rename record names only its
 destination in `--name-only`, so a rename *out of* `docs/decisions/**` would
 otherwise be invisible to the check while still deleting the source.
 

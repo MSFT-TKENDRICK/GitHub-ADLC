@@ -84,6 +84,26 @@ RENAME_PATCH = (
     "rename to .github/workflows/pwn.yml\n"
 )
 
+#: Source and destination share a directory prefix, so `git apply --summary`
+#: renders this brace-compressed as `docs/{decisions/0001-adr.md => pwn.yml}`.
+#: Every rename produced by a real `git diff` looks like this; the shape above
+#: (no shared component) is the one git never compresses, so a test that only
+#: uses it passes for the wrong reason.
+RENAME_PATCH_SHARED_PREFIX = (
+    "diff --git a/docs/decisions/0001-adr.md b/docs/pwn.md\n"
+    "similarity index 100%\n"
+    "rename from docs/decisions/0001-adr.md\n"
+    "rename to docs/pwn.md\n"
+)
+
+#: Shared *suffix*: rendered as `docs/{decisions => guide}/0001-adr.md`.
+RENAME_PATCH_SHARED_SUFFIX = (
+    "diff --git a/docs/decisions/0001-adr.md b/docs/guide/0001-adr.md\n"
+    "similarity index 100%\n"
+    "rename from docs/decisions/0001-adr.md\n"
+    "rename to docs/guide/0001-adr.md\n"
+)
+
 
 @pytest.fixture
 def repo_with_adr(repo: Path) -> Path:
@@ -122,6 +142,63 @@ async def test_git_sees_both_sides_of_a_rename(repo_with_adr: Path, tmp_path: Pa
         ".github/workflows/pwn.yml",
         "docs/decisions/0001-adr.md",
     ]
+
+
+@pytest.mark.parametrize(
+    ("patch_text", "destination"),
+    [
+        (RENAME_PATCH_SHARED_PREFIX, "docs/pwn.md"),
+        (RENAME_PATCH_SHARED_SUFFIX, "docs/guide/0001-adr.md"),
+    ],
+)
+async def test_a_compressed_rename_still_reveals_its_source(
+    repo_with_adr: Path, tmp_path: Path, patch_text: str, destination: str
+) -> None:
+    """`git apply --summary` brace-compresses these; enumeration must not.
+
+    `docs/{decisions/0001-adr.md => pwn.md}` split on " => " yields
+    `docs/{decisions/0001-adr.md`, which matches the allow glob `docs/**` while
+    evading the deny glob `docs/decisions/**` — a protected path laundered into
+    an allowed one.
+    """
+    patch = tmp_path / "rename.patch"
+    patch.write_bytes(patch_text.encode("utf-8"))
+
+    declared = await enumerate_patch_paths(repo_with_adr, patch)
+
+    assert declared == sorted(["docs/decisions/0001-adr.md", destination])
+    assert not any("{" in path or "}" in path for path in declared)
+    # It deletes an ADR, so it is refused even though the destination is allowed.
+    assert violating_paths(declared, ["docs/**"]) == ["docs/decisions/0001-adr.md"]
+
+
+async def test_a_legitimate_rename_inside_the_write_set_is_allowed(
+    repo: Path, tmp_path: Path
+) -> None:
+    """The compression bug also *falsely refused* ordinary in-write-set renames."""
+    (repo / "src" / "a").mkdir()
+    (repo / "src" / "a" / "old.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "add old")
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-b", "agent/rename")
+    (repo / "src" / "b").mkdir()
+    git(repo, "mv", "src/a/old.ts", "src/b/new.ts")
+    git(repo, "commit", "-qm", "rename")
+    # Produced by real git, so it has whatever rename shape git actually emits.
+    patch = tmp_path / "legit.patch"
+    patch.write_bytes(
+        __import__("subprocess").run(
+            ["git", "-C", str(repo), "diff", "--binary", "-M", base, "agent/rename"],
+            capture_output=True, check=True,
+        ).stdout
+    )
+    git(repo, "checkout", "-q", "main")
+
+    declared = await enumerate_patch_paths(repo, patch)
+
+    assert declared == ["src/a/old.ts", "src/b/new.ts"]
+    assert violating_paths(declared, ["src/**"]) == []
 
 
 async def test_enumerate_patch_paths_rejects_an_unparseable_patch(

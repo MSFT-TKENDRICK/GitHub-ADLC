@@ -28,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, field
 from importlib.util import find_spec
@@ -286,44 +288,48 @@ async def changed_paths(worktree: Path) -> list[str] | None:
     return paths
 
 
-_SUMMARY_RENAME = re.compile(r"^\s*(?:rename|copy) (?P<src>.+) => (?P<dst>.+) \(\d+%\)$")
-_SUMMARY_MODE = re.compile(r"^\s*(?:create|delete) mode \d+ (?P<path>.+)$")
-
-
 async def enumerate_patch_paths(worktree: Path, patch: Path) -> list[str] | None:
-    """Ask **git** which paths a patch touches, before applying it.
+    """Ask **git** which paths a patch touches, without applying it for real.
 
     A hand-written diff parser is not safe here: ``git apply`` honours C-quoted
     headers and ``rename from`` / ``rename to`` records, so a patch from an
     untrusted producer (a gh-aw artifact) can touch paths that regex scanning
-    never sees. ``git apply --numstat -z`` reports destinations already
-    unquoted, and ``git apply --summary`` reports the *source* side of renames
-    and copies, which ``--numstat`` omits.
+    never sees.
 
-    Returns ``None`` if git cannot parse the patch at all -- fail closed.
+    Nor is git's *human-readable* output safe. ``git apply --summary`` prints
+    renames in the brace-compressed form ``docs/{decisions/0001-adr.md =>
+    guide.md}``, which splits on ``" => "`` into two paths that do not exist --
+    and the mangled source ``docs/{decisions/0001-adr.md`` matches ``docs/**``
+    while evading ``docs/decisions/**``, laundering a protected path into an
+    allowed one.
+
+    So nothing is parsed from a rendered string. The patch is applied to a
+    **scratch index** (``GIT_INDEX_FILE``, never the worktree or the real
+    index) and ``git diff-index --no-renames`` reports the result structurally:
+    NUL-separated, unquoted, both sides of every rename. As a bonus this also
+    proves the patch applies at ``HEAD``.
+
+    Returns ``None`` when git cannot parse or apply the patch -- fail closed.
     """
-    numstat = await run_git(worktree, "apply", "--numstat", "-z", str(patch))
-    if not numstat.ok:
-        return None
-    found: set[str] = set()
-    for record in numstat.text.split("\0"):
-        if not record.strip():
-            continue
-        parts = record.split("\t")
-        if len(parts) >= 3:
-            found.add(_normalize(parts[2]))
-
-    summary = await run_git(worktree, "apply", "--summary", str(patch))
-    if not summary.ok:
-        return None
-    for line in summary.text.splitlines():
-        if match := _SUMMARY_RENAME.match(line):
-            found.add(_normalize(match.group("src")))
-            found.add(_normalize(match.group("dst")))
-        elif match := _SUMMARY_MODE.match(line):
-            found.add(_normalize(match.group("path")))
-    found.discard("dev/null")
-    return sorted(found)
+    scratch = Path(tempfile.mkdtemp(prefix="adlc-index-"))
+    env = {"GIT_INDEX_FILE": str(scratch / "index")}
+    try:
+        for args in (
+            ("read-tree", "HEAD"),
+            ("apply", "--cached", "--whitespace=nowarn", str(patch)),
+        ):
+            step = await run_git(worktree, *args, env=env)
+            if not step.ok:
+                return None
+        listed = await run_git(
+            worktree, "diff-index", "--cached", "--name-only", "-z", "--no-renames", "HEAD",
+            env=env,
+        )
+        if not listed.ok:
+            return None
+        return sorted({_normalize(p) for p in listed.text.split("\0") if p.strip()})
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 async def revert_paths(worktree: Path, paths: list[str], base_sha: str) -> None:

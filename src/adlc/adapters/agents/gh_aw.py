@@ -444,7 +444,12 @@ class GhAwRunner:
             declared = await enumerate_patch_paths(worktree, destination)
             if declared is None:
                 destination.unlink(missing_ok=True)
-                return fail(f"git could not parse {source.name} from run {run_id}", log)
+                base = await sha_of(worktree)
+                return fail(
+                    f"git could not parse {source.name} from run {run_id}, or it is not "
+                    f"anchored to base {(base or '?')[:12]}",
+                    log,
+                )
             violations = violating_paths(declared, write_set)
             if violations:
                 destination.unlink(missing_ok=True)
