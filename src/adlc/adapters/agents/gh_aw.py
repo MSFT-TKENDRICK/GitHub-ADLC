@@ -35,10 +35,13 @@ from typing import TYPE_CHECKING, Any
 
 from adlc.adapters.agents.agent_task import resolve_repo_slug
 from adlc.adapters.agents.copilot_sdk import (
+    apply_patch,
     build_prompt,
+    changed_paths,
+    enumerate_patch_paths,
     fail,
-    paths_in_patch,
     resolve_patch_path,
+    run_git,
     sha_of,
     task_timeout,
     usable_write_set,
@@ -182,12 +185,19 @@ async def run_gh(*args: str, stdin: str | None = None, timeout: float = GH_TIMEO
 
 
 def select_patch_file(root: Path, task_id: str) -> Path | None:
-    """Pick the patch a gh-aw run produced, preferring an exact ``<task-id>.patch``."""
+    """Pick the patch a gh-aw run produced. It must be named for the task.
+
+    There is deliberately no "any ``*.patch`` will do" fallback: several nodes
+    at the same level dispatch the *same* workflow concurrently, so accepting an
+    arbitrary patch risks attributing another task's work to this node.
+    """
+    if not task_id:
+        return None
     with suppress(OSError):
         candidates = sorted(p for p in root.rglob("*.patch") if p.is_file())
         exact = [p for p in candidates if p.name == f"{task_id}.patch"]
-        named = [p for p in candidates if task_id and task_id in p.name]
-        for group in (exact, named, candidates):
+        named = [p for p in candidates if task_id in p.name]
+        for group in (exact, named):
             if group:
                 return group[0]
     return None
@@ -242,13 +252,26 @@ class GhAwRunner:
         self.mode = (os.environ.get("ADLC_GHAW_MODE") or "workflow").strip().lower()
 
     # -- gh wrappers -------------------------------------------------------
-    async def list_run_ids(self, slug: str, limit: int = 30) -> set[int]:
+    async def list_runs(self, slug: str, limit: int = 30) -> list[dict[str, Any]] | None:
+        """Recent runs of this workflow, or ``None`` when the query failed.
+
+        ``None`` must never be treated as "no runs": a transient failure of the
+        pre-dispatch snapshot would make every pre-existing run look new.
+        """
         result = await run_gh(
             "run", "list", "--repo", slug, "--workflow", self.workflow,
-            "--limit", str(limit), "--json", "databaseId",
+            "--limit", str(limit), "--json", "databaseId,displayTitle,status,conclusion",
         )
-        rows = result.json() or []
-        return {row["databaseId"] for row in rows if isinstance(row, dict) and "databaseId" in row}
+        if not result.ok:
+            return None
+        rows = result.json()
+        if not isinstance(rows, list):
+            return None
+        return [row for row in rows if isinstance(row, dict) and "databaseId" in row]
+
+    async def list_run_ids(self, slug: str, limit: int = 30) -> set[int] | None:
+        rows = await self.list_runs(slug, limit)
+        return None if rows is None else {row["databaseId"] for row in rows}
 
     async def dispatch(self, slug: str, inputs: dict[str, str]) -> GhResult:
         if self.mode == "aw":
@@ -297,6 +320,12 @@ class GhAwRunner:
         deadline = loop.time() + task_timeout(cfg)
 
         before = await self.list_run_ids(slug)
+        if before is None:
+            return fail(
+                f"could not list existing runs of '{self.workflow}' in {slug}; refusing to "
+                "dispatch, because without a baseline a pre-existing run would be mistaken "
+                "for this task's"
+            )
         dispatched = await self.dispatch(slug, inputs)
         if not dispatched.ok:
             return fail(
@@ -304,12 +333,9 @@ class GhAwRunner:
                 f"{dispatched.err or dispatched.out}".strip()
             )
 
-        run_id = await self._await_new_run(slug, before, deadline)
+        run_id, why = await self._await_new_run(slug, before, task_id, deadline)
         if run_id is None:
-            return fail(
-                f"workflow '{self.workflow}' was dispatched in {slug} but no new run "
-                "appeared before the task budget expired"
-            )
+            return fail(why)
 
         run = await self._await_completion(slug, run_id, deadline, self._interval(cfg))
         status, conclusion = run.get("status"), run.get("conclusion")
@@ -320,19 +346,47 @@ class GhAwRunner:
         return await self._collect(node, worktree, cfg, slug, run_id, task_id, write_set, log)
 
     # -- internals ---------------------------------------------------------
-    async def _await_new_run(self, slug: str, before: set[int], deadline: float) -> int | None:
-        """Correlate the dispatch with its run id by diffing the run list.
+    async def _await_new_run(
+        self, slug: str, before: set[int], task_id: str, deadline: float
+    ) -> tuple[int | None, str]:
+        """Correlate the dispatch with its run id.
 
-        Comparing ids rather than timestamps avoids any dependency on clock
-        agreement between this machine and GitHub.
+        ``workflow_dispatch`` does not return a run id and GitHub does not
+        expose dispatch inputs on the run, so correlation is done in two steps:
+
+        1. diff the run list against a snapshot taken *before* dispatching --
+           ids rather than timestamps, so no clock agreement is required;
+        2. among the new runs, prefer the one whose ``displayTitle`` is this
+           task's id, which the workflow sets with
+           ``run-name: ${{ inputs.task_id }}``.
+
+        ``docs/PLAN.md`` §4.4 runs every node at a level concurrently against
+        the *same* workflow, so step 2 is what stops one node adopting a
+        sibling's run. If several new runs appear and none is identifiable,
+        this fails closed rather than guessing.
         """
         loop = asyncio.get_running_loop()
         while loop.time() < deadline:
-            new = await self.list_run_ids(slug) - before
-            if new:
-                return max(new)
+            rows = await self.list_runs(slug)
+            if rows is not None:
+                new = [row for row in rows if row["databaseId"] not in before]
+                titled = [row for row in new if str(row.get("displayTitle") or "") == task_id]
+                if titled:
+                    return max(row["databaseId"] for row in titled), ""
+                if len(new) == 1:
+                    return new[0]["databaseId"], ""
+                if len(new) > 1:
+                    return None, (
+                        f"{len(new)} new runs of '{self.workflow}' appeared and none is "
+                        f"identifiable as task {task_id}; add "
+                        "`run-name: ${{ inputs.task_id }}` to the workflow so concurrent "
+                        "nodes can be told apart"
+                    )
             await asyncio.sleep(min(5.0, max(0.0, deadline - loop.time())))
-        return None
+        return None, (
+            f"workflow '{self.workflow}' was dispatched in {slug} but no new run "
+            "appeared before the task budget expired"
+        )
 
     async def _await_completion(
         self, slug: str, run_id: int, deadline: float, interval: float
@@ -358,7 +412,14 @@ class GhAwRunner:
         write_set: list[str],
         log: str,
     ) -> TaskOutcome:
-        """Download the run's artifacts and promote the patch, write-set checked."""
+        """Download the run's artifacts and promote the patch, write-set checked.
+
+        The artifact bytes are produced by a remote workflow, so nothing here
+        trusts a hand-written diff parse: git enumerates the paths
+        (:func:`enumerate_patch_paths`), git decides whether the patch is
+        anchored to the base SHA (``git apply``), and git reports what actually
+        landed (:func:`changed_paths`). Any violation is rolled back.
+        """
         tmp = Path(tempfile.mkdtemp(prefix="adlc-ghaw-"))
         try:
             downloaded = await run_gh("run", "download", str(run_id), "--repo", slug, "--dir",
@@ -372,30 +433,64 @@ class GhAwRunner:
             source = select_patch_file(tmp, task_id)
             if source is None:
                 return fail(
-                    f"run {run_id} uploaded no '<task-id>.patch' artifact — the agentic "
-                    f"workflow '{self.workflow}' must upload one for task {task_id}",
+                    f"run {run_id} uploaded no '{task_id}.patch' artifact — the agentic "
+                    f"workflow '{self.workflow}' must upload one named for the task",
                     log,
                 )
-            data = source.read_bytes()
-            touched = paths_in_patch(data.decode("utf-8", errors="replace"))
-            if not touched:
-                return fail(f"{source.name} from run {run_id} is not a unified diff", log)
-            violations = violating_paths(touched, write_set)
+
+            destination = resolve_patch_path(node, worktree, cfg)
+            size = write_patch_text(destination, source.read_bytes())
+
+            declared = await enumerate_patch_paths(worktree, destination)
+            if declared is None:
+                destination.unlink(missing_ok=True)
+                base = await sha_of(worktree)
+                return fail(
+                    f"git could not parse {source.name} from run {run_id}, or it is not "
+                    f"anchored to base {(base or '?')[:12]}",
+                    log,
+                )
+            violations = violating_paths(declared, write_set)
             if violations:
+                destination.unlink(missing_ok=True)
                 listed = ", ".join(violations[:10]) + (" …" if len(violations) > 10 else "")
                 return fail(
                     f"refused: patch from run {run_id} touches {len(violations)} path(s) "
                     f"outside writeSet: {listed}",
                     log,
                 )
-            destination = resolve_patch_path(node, worktree, cfg)
-            size = write_patch_text(destination, data)
+
+            base = await sha_of(worktree)
+            applied = await apply_patch(worktree, destination)
+            if not applied.ok:
+                destination.unlink(missing_ok=True)
+                return fail(
+                    f"patch from run {run_id} did not apply at base {(base or '?')[:12]} — "
+                    f"the workflow must anchor it to base_sha: {applied.err}",
+                    log,
+                )
+
+            # Re-check against what git says actually landed. `git apply` honours
+            # quoted headers and rename records that a pre-scan can misread, so
+            # this is the authoritative check.
+            landed = await changed_paths(worktree)
+            if landed is None or violating_paths(landed, write_set):
+                await run_git(worktree, "apply", "--reverse", "--index", str(destination))
+                destination.unlink(missing_ok=True)
+                outside = "unknown" if landed is None else ", ".join(
+                    violating_paths(landed, write_set)[:10]
+                )
+                return fail(
+                    f"refused: after applying, patch from run {run_id} had touched paths "
+                    f"outside writeSet ({outside}); the change has been rolled back",
+                    log,
+                )
             return {
                 "status": "ok",
                 "patchPath": str(destination),
                 "log": (
-                    f"{log}\npatch {source.name} ({size} bytes) anchored to "
-                    f"{(await sha_of(worktree)) or '?'} covering {len(touched)} path(s)"
+                    f"{log}\napplied {source.name} ({size} bytes) at verified base "
+                    f"{(base or '?')[:12]}, covering {len(landed)} path(s)"
                 ),
             }
         finally:

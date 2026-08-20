@@ -28,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, field
 from importlib.util import find_spec
@@ -35,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from adlc.ports import PROTECTED_PATHS, TaskNode, TaskOutcome
+from adlc.runs import RunDir
 
 if TYPE_CHECKING:  # pragma: no cover
     from adlc.config import Config
@@ -43,9 +46,11 @@ __all__ = [
     "CopilotSdkRunner",
     "GitResult",
     "PatchResult",
+    "apply_patch",
     "build_prompt",
     "changed_paths",
     "collect_usage",
+    "enumerate_patch_paths",
     "fail",
     "finalize_patch",
     "find_token",
@@ -168,11 +173,16 @@ _DIFF_SIDE = re.compile(r"^(?:\+\+\+|---) [ab]/(?P<p>.+?)(?:\t.*)?$")
 
 
 def paths_in_patch(text: str) -> list[str]:
-    """Extract every path a unified diff touches.
+    """Best-effort scan of a unified diff, for **logging only**.
 
-    Used to enforce the write set on patches produced *elsewhere* (the Agent
-    Tasks cloud agent, a gh-aw workflow artifact) rather than in a local
-    worktree.
+    .. warning::
+       This must never be the write-set boundary. A hand-written diff parser
+       cannot see C-quoted headers (``diff --git "a/…" "b/…"``, emitted for any
+       path with a non-ASCII byte, quote or backslash) or ``rename from`` /
+       ``rename to`` records, both of which ``git apply`` honours. A patch from
+       an untrusted source can therefore touch paths this function does not
+       report. Enforcement uses :func:`enumerate_patch_paths` and
+       :func:`changed_paths`, which let git do the parsing.
     """
     found: set[str] = set()
     for line in text.splitlines():
@@ -246,16 +256,21 @@ async def sha_of(worktree: Path, rev: str = "HEAD") -> str | None:
     return result.text.strip() if result.ok else None
 
 
-async def changed_paths(worktree: Path) -> list[str]:
+async def changed_paths(worktree: Path) -> list[str] | None:
     """Every path git reports as changed, including untracked files.
 
-    ``.gitignore``d files are deliberately *not* reported: build output and
-    dependency trees are not agent authorship and must not trip write-set
-    enforcement.
+    Returns ``None`` when the probe itself failed (git missing, timed out,
+    not a repository). Callers **must** treat ``None`` as "unknown" and fail
+    closed: conflating it with "nothing changed" would silently disable
+    write-set enforcement.
+
+    ``.gitignore``d files are deliberately not reported: build output and
+    dependency trees are not agent authorship and must not trip enforcement.
+    Both sides of a rename or copy are reported.
     """
     result = await run_git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if not result.ok:
-        return []
+        return None
     fields = result.text.split("\0")
     paths: list[str] = []
     i = 0
@@ -271,6 +286,50 @@ async def changed_paths(worktree: Path) -> list[str]:
             paths.append(_normalize(fields[i]))
             i += 1
     return paths
+
+
+async def enumerate_patch_paths(worktree: Path, patch: Path) -> list[str] | None:
+    """Ask **git** which paths a patch touches, without applying it for real.
+
+    A hand-written diff parser is not safe here: ``git apply`` honours C-quoted
+    headers and ``rename from`` / ``rename to`` records, so a patch from an
+    untrusted producer (a gh-aw artifact) can touch paths that regex scanning
+    never sees.
+
+    Nor is git's *human-readable* output safe. ``git apply --summary`` prints
+    renames in the brace-compressed form ``docs/{decisions/0001-adr.md =>
+    guide.md}``, which splits on ``" => "`` into two paths that do not exist --
+    and the mangled source ``docs/{decisions/0001-adr.md`` matches ``docs/**``
+    while evading ``docs/decisions/**``, laundering a protected path into an
+    allowed one.
+
+    So nothing is parsed from a rendered string. The patch is applied to a
+    **scratch index** (``GIT_INDEX_FILE``, never the worktree or the real
+    index) and ``git diff-index --no-renames`` reports the result structurally:
+    NUL-separated, unquoted, both sides of every rename. As a bonus this also
+    proves the patch applies at ``HEAD``.
+
+    Returns ``None`` when git cannot parse or apply the patch -- fail closed.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="adlc-index-"))
+    env = {"GIT_INDEX_FILE": str(scratch / "index")}
+    try:
+        for args in (
+            ("read-tree", "HEAD"),
+            ("apply", "--cached", "--whitespace=nowarn", str(patch)),
+        ):
+            step = await run_git(worktree, *args, env=env)
+            if not step.ok:
+                return None
+        listed = await run_git(
+            worktree, "diff-index", "--cached", "--name-only", "-z", "--no-renames", "HEAD",
+            env=env,
+        )
+        if not listed.ok:
+            return None
+        return sorted({_normalize(p) for p in listed.text.split("\0") if p.strip()})
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 async def revert_paths(worktree: Path, paths: list[str], base_sha: str) -> None:
@@ -301,20 +360,28 @@ def _safe_id(node: TaskNode) -> str:
 def resolve_patch_path(node: TaskNode, worktree: Path, cfg: Config) -> Path:
     """Where ``patches/<task-id>.patch`` belongs for this worktree.
 
-    ``run_task`` is handed a node and a worktree but not a run id, so the run
-    directory is located by walking up from the worktree. Resolution order:
+    ``run_task`` is handed a node and a worktree but not a run id, and the
+    spine's executor puts worktrees in the system temp directory, so the run
+    directory has to be discovered. Resolution order:
 
-    1. ``$ADLC_PATCH_DIR`` (explicit override, used by the executor and tests);
-    2. the nearest ancestor that is a run directory -- either a direct child of
+    1. ``$ADLC_PATCH_DIR`` (explicit override, used by tests);
+    2. ``$ADLC_RUN_ID`` resolved through :class:`adlc.runs.RunDir`;
+    3. the nearest ancestor that is a run directory -- either a direct child of
        ``cfg.runs_dir`` or a directory holding ``run.json`` / ``taskgraph.json``;
-    3. ``<worktree>/../patches`` as a last resort.
+    4. a sibling of the worktree named after it.
 
-    The patch directory is never placed *inside* the worktree, which would make
-    the patch part of its own diff.
+    Step 4 is deliberately *not* ``<worktree>/../patches``: under the executor
+    that is the shared system temp root, where two concurrent runs of the same
+    graph would collide on ``<task-id>.patch``. Naming it after the worktree
+    makes it unique. The patch directory is never placed inside the worktree,
+    which would make the patch part of its own diff.
     """
     name = f"{_safe_id(node)}.patch"
     if override := os.environ.get("ADLC_PATCH_DIR"):
         return Path(override).expanduser() / name
+    if run_id := (os.environ.get("ADLC_RUN_ID") or "").strip():
+        with suppress(Exception):
+            return RunDir(cfg, run_id).patches_dir / name
 
     worktree = worktree.resolve()
     runs_dir: Path | None = None
@@ -329,8 +396,8 @@ def resolve_patch_path(node: TaskNode, worktree: Path, cfg: Config) -> Path:
         if (ancestor / "run.json").is_file() or (ancestor / "taskgraph.json").is_file():
             chosen = ancestor / "patches"
             break
-    if chosen is None or chosen == worktree / "patches" or _is_within(chosen, worktree):
-        chosen = worktree.parent / "patches"
+    if chosen is None or _is_within(chosen, worktree):
+        chosen = worktree.parent / f"{worktree.name}.patches"
     return chosen / name
 
 
@@ -377,6 +444,12 @@ async def finalize_patch(
         return PatchResult(False, f"task {_safe_id(node)} declares an empty writeSet")
 
     touched = await changed_paths(worktree)
+    if touched is None:
+        return PatchResult(
+            False,
+            "could not determine what the agent changed (git status failed) — refusing "
+            "to emit a patch that was never write-set checked",
+        )
     violations = violating_paths(touched, write_set)
     if violations:
         await revert_paths(worktree, violations, base_sha)
@@ -393,7 +466,12 @@ async def finalize_patch(
     if not staged.ok:
         return PatchResult(False, f"git add failed: {staged.err}", changed=touched)
 
-    diff = await run_git(worktree, "diff", "--binary", "--no-color", "--cached", base_sha)
+    # Scoped to the write set as defence in depth: every changed path has
+    # already been checked, so this can only ever narrow the diff.
+    diff = await run_git(
+        worktree, "diff", "--binary", "--no-color", "--no-renames", "--cached", base_sha,
+        "--", *write_set,
+    )
     if not diff.ok:
         return PatchResult(False, f"git diff failed: {diff.err}", changed=touched)
     if not diff.out.strip():
@@ -408,6 +486,23 @@ async def finalize_patch(
     )
 
 
+async def apply_patch(worktree: Path, patch: Path) -> GitResult:
+    """Apply a patch into ``worktree``, staging the result.
+
+    Required for the runners whose agent worked **somewhere else**
+    (:mod:`~adlc.adapters.agents.agent_task`, :mod:`~adlc.adapters.agents.gh_aw`).
+    The spine's executor extracts the canonical ``patches/<task-id>.patch`` by
+    diffing the worktree after ``run_task`` returns
+    (:meth:`adlc.executor.Worktree.diff`), so a runner that only wrote a patch
+    file and left the worktree untouched would be recorded as "no changes
+    produced" and its work silently dropped. Applying it here makes all three
+    runners look identical to the executor -- and, because the patch is anchored
+    to the worktree's base SHA, a successful apply is also proof of that
+    anchoring.
+    """
+    return await run_git(worktree, "apply", "--index", "--whitespace=nowarn", str(patch))
+
+
 async def patch_from_range(
     node: TaskNode,
     worktree: Path,
@@ -419,14 +514,17 @@ async def patch_from_range(
 
     The Agent Tasks cloud agent and gh-aw both do their work somewhere else and
     hand back a ref. The resulting patch is still anchored to the worktree's
-    ``base_sha``, and the write set is enforced against the full name-only diff
-    before anything is written.
+    ``base_sha``, the write set is enforced against the full name-only diff
+    before anything is written, and the patch is then applied into the worktree
+    so the executor sees the same changes a local agent would have made.
     """
     write_set = usable_write_set(node)
     if not write_set:
         return PatchResult(False, f"task {_safe_id(node)} declares an empty writeSet")
 
-    names = await run_git(worktree, "diff", "--name-only", "-z", base_sha, head_rev)
+    names = await run_git(
+        worktree, "diff", "--name-only", "-z", "--no-renames", base_sha, head_rev
+    )
     if not names.ok:
         return PatchResult(False, f"git diff --name-only failed: {names.err}")
     touched = [_normalize(p) for p in names.text.split("\0") if p.strip()]
@@ -443,8 +541,12 @@ async def patch_from_range(
             violations=violations,
         )
 
+    # ``--no-renames`` on both the check and the diff: a rename record names only
+    # its destination in ``--name-only``, so a rename *out of* a protected path
+    # would otherwise be invisible to the check while still deleting the source.
     diff = await run_git(
-        worktree, "diff", "--binary", "--no-color", base_sha, head_rev, "--", *write_set
+        worktree, "diff", "--binary", "--no-color", "--no-renames",
+        base_sha, head_rev, "--", *write_set,
     )
     if not diff.ok:
         return PatchResult(False, f"git diff failed: {diff.err}", changed=touched)
@@ -455,6 +557,15 @@ async def patch_from_range(
 
     patch_path = resolve_patch_path(node, worktree, cfg)
     size = write_patch_text(patch_path, diff.out)
+
+    applied = await apply_patch(worktree, patch_path)
+    if not applied.ok:
+        return PatchResult(
+            False,
+            f"patch did not apply at base {base_sha[:12]}: {applied.err}",
+            patch_path,
+            touched,
+        )
     return PatchResult(
         True, f"patch anchored to {base_sha[:12]} ({size} bytes)", patch_path, touched, [], size
     )

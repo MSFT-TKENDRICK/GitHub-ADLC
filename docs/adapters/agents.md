@@ -36,33 +36,31 @@ credential-free path**; when unavailable they return
 
 ---
 
-## Selection and the cost footgun
+## Selection: these runners are explicit-only
 
 `adlc.config.select_adapter` resolves an agent runner in this order:
 
 1. an explicit override — `adlc build RUN --runner copilot-sdk`, or
    `adapters: {agents: …}` in `.adlc/config.yaml`. **`detect()` is not consulted
    for an explicit override**, so you can always force a runner;
-2. otherwise the **first adapter whose `detect()` returns `True`**, in entry-point
-   registration order (`copilot-sdk`, `agent-task`, `gh-aw`, `maf`);
-3. otherwise the spine default, `fake`.
+2. otherwise the spine default, `fake`.
 
-> [!WARNING]
-> Step 2 means that on a machine where `GITHUB_TOKEN` is exported and `origin`
-> points at github.com, a bare `adlc build RUN` will select `agent-task` and
-> **spend money and open pull requests**. Inside GitHub Actions both
-> `GITHUB_TOKEN` and `GITHUB_REPOSITORY` are always present.
->
-> Pin the runner wherever cost or side effects matter:
->
-> ```yaml
-> # .adlc/config.yaml
-> adapters:
->   agents: fake        # or copilot-sdk — an explicit choice, never an accident
-> ```
->
-> The §4.8 trust matrix runs build jobs with `contents: read` and **no secrets**,
-> which is the other half of this defence.
+`agents` is in `adlc.config.EXPLICIT_ONLY_KINDS`, so unlike observational
+adapters (evidence, evals, telemetry, flags, gates, export) an agent runner is
+**never** auto-selected just because `detect()` succeeds. That matters because
+`GITHUB_TOKEN` and `GITHUB_REPOSITORY` are present on every GitHub Actions
+runner, so ambient auto-selection would silently switch a plain `adlc build`
+onto a paid cloud agent that opens pull requests.
+
+`detect()` therefore answers "**could** this run here?", which is what
+`capabilities.json` reports — not "should this be used". Turning one on is
+always a deliberate act:
+
+```yaml
+# .adlc/config.yaml
+adapters:
+  agents: copilot-sdk
+```
 
 ## `detect()` rules these adapters follow
 
@@ -222,14 +220,35 @@ must upload an artifact containing `<task_id>.patch`:
 
 | Input | Content |
 |---|---|
-| `task_id` | `node["id"]` — also the expected patch filename |
-| `base_sha` | The worktree's base SHA; the patch must be anchored to it |
+| `task_id` | `node["id"]` — also the required patch filename |
+| `base_sha` | The worktree's base SHA; the patch **must** be anchored to it |
 | `write_set` | Newline-separated allowed paths |
 | `prompt` | The rendered task prompt (truncated to 60 000 characters) |
 
-The adapter validates the artifact before promoting it: it must parse as a
-unified diff, and every path it touches must be inside the write set. A patch
-that reaches outside is refused, exactly as for the other two runners.
+The workflow must also set `run-name: ${{ inputs.task_id }}`. `workflow_dispatch`
+returns no run id and GitHub does not expose dispatch inputs on the run, so the
+adapter correlates by diffing the run list against a snapshot taken *before*
+dispatch and then matching `displayTitle` to the task id. Level-0 nodes run
+concurrently against the *same* workflow, so without a distinguishing run name
+two nodes could adopt each other's runs; when several new runs appear and none
+is identifiable, the adapter fails with that instruction rather than guessing.
+
+The artifact must be named `<task_id>.patch`. There is no "any `.patch` will do"
+fallback, for the same reason.
+
+**How the patch is validated.** The artifact is produced by a remote workflow, so
+none of it is trusted and none of it is parsed by hand:
+
+1. the patch is applied to a **scratch index** and `git diff-index --no-renames`
+   enumerates the paths — git unquotes C-quoted headers and reports both sides
+   of a rename, neither of which a regex scanner can see, and neither of which
+   git's own `--summary` rendering reports unambiguously;
+2. those paths are checked against the write set and `PROTECTED_PATHS`;
+3. `git apply --index` applies it for real, which is what proves it is anchored
+   to `base_sha` — an unanchored patch simply will not apply;
+4. `git status` reports what actually landed and the check is repeated. If
+   anything is outside the write set the patch is reversed out of the worktree
+   and the task fails.
 
 **Prerequisites**
 
@@ -256,10 +275,10 @@ or a non-empty `hosts.yml`; and a resolvable `owner/repo`.
 | `limits.pollSeconds` | `10` | Poll interval while the run executes |
 | `limits.taskTimeoutSeconds` | `1800` | Total budget, including queue time |
 
-**Run correlation.** `workflow_dispatch` does not return a run id, so the adapter
-snapshots the workflow's run ids *before* dispatching and waits for a new one to
-appear. Comparing ids rather than timestamps removes any dependence on clock
-agreement with GitHub.
+**Run correlation.** See the workflow contract above — the adapter snapshots run
+ids before dispatching, refuses to dispatch at all if that snapshot fails (an
+unknown baseline would make every pre-existing run look new), and identifies its
+run by `displayTitle`.
 
 **Cost profile.** GitHub Actions minutes plus whatever the workflow's configured
 engine spends (Copilot premium requests, or a third-party model key held as a
@@ -269,6 +288,45 @@ outputs are constrained by gh-aw rather than by trust. `gh` reports no token
 accounting, so those fields are omitted.
 
 ---
+
+## How the write set is actually enforced
+
+git does the parsing, never a regex. This is deliberate: `git apply` honours
+C-quoted headers (`diff --git "a/…" "b/…"`, emitted for any path containing a
+non-ASCII byte, quote or backslash) and `rename from` / `rename to` records that
+can name a completely different path from the `diff --git` line. A hand-written
+diff scanner misses both, and code review demonstrated working escapes through
+each — a patch that reported only `src/theme.ts` while creating
+`.github/workflows/pwné.yml`, and one that deleted an ADR by renaming it.
+
+| Runner | Enumeration | Enforcement point |
+|---|---|---|
+| `copilot-sdk` | `git status --porcelain -z -uall` (reports both sides of a rename) | before the diff is taken; violations are reverted |
+| `agent-task` | `git diff --name-only -z --no-renames base..head` | before the patch is written or applied |
+| `gh-aw` | patch applied to a **scratch index**, then `git diff-index --cached --name-only -z --no-renames HEAD`; re-checked with `git status` after the real apply | before *and* after applying; violations are reversed out |
+
+Nor is git's *human-readable* output safe. `git apply --summary` prints renames
+brace-compressed — `docs/{decisions/0001-adr.md => guide.md}` — and splitting
+that on `" => "` yields `docs/{decisions/0001-adr.md`, which matches the allow
+glob `docs/**` while evading the deny glob `docs/decisions/**`. That laundered a
+protected path into an allowed one, and simultaneously caused ordinary
+in-write-set renames to be refused with a fabricated path. So `gh-aw` parses no
+rendered string at all: it applies the patch to a throwaway index
+(`GIT_INDEX_FILE`, never the worktree or the real index) and lets
+`git diff-index --no-renames` report the result structurally — NUL-separated,
+unquoted, both sides of every rename. That also proves the patch applies at
+`HEAD` before anything touches the worktree.
+
+`--no-renames` matters for `agent-task` too: a rename record names only its
+destination in `--name-only`, so a rename *out of* `docs/decisions/**` would
+otherwise be invisible to the check while still deleting the source.
+
+`changed_paths()` returns `None` — not `[]` — when the probe itself fails, and
+every caller fails closed on it. Conflating "git status failed" with "nothing
+changed" would silently disable enforcement entirely.
+
+`paths_in_patch()` still exists for log output and is documented as unsafe for
+enforcement.
 
 ## Failure semantics (all three)
 
@@ -289,14 +347,34 @@ reason as the first line of `log`, and never raises into the executor:
 Gitignored files are never counted as agent authorship, so a task that happens to
 populate `node_modules/` or `build/` is not spuriously refused.
 
-## Where the patch is written
+## Where the patch is written, and who owns it
 
-`run_task` receives a node and a worktree but no run id, so the patch directory
-is resolved by walking up from the worktree: `$ADLC_PATCH_DIR` → the nearest
-ancestor that is a run directory (a direct child of `<root>/.adlc/runs`, or a
-directory holding `run.json` / `taskgraph.json`) → `<worktree>/../patches`. It is
-never placed inside the worktree, which would make the patch part of its own
-diff. The absolute path is returned as `TaskOutcome["patchPath"]`.
+The spine's `adlc.executor.Executor` extracts the **canonical**
+`patches/<task-id>.patch` itself, by diffing the worktree after `run_task`
+returns (`Worktree.diff()`), and it does not read `TaskOutcome["patchPath"]`.
+That has one consequence every runner here has to respect:
+
+> **When `run_task` returns, the changes must be present in the worktree.**
+
+For `copilot-sdk` that is automatic — the agent edits the worktree in place. For
+`agent-task` and `gh-aw` the agent worked *somewhere else*, so the fetched or
+downloaded patch is `git apply --index`-ed into the worktree before returning.
+Without that, the executor would diff an unchanged worktree, record `"no changes
+produced"`, and silently drop the work. A side benefit: a successful apply is
+independent proof that the patch really is anchored to the worktree's base SHA.
+
+The runner *also* writes its own copy and returns it as `patchPath`, per the L1
+contract. That location is resolved as: `$ADLC_PATCH_DIR` → `$ADLC_RUN_ID`
+through `RunDir(cfg, run_id).patches_dir` → the nearest ancestor that is a run
+directory (a direct child of `<root>/.adlc/runs`, or a directory holding
+`run.json` / `taskgraph.json`) → a sibling of the worktree named
+`<worktree-name>.patches`.
+
+That last fallback is deliberately not `<worktree>/../patches`: the executor
+creates worktrees with `tempfile.mkdtemp()`, so `..` is the shared system temp
+root, where two concurrent runs of the same graph would collide on
+`<task-id>.patch`. It is also never *inside* the worktree, which would make the
+patch part of its own diff.
 
 ## Tests
 
@@ -312,8 +390,22 @@ It asserts the `detect() -> (False, reason)` path for all three runners, that
 access, and that `GhAwRunner.detect()` starts no subprocess. Patch extraction and
 write-set enforcement run against a **real throwaway git repository**, so the
 anchoring claim is verified by `git apply --check` at the base SHA rather than by
-string matching. The backends themselves — the SDK session, the REST calls, every
-`gh` invocation — are mocked.
+string matching. `test_executor_integration.py` drives the **real**
+`adlc.executor.Executor` — worktrees, level barriers, patch application, `baseSha`
+advance — which is what proves the "changes must be in the worktree" contract
+above. `test_bypasses.py` holds a regression test for every escape found in code
+review, each built from real patch bytes and checked with real git. The backends
+themselves — the SDK session, the REST calls, every `gh` invocation — are mocked.
+
+> [!NOTE]
+> The whole fleet shares one system Python, so `pip install -e .` writes a single
+> editable pointer and the last session to run it wins. Use `PYTHONPATH` instead
+> of relying on the install, and confirm before trusting a run:
+>
+> ```powershell
+> $env:PYTHONPATH = "<your worktree>\src"
+> python -c "import adlc.executor as e; print(e.__file__)"   # must be YOUR worktree
+> ```
 
 The opt-in real-agent smoke test (`PLAN.md` §8.2) is the only thing that needs
 credentials, and it is skipped and reported as `not_run` with a reason when they
