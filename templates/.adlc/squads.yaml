@@ -1,0 +1,77 @@
+# ADLC reviewer squads (L8).
+#
+# `adlc init` vendors this file to `<repo>/.adlc/squads.yaml`. Both squad gates
+# resolve their configuration in this order:
+#
+#   1. <repo>/.adlc/squads.yaml           (the vendored, repo-owned copy)
+#   2. <repo>/templates/.adlc/squads.yaml (this file, when dogfooding in-repo)
+#   3. the built-in defaults compiled into the gate modules
+#
+# See docs/squads.md for the quorum model and the citation-or-discard rule.
+version: 1
+
+defaults:
+  # A finding that cites no evidence is DISCARDED before quorum is counted.
+  # This is not a style preference: an uncited LLM claim is unfalsifiable and
+  # must never be able to block a merge.
+  citationPolicy: discard-uncited
+
+  # Only these severities count as a blocking vote. Everything else is recorded
+  # in the review body and surfaced in the report, but does not gate.
+  blockingSeverities: [high, critical]
+
+  # A member that filed no review file counts as an abstention, never as a pass.
+  abstainCountsAsPass: false
+
+squads:
+  # ---------------------------------------------------------------------
+  # Adversarial code review. Sees the diff. Hunts for the specific ways
+  # THIS change fails. Runs on `pull_request` via adlc-adversarial.md.
+  # ---------------------------------------------------------------------
+  adversarial_review:
+    description: >-
+      Adversarial code-review squad. Each member reads the candidate diff with a
+      single hostile lens and reports concrete, reproducible failure modes.
+    blocking: true
+    quorum: "2/3"
+    # Every finding must carry a `path:Lstart-Lend` citation into the diff.
+    citation: file-line
+    workflow: .github/workflows/adlc-adversarial.md
+    members:
+      - id: security-adversary
+        agent: .github/agents/security-adversary.agent.md
+        weight: 1
+      - id: performance-adversary
+        agent: .github/agents/performance-adversary.agent.md
+        weight: 1
+      - id: accessibility-adversary
+        agent: .github/agents/accessibility-adversary.agent.md
+        weight: 1
+
+  # ---------------------------------------------------------------------
+  # Evidence review. NEVER sees the code. Its only input is the sanitised
+  # evidence-review-pack.json (schemas/evidence-review-pack.schema.json).
+  # Advisory only -- the deterministic coverage check is what blocks.
+  # ---------------------------------------------------------------------
+  evidence_review:
+    description: >-
+      Requirements-vs-evidence audit performed without code access. Judges only
+      whether the declared evidence actually demonstrates each requirement.
+    blocking: false
+    quorum: "1/1"
+    # Every claim must cite an artifactSha256 that appears in the pack.
+    citation: artifact-sha256
+    workflow: .github/workflows/adlc-evidence-review.md
+    members:
+      - id: requirements-auditor
+        agent: .github/agents/requirements-auditor.agent.md
+        weight: 1
+
+    # The blocking half of this gate. Deterministic, no LLM involved.
+    coverage:
+      # Every requirement must have >= this many hash-verified artifacts.
+      minArtifactsPerRequirement: 1
+      # The pack's candidateSha must equal the run's headSha.
+      requireShaMatch: true
+      # Every cited artifactSha256 must match an artifact recorded in run.json.
+      requireHashVerification: true
