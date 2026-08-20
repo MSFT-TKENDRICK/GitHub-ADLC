@@ -94,6 +94,72 @@ def test_semconv_attribute_names_are_passed_through_verbatim(wired) -> None:
         assert span.attributes[name] == f"value-of-{name}"
 
 
+def test_flat_spine_shaped_spans_keep_their_semconv_names(wired) -> None:
+    """The spine's otel-file default emits FLAT spans, not nested attributes.
+
+    Regression guard: an earlier version namespaced every top-level key under
+    ``adlc.``, which silently turned ``feature_flag.key`` into
+    ``adlc.feature_flag.key`` and broke the convention it claims to preserve.
+    """
+    telemetry, tracer = wired
+    telemetry.emit({
+        "name": "feature_flag.evaluation",
+        "feature_flag.key": "adlc.exp.a1b2",
+        "feature_flag.provider.name": "flagd-file",
+        "feature_flag.result.variant": "treatment",
+        "feature_flag.result.reason": "targeting_match",
+        "feature_flag.context.id": "ctx-1",
+        "feature_flag.set.id": "adlc",
+        "runId": "2026-08-19-a1b2",
+    })
+
+    _, span = tracer.spans[0]
+    for name in SEMCONV_FLAG_ATTRIBUTES:
+        assert name in span.attributes, f"{name} was renamed or dropped"
+        assert f"adlc.{name}" not in span.attributes
+    # Non-dotted ADLC metadata is still namespaced, so it cannot collide.
+    assert span.attributes["adlc.runId"] == "2026-08-19-a1b2"
+
+
+def test_adapter_is_signature_compatible_with_the_spine_default(wired) -> None:
+    """It must be a drop-in for OtelFileTelemetry's convenience builders."""
+    import inspect
+
+    from adlc.adapters.telemetry.otel_file import OtelFileTelemetry
+
+    for method in ("emit", "emit_flag_evaluation", "emit_agent_invocation"):
+        ours = inspect.signature(getattr(AppInsightsTelemetry, method))
+        theirs = inspect.signature(getattr(OtelFileTelemetry, method))
+        assert ours == theirs, f"{method} signature drifted from the spine default"
+
+
+def test_emit_flag_evaluation_matches_the_spine_wire_shape(wired) -> None:
+    telemetry, tracer = wired
+    telemetry.emit_flag_evaluation(
+        key="adlc.exp.a1b2", variant="treatment", value=True, reason="TARGETING_MATCH",
+        provider="flagd-file", context_id="ctx-1", flag_set_id="adlc",
+    )
+
+    name, span = tracer.spans[0]
+    assert name == "feature_flag.evaluation"          # the spec says MUST
+    assert span.attributes["feature_flag.key"] == "adlc.exp.a1b2"
+    assert span.attributes["feature_flag.result.variant"] == "treatment"
+    assert span.attributes["feature_flag.result.reason"] == "targeting_match"
+    assert span.attributes["feature_flag.set.id"] == "adlc"
+
+
+def test_emit_agent_invocation_uses_gen_ai_names(wired) -> None:
+    telemetry, tracer = wired
+    telemetry.emit_agent_invocation(agent="adversarial-1", model="gpt-4o",
+                                    tokens_in=120, tokens_out=45)
+
+    _, span = tracer.spans[0]
+    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
+    assert span.attributes["gen_ai.agent.name"] == "adversarial-1"
+    assert span.attributes["gen_ai.usage.input_tokens"] == 120
+    assert span.attributes["gen_ai.usage.output_tokens"] == 45
+
+
 def test_superseded_names_are_not_silently_rewritten(wired) -> None:
     """``gen_ai.system`` is superseded, but rewriting it would desync the evidence."""
     telemetry, tracer = wired

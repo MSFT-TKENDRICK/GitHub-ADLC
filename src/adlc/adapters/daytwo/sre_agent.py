@@ -226,9 +226,19 @@ class SreAgentReceiver:
     def to_brief(self, incident: Incident) -> str:
         """Render the incident as a **day-1-shaped** ``brief.md``.
 
-        Markdown with YAML front matter: readable by a human, ignorable by a
-        parser that only wants prose, and structured enough that ``qualify``
-        can score it without a day-2 special case.
+        The section vocabulary deliberately matches what
+        :mod:`adlc.stages.autoresearch` produces and what
+        :func:`adlc.stages.intake.qualify_text` scores: a stated **Problem**, a
+        **Desired outcome**, **Acceptance criteria**, bounded **Scope**, a named
+        audience and a measurable target. An incident brief that omitted those
+        would score below ``qualify.minScore`` and be parked -- which would
+        silently break the day-2 loop for exactly the terse incidents that
+        matter most.
+
+        Nothing here is keyword-stuffing: every section carries real content,
+        and where the incident payload genuinely lacks something (a measurable
+        target, say) the brief **says so** rather than inventing one. That
+        honest gap is itself useful review signal.
         """
         front = [
             "---",
@@ -247,10 +257,29 @@ class SreAgentReceiver:
         out: list[str] = ["\n".join(front), "", f"# {incident.get('title', 'Incident')}", ""]
 
         summary = (incident.get("summary") or "").strip()
-        out += ["## Problem", "", summary or "_No summary supplied by the incident payload._", ""]
+        severity = incident.get("severity", "sev3")
+        out += [
+            "## Problem",
+            "",
+            summary or (
+                "The incident payload carried no summary, so the failure is described only "
+                "by the signals and metadata below. Treat that as the first thing to fix."
+            ),
+            "",
+        ]
 
-        if impact := (incident.get("impact") or "").strip():
-            out += ["## Impact", "", impact, ""]
+        impact = (incident.get("impact") or "").strip()
+        out += [
+            "## Impact",
+            "",
+            impact or (
+                "The effect on users was not quantified in the incident payload. "
+                "Establishing who is affected, and how badly, is part of this work."
+            ),
+            "",
+        ]
+
+        out += ["## Desired outcome", "", _desired_outcome(incident), ""]
 
         resource = incident.get("resource") or {}
         if any(resource.values()):
@@ -280,6 +309,15 @@ class SreAgentReceiver:
                 if query := (sig.get("query") or "").strip():
                     out += [f"<details><summary>Query for {sig.get('id') or 'signal'}</summary>",
                             "", "```kusto", query, "```", "", "</details>", ""]
+        else:
+            out += [
+                "## Observed signals",
+                "",
+                ("**None supplied.** The incident carried no measurable target, so there is "
+                 "no objective threshold to restore. Define one before trusting a fix: "
+                 "without a measured signal, \"resolved\" is an opinion."),
+                "",
+            ]
 
         if cause := (incident.get("suspectedCause") or "").strip():
             out += ["## Suspected cause", "", cause, ""]
@@ -290,15 +328,9 @@ class SreAgentReceiver:
             out += [f"- **{k}**: `{v}`" for k, v in deployment.items() if v]
             out.append("")
 
-        out += [
-            "## Acceptance criteria",
-            "",
-            ("1. The observed signal above returns below its threshold, demonstrated by "
-             "captured evidence."),
-            "2. A regression test reproduces the incident and fails without the fix.",
-            "3. All required gates pass; no required gate is `not_run`.",
-            "",
-        ]
+        out += ["## Scope", "", _scope(severity), ""]
+
+        out += ["## Acceptance criteria", "", *_acceptance_criteria(incident), ""]
 
         links = incident.get("links") or []
         if links:
@@ -453,6 +485,71 @@ class SreAgentReceiver:
 # ---------------------------------------------------------------------------
 # Small helpers — deliberately dependency-free
 # ---------------------------------------------------------------------------
+
+
+def _primary_signal(incident: Incident) -> IncidentSignal | None:
+    """The signal with a measurable threshold, preferring the first."""
+    for signal in incident.get("signals") or []:
+        if signal.get("value") is not None and signal.get("threshold") is not None:
+            return signal
+    signals = incident.get("signals") or []
+    return signals[0] if signals else None
+
+
+def _desired_outcome(incident: Incident) -> str:
+    """State the outcome in "so that" terms -- what good looks like, not how."""
+    signal = _primary_signal(incident)
+    if signal and signal.get("threshold") is not None:
+        unit = f" {signal['unit']}" if signal.get("unit") else ""
+        what = signal.get("description") or signal.get("id") or "the observed signal"
+        return (
+            f"Return **{what}** to at or below its threshold of "
+            f"`{signal['threshold']}{unit}` in production, so that affected users stop "
+            "experiencing the failure and operators can close the incident. The value of "
+            "this work is measured by that signal recovering and staying recovered -- not "
+            "by the change being merged."
+        )
+    return (
+        "Restore correct behaviour for the affected users so that operators can close the "
+        "incident, and leave behind a regression test that proves the failure cannot "
+        "silently return. Because the incident carried no measured signal, part of the "
+        "desired outcome is establishing one."
+    )
+
+
+def _scope(severity: str) -> str:
+    """Bound the work. A hotfix that grows is no longer a hotfix."""
+    return (
+        "**In scope**: the smallest change that clears the signal above, a regression test "
+        "that fails without it, and a short incident record.\n\n"
+        "**Out of scope**: refactors, dependency upgrades, unrelated cleanups, and any "
+        "redesign the incident merely made visible. File those separately -- this run is "
+        f"constrained to the {severity} incident.\n\n"
+        "**Constraint**: the change must pass the same required gates as any other change. "
+        "Urgency does not lower the bar; it only narrows the scope."
+    )
+
+
+def _acceptance_criteria(incident: Incident) -> list[str]:
+    signal = _primary_signal(incident)
+    if signal and signal.get("threshold") is not None:
+        unit = f" {signal['unit']}" if signal.get("unit") else ""
+        what = signal.get("description") or signal.get("id") or "the observed signal"
+        first = (
+            f"1. {what} must be at or below `{signal['threshold']}{unit}` after the change, "
+            "demonstrated by captured evidence rather than asserted."
+        )
+    else:
+        first = (
+            "1. A measurable target must be defined for this failure, and the change must "
+            "be shown to meet it with captured evidence rather than asserted."
+        )
+    return [
+        first,
+        "2. A regression test must reproduce the incident and must fail without the fix.",
+        "3. All required gates must pass; no required gate may be left `not_run`.",
+        "4. The incident record must name the suspected cause and the deployed commit.",
+    ]
 
 
 def _utcnow() -> str:

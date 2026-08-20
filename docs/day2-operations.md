@@ -18,6 +18,16 @@ path*. Everything downstream — qualification, the task graph, isolated
 worktrees, patch barriers, evidence capture, the fail-closed gate aggregator,
 the ADR — is byte-for-byte the same code that handles a human feature request.
 
+ADLC has two proposal sources feeding one intake:
+
+| Source | Module | Trigger |
+|---|---|---|
+| **Day-1 autoresearch** | `stages/autoresearch.py` | repeatedly-failing gates, un-evaluated rubric criteria, TODO hotspots |
+| **Day-2 incident** | `adapters/daytwo/sre_agent.py` + `stages/hotfix.py` | an SRE Agent `repository_dispatch` or issue |
+
+Both emit a markdown brief with the same section vocabulary, and both hand it to
+`run_intake` / `run_qualify`. Neither has a private pipeline.
+
 ```mermaid
 flowchart LR
     subgraph PROD["Production"]
@@ -31,10 +41,11 @@ flowchart LR
     RX --> BRIEF["brief.md"]
 
     subgraph DAY1["The existing day-1 path — unchanged"]
-        BRIEF --> NEW["adlc run new --brief"]
-        NEW --> GRAPH["narrow 3-node graph<br/>(hotfix skips spec/enrich)"]
-        GRAPH --> BUILD[build] --> EV[evidence] --> GATE["gates<br/>fail-closed"]
-        GATE --> RED["adlc reduce → run.json"] --> REP["report + PR"]
+        BRIEF --> NEW["RunDir.create → run_intake"]
+        NEW --> Q["run_qualify<br/>parks a weak brief"]
+        Q --> GRAPH["narrow 3-node graph<br/>(hotfix skips spec/enrich)"]
+        GRAPH --> BUILD["run_build"] --> EV["run_evidence"] --> GATE["run_gates<br/>fail-closed"]
+        GATE --> RED["reduce_run → run.json"] --> REP["report + PR"]
     end
 
     REP --> HR["human PR review"] --> ADR["ADR · MADR v4"]
@@ -175,25 +186,48 @@ spellings are tolerated (`alertName`, `firedAt`, `resourceId`, `probableCause`,
 
 This is the KISS win, and it is worth being concrete about *why* it is a win.
 
-`to_brief()` renders markdown with YAML front matter: a title, Problem, Impact,
-Affected resource, Observed signals (with the KQL that produced them), Suspected
-cause, Deployment context, Acceptance criteria, References. It is a brief a
-human could have typed.
+`to_brief()` renders markdown using the **same section vocabulary
+`stages/autoresearch.py` produces**, because
+`stages/intake.py::qualify_text` scores a brief on exactly those signals: a
+stated **Problem**, a **Desired outcome**, **Acceptance criteria**, bounded
+**Scope**, a named audience and a measurable target.
 
-Then `adlc hotfix` calls:
+That is not cosmetic. `run_qualify` parks any brief scoring below
+`qualify.minScore` (default 50). An earlier draft of this adapter emitted a
+brief that scored **45 for a terse incident** — it would have been silently
+parked, breaking the day-2 loop for exactly the low-information incidents that
+matter most. Every incident shape is now regression-tested against the real
+scorer (`test_a_terse_incident_still_qualifies`).
 
-```bash
-adlc run new --brief <brief.md> --json
+Crucially, the brief is not keyword-stuffed to game the scorer. Every section
+carries real content, and where the payload genuinely lacks something the brief
+**says so**:
+
+> **None supplied.** The incident carried no measurable target, so there is no
+> objective threshold to restore. Define one before trusting a fix: without a
+> measured signal, "resolved" is an opinion.
+
+That honest gap is useful review signal, and it is why a signal-free incident
+still scores 90 rather than 100 — the missing measurable target is real.
+
+Then `run_hotfix` calls the spine's own functions, in process:
+
+```python
+rd = RunDir(cfg, new_run_id())
+rd.create(profile=cfg.profile, brief_text=receiver.to_brief(incident))
+run_intake(cfg, rd, source=f"sre-agent:{incident_id}")
+run_qualify(cfg, rd)
 ```
 
-That is the **same command** a human-authored brief uses. There is no
-`adlc run new --incident`, no day-2 stage table, no parallel gate set, no
-day-2 branch in the aggregator. Consequences:
+Those are the *same four calls* `adlc run new --brief` makes. There is no
+`adlc run new --incident`, no day-2 stage table, no parallel gate set.
+Consequences:
 
 - Day-2 inherits every future day-1 improvement for free.
 - There is exactly one place where "what are we building and why" is decided.
 - A hotfix cannot accidentally get a weaker bar, because it does not have its
-  own bar to weaken.
+  own bar to weaken. A brief that would be parked on day 1 is parked on day 2,
+  unless a human passes `--allow-unqualified`.
 
 ### Step 5 — A narrow task graph
 
@@ -208,33 +242,37 @@ That skip is the only thing that makes it a hotfix:
 
 `T002` and `T003` share level 1, so their write sets must not overlap — one
 writes code, the other writes `docs/incidents/`, so they cannot. `T001` runs
-first because a hotfix with no failing test is a guess.
+first because a hotfix with no failing test is a guess. The graph is validated
+by the executor's own `validate_graph()` in the test suite, not just against the
+JSON schema.
 
 **On the fix node's write set — an honesty detail.** We cannot know which files
 need changing. Resolution order is: an explicit hint in the incident payload
 (`writeSet` / `suspectedFiles`) → `hotfix.writeSet` in `.adlc/config.yaml` →
 a placeholder. The source is recorded in `data.writeSetSource`, and when it is
 `"fallback"` the stage message says so in plain words and tells you to refine it
-before trusting `adlc build`. A placeholder is never presented as analysis.
+before trusting the build. A placeholder is never presented as analysis.
 
 ### Step 6 — Build, evidence, gates — unchanged
 
-`adlc hotfix` shells out to the frozen CLI surface (`docs/PLAN.md` §4.9) only:
-`adlc build` → `adlc evidence --variant hotfix` → `adlc gate --ids …` →
-`adlc reduce` → `adlc report`. No private APIs.
+`run_hotfix` then calls `run_build` → `run_evidence` → `run_gates` →
+`reduce_run`: the same functions the CLI drives. Evidence is captured for the
+variant **`candidate-a`** — the spine's own treatment variant name, reused
+rather than invented, so the report and the evidence pack agree about what was
+measured.
 
 A hotfix clears the **same** required gate set as any other change:
-`tests`, `secrets_local`, `deps_local`, `evidence_completeness`.
+`tests`, `secrets_local`, `deps_local`, `evidence_completeness`. A test asserts
+`HOTFIX_GATE_IDS == cfg.required_gates()`, so the two cannot drift apart.
 
-**Fail closed.** If those gates did not actually run, `adlc hotfix` exits
-non-zero rather than reporting success, and the stage message says *"required
-gates … were NOT evaluated — this run is not green"*. You can override with
-`--allow-incomplete`, which is deliberately awkward to type.
+**Fail closed.** If those gates did not run, or ran and the aggregate failed,
+the stage status is `fail` and the process exits non-zero. `--allow-incomplete`
+exists but is deliberately awkward to reach for.
 
-**It never writes `run.json`.** Only `adlc reduce` does (`docs/PLAN.md` §4.2).
-`adlc hotfix` writes `runs/<run>/stages/hotfix.<attempt>.json` plus `brief.md`,
-`incident.json` and `taskgraph.json`. Re-running appends `attempt: n+1`; it
-never overwrites a prior attempt.
+**It never writes `run.json`.** Only `reduce_run` does (`docs/PLAN.md` §4.2),
+and `run_hotfix` calls it *after* writing its own stage result so the hotfix
+stage appears in the reduced document. Stage results go through
+`RunDir.write_stage`, so attempts are append-only and digests match the spine's.
 
 ### Step 7 — Human review, ADR, merge
 
@@ -247,20 +285,51 @@ everything else does.
 
 ## 4. Running it
 
+> **Not yet wired into `adlc` itself.** `src/adlc/cli.py` is the spine's file and
+> currently registers `autoresearch` but not `hotfix`. Until the spine adds a
+> `hotfix` command calling `adlc.stages.hotfix:run_hotfix`, invoke the module
+> directly — the behaviour is identical.
+
 ```bash
 # From an incident file
-adlc hotfix --incident incident.json --json
+python -m adlc.stages.hotfix --incident incident.json --json
 
 # Inside GitHub Actions - GITHUB_EVENT_PATH is found automatically
-adlc hotfix --json
+python -m adlc.stages.hotfix --json
 
-# See what would happen without executing anything
-adlc hotfix --incident incident.json --plan-only
+# Create the run and show the graph, but execute nothing
+python -m adlc.stages.hotfix --incident incident.json --plan-only
 ```
 
-Exit codes: `0` = stage ok **and** gates evaluated (or `--plan-only` /
-`--allow-incomplete`); `1` = a step failed, or gates did not run and you did not
-say that was acceptable.
+| Flag | Effect |
+|---|---|
+| `--plan-only` | Creates the run, writes `brief.md` + `taskgraph.json`, runs no build/evidence/gate/reduce |
+| `--allow-unqualified` | Proceed even if the brief scores below `qualify.minScore` |
+| `--allow-incomplete` | Exit 0 even if the required gates were not evaluated |
+| `--runner`, `--max-parallel` | Passed through to `run_build` |
+
+Exit codes: `0` = stage ok **and** the required gates ran and passed (or
+`--plan-only` / `--allow-incomplete`); `1` = a step failed, the brief did not
+qualify, a required gate failed, or the gates did not run.
+
+A real end-to-end run against a demo repo, with the credential-free `fake`
+runner:
+
+```text
+[ok] incident INC-2026-08-19-0007 (sev2) -> brief.md + 3-node hotfix graph;
+     required gates passed: tests, secrets_local, deps_local, evidence_completeness
+       ok  intake: intake completed
+       ok  qualify: score 100/100 (threshold 50)
+       ok  graph: 3 node(s); writeSet from incident
+       ok  build: 0 failed node(s)
+       ok  evidence: 5 artifact(s)
+       ok  gate: aggregate PASS
+       ok  reduce: reduce completed
+```
+
+Remove `commands.test` from `.adlc/config.yaml` and the same run ends
+`aggregate FAIL: tests: NOT_RUN … gate unavailable`, exit `1`. That is the
+fail-closed rule working, not a bug.
 
 ---
 
@@ -340,10 +409,12 @@ executes.
 | Component | Status | Notes |
 |---|---|---|
 | `SreAgentReceiver` payload → `adlc-incident/v1` | **Real** | Unit-tested against fixtures; no network, no credentials |
-| Incident → `brief.md` (day-1 shape) | **Real** | The reuse claim, executable |
-| `adlc hotfix` incident → narrow graph → stage result | **Real** | Append-only attempts; never writes `run.json` |
-| Fail-closed exit when gates did not run | **Real** | Tested |
-| `AppInsightsTelemetry` attribute pass-through & sanitisation | **Real** | The *export* needs a connection string; the logic is tested |
+| Incident → `brief.md` that clears the real qualifier | **Real** | The reuse claim, executable and regression-tested |
+| `run_hotfix` driving `run_intake`/`run_qualify`/`run_build`/`run_evidence`/`run_gates`/`reduce_run` | **Real** | End-to-end green on a demo repo with the `fake` runner |
+| Narrow graph passing the executor's `validate_graph()` | **Real** | Cycles, levels, write-set overlap, protected paths |
+| Append-only attempts; never writes `run.json` | **Real** | Via `RunDir.write_stage`; tested |
+| Fail-closed on unqualified brief / failed or missing gates | **Real** | Tested |
+| `AppInsightsTelemetry` attribute pass-through & sanitisation | **Real** | Handles the spine's flat span shape; signature-compatible with `otel-file` |
 | `AppInsightsTelemetry` actually shipping to Azure | **Example** | Needs `APPLICATIONINSIGHTS_CONNECTION_STRING` + `adlc[azure]` |
 | `FoundryHotfixAgent` definition rendering | **Real** | Emits verified `azure.yaml` fields; YAML-parse tested |
 | Foundry hosted agent actually running | **Example** | Needs a subscription **and** an HTTP protocol shim ADLC does not ship |
@@ -351,6 +422,7 @@ executes.
 | ACA git-mirror sidecar Bicep | **Example** | Never applied by ADLC; **not** Bicep-compiled in CI |
 | SRE Agent creating incidents | **Example** | Portal onboarding at `sre.azure.com`; no CLI/Bicep path |
 | Continuous-eval KQL | **Example** | Query 0 first — the Foundry eval schema is UNVERIFIED |
+| `hotfix` as an `adlc` CLI subcommand | **Not wired** | `cli.py` is spine-owned; use `python -m adlc.stages.hotfix` |
 | Self-evolving-pipeline job | **Not implemented** | Designed above; outside L10's paths |
 
 **With no Azure environment set, all three adapters report `(False, <reason>)`,

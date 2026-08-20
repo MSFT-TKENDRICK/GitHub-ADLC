@@ -8,7 +8,10 @@ locally gets the same result CI does.
 
 from __future__ import annotations
 
+import copy
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,7 +19,7 @@ import pytest
 from adlc.adapters.daytwo.foundry import CREDENTIAL_ENV_GROUPS, PROJECT_ENDPOINT_ENVS
 from adlc.adapters.daytwo.sre_agent import PAYLOAD_ENV_VARS
 from adlc.adapters.telemetry.appinsights import CONNECTION_STRING_ENV
-from adlc.config import Config
+from adlc.config import DEFAULT_CONFIG, Config
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +48,33 @@ def no_azure_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def cfg(tmp_path: Path) -> Config:
     """A Config rooted in a throwaway directory, so nothing touches the repo."""
     return Config(root=tmp_path, profile="minimal", limits={"maxParallel": 4})
+
+
+@pytest.fixture
+def repo_cfg(tmp_path: Path) -> Config:
+    """A Config rooted in a real (empty) git repo.
+
+    ``RunDir.create`` records ``baseSha`` via git, so hotfix tests need an
+    actual repository rather than a bare directory. Kept local and disposable:
+    no network, no credentials, and never the ADLC repo itself.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
+           "GIT_CONFIG_SYSTEM": str(tmp_path / "gitconfig-system")}
+    (root / "README.md").write_text("# fixture repo\n", encoding="utf-8")
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "adlc@example.invalid"],
+        ["config", "user.name", "ADLC Test"],
+        ["add", "-A"],
+        ["commit", "-qm", "initial"],
+    ):
+        subprocess.run(["git", *args], cwd=root, check=True, env=env,
+                       capture_output=True, text=True)
+
+    return Config(root=root, profile="minimal", limits={"maxParallel": 2},
+                  raw=copy.deepcopy(DEFAULT_CONFIG))
 
 
 def load_fixture(name: str) -> dict:

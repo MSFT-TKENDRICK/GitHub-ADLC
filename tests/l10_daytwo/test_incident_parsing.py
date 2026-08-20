@@ -158,9 +158,11 @@ def test_brief_is_day_one_shaped_markdown(receiver: SreAgentReceiver) -> None:
     assert "adlc: brief" in brief
     assert "origin: day-2-incident" in brief
     assert "# Checkout p95 latency breached SLO after deploy" in brief
-    for heading in ("## Problem", "## Impact", "## Affected resource",
-                    "## Observed signals", "## Suspected cause",
-                    "## Deployment context", "## Acceptance criteria", "## References"):
+    # The section vocabulary matches adlc.stages.autoresearch and is what
+    # adlc.stages.intake.qualify_text scores.
+    for heading in ("## Problem", "## Impact", "## Desired outcome", "## Affected resource",
+                    "## Observed signals", "## Suspected cause", "## Deployment context",
+                    "## Scope", "## Acceptance criteria", "## References"):
         assert heading in brief, f"missing {heading}"
 
     # The signal table carries the numbers a reviewer needs.
@@ -173,11 +175,32 @@ def test_brief_is_day_one_shaped_markdown(receiver: SreAgentReceiver) -> None:
     assert "standard day-1 intake path" in brief
 
 
+def test_desired_outcome_names_the_threshold_to_restore(receiver: SreAgentReceiver) -> None:
+    brief = receiver.to_brief(receiver.parse(load_fixture("repository_dispatch.json")))
+    outcome = brief.split("## Desired outcome", 1)[1].split("##", 1)[0]
+    assert "800 ms" in outcome
+    assert "p95 latency" in outcome
+
+
+def test_scope_bounds_the_work_and_refuses_to_lower_the_bar(
+    receiver: SreAgentReceiver,
+) -> None:
+    scope = receiver.to_brief(receiver.parse({"title": "x"})).split("## Scope", 1)[1]
+    assert "Out of scope" in scope
+    assert "Urgency does not lower the bar" in scope
+
+
 def test_brief_survives_an_almost_empty_incident(receiver: SreAgentReceiver) -> None:
+    """An empty payload must still yield a brief that qualifies, and says why it is thin."""
     brief = receiver.to_brief(receiver.parse({}))
     assert "# Untitled incident" in brief
-    assert "No summary supplied" in brief
-    assert "## Acceptance criteria" in brief
+    assert "carried no summary" in brief
+    assert "not quantified" in brief
+    # The sections the spine's qualifier scores must always be present.
+    for heading in ("## Problem", "## Desired outcome", "## Scope", "## Acceptance criteria"):
+        assert heading in brief, f"missing {heading}"
+    # And it must be honest that there is no measurable target rather than invent one.
+    assert "**None supplied.**" in brief
 
 
 def test_markdown_table_cells_are_escaped(receiver: SreAgentReceiver) -> None:
