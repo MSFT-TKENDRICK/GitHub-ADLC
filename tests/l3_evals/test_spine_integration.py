@@ -75,6 +75,7 @@ def test_spine_binds_the_runner_to_the_run_directory(
 def test_run_eval_stage_end_to_end_with_assert(
     cfg: Config,
     spine_run: RunDir,
+    registered_adapters: dict[str, type],
     fixture_rows: dict[str, list[str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -109,6 +110,7 @@ def test_run_eval_stage_end_to_end_with_assert(
 def test_gate_reads_what_the_eval_stage_wrote(
     cfg: Config,
     spine_run: RunDir,
+    registered_adapters: dict[str, type],
     fixture_rows: dict[str, list[str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -131,7 +133,7 @@ def test_gate_reads_what_the_eval_stage_wrote(
 
 
 def test_required_evals_gate_fails_the_aggregate_when_no_score_exists(
-    cfg: Config, spine_run: RunDir
+    cfg: Config, spine_run: RunDir, registered_adapters: dict[str, type]
 ) -> None:
     cfg.profile = "full"          # the `full` profile marks `evals` required
     run_gates(cfg, spine_run, ["evals"])
@@ -176,8 +178,14 @@ def test_is_unevaluated_spans_both_phrasings(rationale: str, expected: bool) -> 
     assert is_unevaluated(rationale) is expected
 
 
-def test_l3_adapters_do_not_displace_the_spine_default(cfg: Config) -> None:
-    """The whole conformance guarantee, in one assertion."""
+def test_l3_adapters_do_not_displace_the_spine_default(
+    cfg: Config, registered_adapters: dict[str, type]
+) -> None:
+    """The whole conformance guarantee, in one assertion.
+
+    ``evals`` is not in ``EXPLICIT_ONLY_KINDS``, so it still auto-escalates: a *detected*
+    assert-ai or promptfoo would be chosen over the default. Credential-free, none is.
+    """
     from adlc.config import select_adapter
 
     assert isinstance(select_adapter(cfg, "evals"), DeterministicRubricRunner)

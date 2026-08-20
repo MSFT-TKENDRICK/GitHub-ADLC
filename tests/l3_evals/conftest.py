@@ -16,7 +16,7 @@ import pytest
 from adlc.adapters.evals import assert_ as assert_mod
 from adlc.adapters.evals.azure import AZURE_CREDENTIAL_GROUPS
 from adlc.adapters.evals.promptfoo import PROMPTFOO_CREDENTIAL_GROUPS
-from adlc.config import Config
+from adlc.config import Config, load_adapters
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -84,6 +84,30 @@ def cfg(tmp_path: Path) -> Config:
     """A Config rooted at an empty temp repo, so run dirs land under tmp_path."""
     (tmp_path / ".adlc").mkdir(parents=True, exist_ok=True)
     return Config.load(tmp_path)
+
+
+@pytest.fixture
+def registered_adapters() -> dict[str, type]:
+    """Entry-point registry, or a clear skip when the package metadata is missing.
+
+    Adapter discovery goes through ``importlib.metadata``, which needs an ``adlc``
+    dist-info on ``sys.path`` — importable source alone is not enough. On a machine where
+    several worktrees share one interpreter that metadata can be uninstalled out from
+    under us by an unrelated install, which would otherwise surface here as a mysterious
+    ``LookupError`` and read as *this* workstream being broken.
+
+    Skipping is not passing: these tests assert something we genuinely cannot observe in
+    that environment, and the message says exactly how to fix it.
+    """
+    adapters = load_adapters("evals")
+    if not adapters:
+        pytest.skip(
+            "no 'adlc.evals' entry points registered — the adlc dist-info is missing from "
+            "this interpreter. Install into an isolated env before trusting these results: "
+            "python -m venv --system-site-packages .venv; "
+            ".venv/Scripts/python -m pip install -e . --no-deps"
+        )
+    return adapters
 
 
 @pytest.fixture

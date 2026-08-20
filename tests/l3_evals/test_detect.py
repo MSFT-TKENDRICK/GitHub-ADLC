@@ -119,7 +119,9 @@ def test_azure_detect_requires_sdk_credentials_and_deployment(
 
 
 @pytest.mark.usefixtures("no_tools", "no_subprocess")
-def test_registered_eval_adapters_are_all_unavailable_credential_free(cfg: Config) -> None:
+def test_registered_eval_adapters_are_all_unavailable_credential_free(
+    cfg: Config, registered_adapters: dict[str, type]
+) -> None:
     """The conformance property: nothing L3 hijacks the eval seam without credentials."""
     detections = detect_all(cfg, "evals")
     for name in RUNNER_IDS:
