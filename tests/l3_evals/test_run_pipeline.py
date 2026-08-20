@@ -109,7 +109,7 @@ def test_assert_run_writes_artifacts_and_normalises(
     gate = EvalsGate().evaluate(run_doc, assert_cfg)
     assert gate["status"] == "fail"
     assert gate["observed"]["unevaluatedCriteria"] == ["R-a11y-01"]
-    assert gate["evidence"] == ["evals/assert-score.json"]
+    assert gate["evidence"] == ["gates/evals.json", "evals/assert-score.json"]
 
 
 def test_assert_run_refuses_when_nothing_was_judged(

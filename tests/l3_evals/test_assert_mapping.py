@@ -14,6 +14,7 @@ import pytest
 
 from adlc.adapters.evals.assert_ import (
     NOT_EVALUATED,
+    REQUIRES_JUDGE,
     CriterionSpec,
     build_rubric_score,
     coerce_score,
@@ -117,6 +118,9 @@ def test_unevaluated_criterion_fails_closed_and_says_so(score: dict[str, Any]) -
     assert a11y["passed"] is False
     assert a11y["rationale"].startswith(NOT_EVALUATED)
     assert "R-a11y-01" in a11y["rationale"]
+    # Carries the spine's marker, so `adlc.stages.evals` counts it in data.unevaluated
+    # and `adlc.stages.autoresearch` can aggregate it across runs.
+    assert REQUIRES_JUDGE in a11y["rationale"]
 
 
 def test_every_criterion_cites_the_raw_jsonl(score: dict[str, Any]) -> None:

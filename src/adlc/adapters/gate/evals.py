@@ -23,18 +23,19 @@ import json
 from pathlib import Path
 from typing import Any
 
-from adlc.adapters.evals.assert_ import NOT_EVALUATED
+from adlc.adapters.evals.assert_ import NOT_EVALUATED, REQUIRES_JUDGE
 from adlc.config import Config
 from adlc.ports import GateResult, RubricScore, Run
 
-__all__ = ["EvalsGate", "find_rubric_score"]
+__all__ = ["EvalsGate", "find_rubric_score", "is_unevaluated"]
 
-#: Score filenames we look for under ``runs/<run>/evals/``, in priority order. The first
-#: entries are what the spine writes; the ``*-score.json`` entries are the side artifacts
-#: the L3 backends write so the gate still works when a backend is driven directly.
+#: Score filenames we look for under ``runs/<run>/evals/``, in priority order.
+#: ``rubric-score.json`` is the canonical artifact written by ``adlc.stages.evals`` and
+#: read by ``adlc.stages.report``; the ``*-score.json`` entries are the side artifacts the
+#: L3 backends write so the gate still works when a backend is driven directly.
 SCORE_FILENAMES: tuple[str, ...] = (
-    "score.json",
     "rubric-score.json",
+    "score.json",
     "rubric_score.json",
     "evals.json",
     "result.json",
@@ -106,6 +107,32 @@ def find_rubric_score(run: Run, cfg: Config) -> tuple[RubricScore, str] | None:
     return _from_files(cfg.run_dir(run_id) / "evals")
 
 
+def is_unevaluated(rationale: str) -> bool:
+    """Was this criterion left un-judged, whichever runner produced it?
+
+    The spine's deterministic runner says ``"requires an LLM judge - not evaluated by the
+    deterministic runner"``; the L3 backends say ``"not evaluated by <backend> - requires
+    an LLM judge: …"``. Both must be counted, or the gate would quietly under-report how
+    much of the rubric nobody actually looked at.
+    """
+    text = str(rationale or "")
+    return text.startswith(NOT_EVALUATED) or REQUIRES_JUDGE in text
+
+
+def _stage_runner(run: Run) -> str | None:
+    """Which runner produced the score, per the latest ``eval`` stage result."""
+    evals = [
+        s
+        for s in (run.get("stages") or [])
+        if isinstance(s, dict) and s.get("stage") == "eval"
+    ]
+    for stage in sorted(evals, key=lambda s: int(s.get("attempt") or 0), reverse=True):
+        data = stage.get("data")
+        if isinstance(data, dict) and isinstance(data.get("runner"), str):
+            return data["runner"]
+    return None
+
+
 class EvalsGate:
     """Pass iff the rubric's weighted ``overall`` meets its threshold."""
 
@@ -137,14 +164,14 @@ class EvalsGate:
                 "required": required,
                 "status": "not_run",
                 "severity": "high" if required else "medium",
-                "observed": {"score": None},
+                "observed": {"score": None, "runner": _stage_runner(run)},
                 "expected": {"overall": f">= {configured_threshold}"},
                 "message": (
-                    "no RubricScore found for this run — expected an eval stage result or a "
-                    f"score document under runs/{run.get('runId', '?')}/evals/. "
+                    "no RubricScore found for this run — expected an eval stage result or "
+                    f"evals/rubric-score.json under runs/{run.get('runId', '?')}/. "
                     "Run `adlc eval <run>` first."
                 ),
-                "evidence": [],
+                "evidence": [f"gates/{self.id}.json"],
             }
 
         score, source = found
@@ -167,12 +194,12 @@ class EvalsGate:
             for c in criteria
         ]
         unevaluated = [
-            str(c.get("id"))
-            for c in criteria
-            if str(c.get("rationale") or "").startswith(NOT_EVALUATED)
+            str(c.get("id")) for c in criteria if is_unevaluated(str(c.get("rationale") or ""))
         ]
         failed = [str(c.get("id")) for c in criteria if not c.get("passed")]
         passed = overall >= threshold
+        runner = _stage_runner(run)
+        via = f" via '{runner}'" if runner else ""
 
         if not criteria:
             message = "the RubricScore has no criteria — nothing was actually evaluated"
@@ -180,13 +207,13 @@ class EvalsGate:
             passed = False
         elif passed:
             message = (
-                f"rubric overall {overall:.2f} >= threshold {threshold:.2f} "
+                f"rubric overall {overall:.2f} >= threshold {threshold:.2f}{via} "
                 f"({len(criteria) - len(failed)}/{len(criteria)} criteria passed)"
             )
             status = "pass"
         else:
             message = (
-                f"rubric overall {overall:.2f} < threshold {threshold:.2f}; "
+                f"rubric overall {overall:.2f} < threshold {threshold:.2f}{via}; "
                 f"failing criteria: {', '.join(failed) or 'none'}"
             )
             status = "fail"
@@ -206,6 +233,7 @@ class EvalsGate:
                 "threshold": threshold,
                 "passed": passed,
                 "source": source,
+                "runner": runner,
                 "criteriaCount": len(criteria),
                 "failedCriteria": failed,
                 "unevaluatedCriteria": unevaluated,
@@ -213,5 +241,5 @@ class EvalsGate:
             },
             "expected": {"overall": f">= {threshold}", "unevaluatedCriteria": []},
             "message": message,
-            "evidence": [source],
+            "evidence": [f"gates/{self.id}.json", source],
         }

@@ -59,6 +59,7 @@ from adlc.ports import Rubric, RubricCriterion, RubricScore, Run
 
 __all__ = [
     "NOT_EVALUATED",
+    "REQUIRES_JUDGE",
     "AssertEvalRunner",
     "CriterionOutcome",
     "CriterionSpec",
@@ -85,6 +86,14 @@ __all__ = [
 #: evaluate. Such a criterion scores 0.0 and never passes -- we fail closed rather than
 #: claim a pass we did not earn. :class:`adlc.adapters.gate.evals.EvalsGate` counts these.
 NOT_EVALUATED = "not evaluated"
+
+#: The spine's marker for "this criterion still needs an LLM judgement". The
+#: deterministic runner writes it verbatim, ``adlc.stages.evals.run_eval`` greps for it to
+#: populate ``stages/eval.<n>.json`` ``data.unevaluated``, and
+#: ``adlc.stages.autoresearch`` aggregates *that* across runs to drive the outer loop. Any
+#: criterion we could not judge carries it too, so an ASSERT/promptfoo gap is visible to
+#: exactly the same machinery as a deterministic-runner gap.
+REQUIRES_JUDGE = "requires an LLM judge"
 
 #: Credential groups that indicate a usable LLM judge, in general. Any *one* complete
 #: group is enough. Checked by name only -- never read for their value, never transmitted.
@@ -281,7 +290,9 @@ def build_rubric_score(
 
     Every criterion in the rubric appears in the output. A criterion with no outcome -- or
     an outcome the backend could not score -- is emitted as ``score: 0.0, passed: False``
-    with a :data:`NOT_EVALUATED` rationale. We never invent a pass.
+    with a :data:`NOT_EVALUATED` rationale that also carries the spine's
+    :data:`REQUIRES_JUDGE` marker, so ``adlc.stages.evals`` counts it exactly as it counts
+    the deterministic runner's un-judgeable criteria. We never invent a pass.
     """
     specs = iter_criteria(rubric)
     criteria: list[RubricCriterion] = []
@@ -297,7 +308,7 @@ def build_rubric_score(
                 else f"no {backend} record matched criterion '{spec.id}'"
             )
             score = 0.0
-            rationale = f"{NOT_EVALUATED} by {backend}: {detail}"
+            rationale = f"{NOT_EVALUATED} by {backend} - {REQUIRES_JUDGE}: {detail}"
             evidence = list(outcome.evidence) if outcome else []
         else:
             score = min(max(float(outcome.score), 0.0), 1.0)
@@ -593,11 +604,25 @@ class AssertEvalRunner:
     name = "assert-ai"
     kind = "evals"
 
-    def __init__(self, cfg: Config | None = None) -> None:
+    def __init__(self, cfg: Config | None = None, run_dir: Path | None = None) -> None:
         # Adapters are constructed as ``cls()`` by ``adlc.config.select_adapter``; the
-        # optional argument exists so tests (and callers that already hold a Config) can
-        # avoid a second filesystem probe.
+        # optional arguments exist so tests (and callers that already hold a Config) can
+        # skip the filesystem probe.
         self._cfg = cfg
+        self._run_dir = run_dir
+
+    def bind(self, cfg: Config, run_dir: Path) -> None:
+        """Called by ``adlc.stages.evals.run_eval`` before :meth:`run`.
+
+        Binding is authoritative: it removes any dependence on the process cwd for
+        locating the run directory.
+        """
+        self._cfg = cfg
+        self._run_dir = run_dir
+
+    def _resolve(self, run: Run) -> tuple[Config, Path]:
+        cfg = self._cfg or Config.load()
+        return cfg, self._run_dir or run_dir_for(run, cfg)
 
     # -- detection --------------------------------------------------------
     @staticmethod
@@ -623,7 +648,7 @@ class AssertEvalRunner:
 
     # -- execution --------------------------------------------------------
     def run(self, run: Run, rubric: Rubric) -> RubricScore:
-        cfg = self._cfg or Config.load()
+        cfg, rdir = self._resolve(run)
         available, reason = self.detect(cfg)
         if not available:
             raise EvalBackendUnavailable(reason)
@@ -633,7 +658,6 @@ class AssertEvalRunner:
         if command is None:  # pragma: no cover - detect() already guarantees this
             raise EvalBackendUnavailable("assert-ai disappeared between detect() and run()")
 
-        rdir = run_dir_for(run, cfg)
         context = spec_context(rdir)
         specs = iter_criteria(rubric)
         if not specs:

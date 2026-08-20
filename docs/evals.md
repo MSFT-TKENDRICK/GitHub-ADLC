@@ -22,6 +22,47 @@ RubricScore = {
 **That normalisation is the whole point.** The `evals` gate and `report.html` never learn
 which backend ran — they only ever see a `RubricScore`.
 
+## How a runner is invoked
+
+`adlc.stages.evals.run_eval` owns the seam:
+
+```python
+runner = select_adapter(cfg, "evals", runner_name)
+if hasattr(runner, "bind"):
+    runner.bind(cfg, rd.path)          # ← implement this
+score = runner.run(load_run(rd), rubric)
+write_json(rd.evals_dir / "rubric-score.json", score)
+```
+
+Three consequences every backend must respect:
+
+- **Implement `bind(cfg, run_dir)`.** It is how you learn where the run lives. All three
+  L3 runners store it and prefer it over any cwd-derived guess, so they behave identically
+  whether the CLI, a test, or a GitHub Actions job with a different working directory is
+  driving. (`run()` still falls back to `Config.load()` + `cfg.run_dir(runId)` when nobody
+  bound it.)
+- **`evals/rubric-score.json` is the canonical artifact.** The *stage* writes it from your
+  return value — a runner must not write it itself. `adlc.stages.report` reads exactly
+  that path, and so does the gate. The `assert-score.json` / `promptfoo-score.json` /
+  `azure-score.json` side artifacts the L3 backends write are a convenience for driving a
+  backend directly; they are never the source of truth.
+- **Never write `run.json`.** Only `adlc reduce` does. Stages write immutable
+  `stages/<stage>.<attempt>.json`; you write nothing but your own working files.
+
+### The `requires an LLM judge` marker
+
+`run_eval` builds `stages/eval.<n>.json` → `data.unevaluated` by grepping criterion
+rationales for the literal substring **`requires an LLM judge`**, and
+`adlc.stages.autoresearch` aggregates *that* across runs to decide what the outer loop
+should investigate next.
+
+The spine's deterministic runner emits
+`"requires an LLM judge - not evaluated by the deterministic runner"`. Every L3 backend
+emits `"not evaluated by <backend> - requires an LLM judge: <specific detail>"` for a
+criterion it could not judge, so an ASSERT or promptfoo gap is visible to exactly the same
+machinery as a deterministic-runner gap. If you write another backend, keep the marker —
+otherwise your unevaluated criteria become invisible to the feedback loop.
+
 ---
 
 ## The ladder
@@ -35,7 +76,7 @@ flowchart LR
 
 | Rung | Adapter | Entry point | Needs | Selected when |
 |---|---|---|---|---|
-| 0 | `DeterministicRubricRunner` | `deterministic` | nothing | always available; the documented fallback |
+| 0 | `DeterministicRubricRunner` | `deterministic` | nothing | always available; the spine default. Checks `file_exists`, `command_exit_zero`, `metric_within_budget`, `regex_in_file`; scores `kind: llm-rubric` criteria 0.0 with `requires an LLM judge` |
 | 1 | `AssertEvalRunner` | `assert-ai` | `assert-ai` CLI + judge key + a target | ASSERT is installed and configured |
 | 2 | `PromptfooEvalRunner` | `promptfoo` | `promptfoo` on PATH + judge key | promptfoo is installed and keyed |
 | 3 | `AzureEvalRunner` | `azure` | `azure-ai-evaluation` + Azure OpenAI creds | the SDK and a deployment are configured |
@@ -83,14 +124,26 @@ These are binding for every backend (`CONTRIBUTING.md` §6):
 the `full` profile promotes it to required) reads the `RubricScore` and passes iff
 `overall >= threshold`. It looks, in order:
 
-1. the latest successful `eval` stage result in `run.json` (`stages[].data.score`);
-2. `runs/<run>/evals/score.json`, then `rubric-score.json`, `evals.json`, `result.json`,
-   then the per-backend side artifacts `assert-score.json`, `promptfoo-score.json`,
-   `azure-score.json`, then any other RubricScore-shaped `*.json` in that directory.
+1. the latest successful `eval` stage result in `run.json` (`stages[].data`, which carries
+   `overall` / `threshold` / `passed` / `criteria` / `runner`);
+2. `runs/<run>/evals/rubric-score.json` — the canonical artifact — then `score.json`,
+   `rubric_score.json`, `evals.json`, `result.json`, then the per-backend side artifacts
+   `assert-score.json`, `promptfoo-score.json`, `azure-score.json`, then any other
+   RubricScore-shaped `*.json` in that directory.
+
+In practice the file path is the one that fires: gates run before `adlc reduce`, so
+`load_run(rd)` usually returns `seed.json` with an empty `stages[]`.
 
 Nothing found ⇒ `not_run`. A score with zero criteria ⇒ `not_run` (nothing was actually
-evaluated). `observed` carries the overall, the threshold, the source path, the failing
-criterion ids, the unevaluated criterion ids, and the full per-criterion breakdown.
+evaluated). `observed` carries the overall, the threshold, the source path, the runner
+name, the failing criterion ids, the unevaluated criterion ids, and the full per-criterion
+breakdown. `evidence` is `["gates/evals.json", "<source>"]`, matching the spine's gate
+convention.
+
+Unevaluated criteria are recognised through **either** phrasing — the deterministic
+runner's `requires an LLM judge …` or an L3 backend's `not evaluated by … ` prefix — so
+the count in `observed.unevaluatedCriteria` is accurate no matter which runner produced
+the score.
 
 ---
 
@@ -359,8 +412,9 @@ never raises on a machine with no Azure at all.
 ## Writing another backend
 
 Implement `EvalRunner` from `adlc.ports` and register it under the `adlc.evals` entry
-point group. Reuse the shared normalisation core, which lives in
-`adlc/adapters/evals/assert_.py` because it is where the primary backend needs it:
+point group. Define `bind(cfg, run_dir)` so the stage can tell you where the run lives.
+Reuse the shared normalisation core, which lives in `adlc/adapters/evals/assert_.py`
+because it is where the primary backend needs it:
 
 ```python
 from adlc.adapters.evals.assert_ import (
@@ -375,8 +429,9 @@ score = build_rubric_score(
 ```
 
 Anything you leave out of `outcomes` — or leave with `score=None` — comes back as an
-unevaluated, failing criterion. That default is deliberate: it is impossible to
-accidentally ship a pass you did not earn.
+unevaluated, failing criterion carrying the `requires an LLM judge` marker. That default
+is deliberate: it is impossible to accidentally ship a pass you did not earn, and
+impossible to hide a gap from the autoresearch loop.
 
 ## Tests
 

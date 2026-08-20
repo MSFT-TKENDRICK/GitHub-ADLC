@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from adlc.adapters.evals.assert_ import (
@@ -73,8 +74,14 @@ class AzureEvalRunner:
     name = "azure"
     kind = "evals"
 
-    def __init__(self, cfg: Config | None = None) -> None:
+    def __init__(self, cfg: Config | None = None, run_dir: Path | None = None) -> None:
         self._cfg = cfg
+        self._run_dir = run_dir
+
+    def bind(self, cfg: Config, run_dir: Path) -> None:
+        """Called by ``adlc.stages.evals.run_eval`` before :meth:`run`."""
+        self._cfg = cfg
+        self._run_dir = run_dir
 
     # -- detection --------------------------------------------------------
     @staticmethod
@@ -114,7 +121,7 @@ class AzureEvalRunner:
         if not specs:
             raise EvalBackendError("rubric declares no criteria; nothing for Azure to judge")
 
-        rdir = run_dir_for(run, cfg)
+        rdir = self._run_dir or run_dir_for(run, cfg)
         context = spec_context(rdir)
         query = str(settings.get("query") or "Does the delivered change satisfy the specification?")
         response = str(settings.get("response") or context)

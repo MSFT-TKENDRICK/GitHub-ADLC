@@ -105,8 +105,14 @@ class PromptfooEvalRunner:
     name = "promptfoo"
     kind = "evals"
 
-    def __init__(self, cfg: Config | None = None) -> None:
+    def __init__(self, cfg: Config | None = None, run_dir: Path | None = None) -> None:
         self._cfg = cfg
+        self._run_dir = run_dir
+
+    def bind(self, cfg: Config, run_dir: Path) -> None:
+        """Called by ``adlc.stages.evals.run_eval`` before :meth:`run`."""
+        self._cfg = cfg
+        self._run_dir = run_dir
 
     # -- detection --------------------------------------------------------
     @staticmethod
@@ -136,7 +142,7 @@ class PromptfooEvalRunner:
         if command is None:  # pragma: no cover - detect() already guarantees this
             raise EvalBackendUnavailable("promptfoo disappeared between detect() and run()")
 
-        rdir = run_dir_for(run, cfg)
+        rdir = self._run_dir or run_dir_for(run, cfg)
         evals_dir = rdir / "evals"
         workdir = evals_dir / "promptfoo"
         workdir.mkdir(parents=True, exist_ok=True)

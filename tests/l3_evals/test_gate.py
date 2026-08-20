@@ -59,7 +59,7 @@ PARTLY_UNEVALUATED: dict[str, Any] = {
             "score": 0.0,
             "weight": 1.0,
             "passed": False,
-            "rationale": f"{NOT_EVALUATED} by ASSERT: no ASSERT record matched criterion",
+            "rationale": f"{NOT_EVALUATED} by ASSERT - requires an LLM judge: no record",
             "evidence": [],
         },
     ],
@@ -93,7 +93,7 @@ def test_missing_score_is_not_run_not_pass(
     assert result["status"] == "not_run"
     assert result["observed"]["score"] is None
     assert "adlc eval" in result["message"]
-    assert result["evidence"] == []
+    assert result["evidence"] == ["gates/evals.json"]
 
 
 def test_required_missing_score_is_high_severity(
@@ -115,7 +115,7 @@ def test_pass_when_overall_meets_threshold(
     assert result["observed"]["overall"] == 0.86
     assert result["observed"]["threshold"] == 0.7
     assert result["observed"]["failedCriteria"] == ["R-perf-01"]
-    assert result["evidence"] == ["evals/score.json"]
+    assert result["evidence"] == ["gates/evals.json", "evals/score.json"]
     assert len(result["observed"]["criteria"]) == 2
 
 
@@ -161,7 +161,18 @@ def test_backend_specific_score_files_are_found(
     write_score(run_dir, PASSING, name="promptfoo-score.json")
     result = EvalsGate().evaluate(run_doc, cfg)
     assert result["status"] == "pass"
-    assert result["evidence"] == ["evals/promptfoo-score.json"]
+    assert result["evidence"] == ["gates/evals.json", "evals/promptfoo-score.json"]
+
+
+def test_canonical_rubric_score_wins_over_backend_side_artifacts(
+    cfg: Config, run_dir: Path, run_doc: dict[str, Any]
+) -> None:
+    """`adlc.stages.evals` writes evals/rubric-score.json — that is the source of truth."""
+    write_score(run_dir, FAILING, name="assert-score.json")
+    write_score(run_dir, PASSING, name="rubric-score.json")
+    result = EvalsGate().evaluate(run_doc, cfg)
+    assert result["status"] == "pass"
+    assert result["observed"]["source"] == "evals/rubric-score.json"
 
 
 def test_stage_results_win_over_loose_files(
