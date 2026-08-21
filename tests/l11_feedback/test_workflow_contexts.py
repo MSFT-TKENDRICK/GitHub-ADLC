@@ -37,17 +37,50 @@ JOB_ENV_CONTEXTS = frozenset(
 )
 
 _EXPRESSION_RE = re.compile(r"\$\{\{(.+?)\}\}", re.DOTALL)
-# The leading identifier of each dotted reference inside an expression. Function
-# calls (`always()`, `format(...)`) and literals are filtered out by requiring the
-# name to not be immediately followed by `(`.
-_CONTEXT_RE = re.compile(r"(?<![\w.'\"])([a-zA-Z_][a-zA-Z0-9_-]*)(?![\w(])")
+# GitHub expression string literals are single-quoted ('' escapes a quote).
+# Their contents are data, not references, so they are removed before scanning.
+_STRING_LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
+# The head of a dotted reference: an identifier not preceded by a name character,
+# a dot or a hyphen (so `run-id` in `steps.x.outputs.run-id` is not a head), and
+# not immediately followed by `(` (so `always()` and `format(...)` are excluded).
+_CONTEXT_RE = re.compile(r"(?<![\w.\-])([a-zA-Z_][a-zA-Z0-9_-]*)(?!\s*\()")
 
 # Operators and literals that appear bare inside expressions and are not contexts.
 _NOT_CONTEXTS = frozenset({"true", "false", "null", "and", "or", "not"})
 
+# Every context GitHub defines. A leading name outside this set is an "undefined
+# variable" and, like an illegal context, kills the whole file at compile time.
+ALL_CONTEXTS = frozenset(
+    {
+        "env",
+        "github",
+        "inputs",
+        "job",
+        "matrix",
+        "needs",
+        "runner",
+        "secrets",
+        "steps",
+        "strategy",
+        "vars",
+        # Only legal in `on.workflow_call.outputs.<name>.value`, but this check is
+        # about undefined names rather than placement, so it is allowed globally.
+        "jobs",
+    }
+)
+
 
 def _workflows() -> list[Path]:
     return sorted(p for p in WORKFLOW_DIR.glob("*.yml") if p.is_file())
+
+
+def _handwritten_workflows() -> list[Path]:
+    """Workflows authored in this repo, excluding gh-aw `.lock.yml` output.
+
+    Lock files are machine-generated from the sibling `.md` recipes and are
+    regenerated wholesale, so a finding in one is not actionable here.
+    """
+    return [p for p in _workflows() if not p.name.endswith(".lock.yml")]
 
 
 def _contexts_in(value: object) -> set[str]:
@@ -56,6 +89,7 @@ def _contexts_in(value: object) -> set[str]:
         return set()
     names: set[str] = set()
     for expression in _EXPRESSION_RE.findall(value):
+        expression = _STRING_LITERAL_RE.sub("''", expression)
         for name in _CONTEXT_RE.findall(expression):
             if name not in _NOT_CONTEXTS:
                 names.add(name)
@@ -67,6 +101,46 @@ def _env_block(owner: object) -> dict[str, object]:
         return {}
     env = owner.get("env")
     return env if isinstance(env, dict) else {}
+
+
+def _walk_strings(node: object, path: str = "") -> list[tuple[str, str]]:
+    """Every string leaf in the document, with a dotted path for the message."""
+    if isinstance(node, str):
+        return [(path, node)]
+    if isinstance(node, dict):
+        found: list[tuple[str, str]] = []
+        for key, value in node.items():
+            found.extend(_walk_strings(value, f"{path}.{key}" if path else str(key)))
+        return found
+    if isinstance(node, list):
+        found = []
+        for index, value in enumerate(node):
+            found.extend(_walk_strings(value, f"{path}[{index}]"))
+        return found
+    return []
+
+
+@pytest.mark.parametrize("path", _handwritten_workflows(), ids=lambda p: p.name)
+def test_every_expression_names_a_real_context(path: Path) -> None:
+    """A `${{ }}` inside a `script:` block is expanded, comment syntax or not.
+
+    `adlc-feedback.yml` carried an *illustrative* `${{ A && B || C }}` inside a
+    JavaScript `//` comment in an `actions/github-script` block, explaining why
+    that idiom was being avoided. GitHub expands expressions across the whole
+    scalar before Node ever parses it, so `A`, `B` and `C` were undefined
+    variables and the file did not compile. A comment is not a hiding place.
+    """
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    violations = []
+    for where, text in _walk_strings(document):
+        illegal = _contexts_in(text) - ALL_CONTEXTS
+        if illegal:
+            violations.append(f"{where} references undefined {sorted(illegal)}")
+
+    assert not violations, (
+        f"{path.name} would be rejected by GitHub at compile time:\n  "
+        + "\n  ".join(violations)
+    )
 
 
 @pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)

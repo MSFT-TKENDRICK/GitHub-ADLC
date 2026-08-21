@@ -146,10 +146,18 @@ jobs:
               // the submitter's code -- and `pip install .` downstream would run
               // its build backend with a live token. Pin to the base commit.
               //
-              // Computed here rather than as a `${{ A && B || C }}` in the
-              // checkout step because that idiom degrades silently: any falsy B
-              // falls through to C, and C is exactly the merge ref we are
-              // excluding. Here an empty value can stop the run instead.
+              // Computed here rather than with an inline `A && B || C` ternary
+              // idiom in the checkout step, because that idiom degrades
+              // silently: any falsy B falls through to C, and C is exactly the
+              // merge ref we are excluding. Here an empty value can stop the
+              // run instead.
+              //
+              // (That expression is deliberately not written out in full
+              // anywhere inside this `script:` block. GitHub expands every
+              // dollar-brace-brace expression in the block before Node ever
+              // sees it, so a JavaScript comment is not a hiding place -- an
+              // illustrative one here referred to undefined variables and made
+              // GitHub reject the entire workflow file at compile time.)
               checkoutRef = pr?.base?.sha;
               if (authorized && !checkoutRef) {
                 core.setFailed(
