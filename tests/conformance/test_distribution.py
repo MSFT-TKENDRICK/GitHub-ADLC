@@ -7,8 +7,14 @@ resumes from the last completed level barrier instead of redoing merged work.
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
+
+import pytest
 
 from adlc.config import Config
 from adlc.reduce import aggregate_passed, load_run
@@ -19,6 +25,8 @@ from adlc.stages.graph import run_graph
 from adlc.stages.intake import run_intake, run_qualify
 from adlc.stages.spec import run_spec
 from tests.conformance.conftest import bind_env
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # -- criterion 11: a clean repo can adopt the framework ---------------------
 
@@ -252,3 +260,124 @@ def test_approval_records_an_adr_bound_to_the_review_sha(cfg: Config, brief_file
     assert "status: accepted" in text
     assert f"adlc-review-sha: {head}" in text
     assert "## Decision Outcome" in text  # MADR v4 structure
+
+
+# -- the wheel must carry the schemas it validates against ------------------
+#
+# `schemas/` lives at the repo root (it is a published contract, read directly
+# by consumers and by feedback GUIs), but hatchling only sweeps `src/adlc`. The
+# result was a wheel containing zero .schema.json files: `schema_dir()` raised
+# FileNotFoundError in every installed environment -- which is exactly where
+# both CI workflows run, since each does `pip install .`. Schema validation is
+# the input boundary for untrusted human-feedback packs, so it was missing
+# precisely where it carries the most weight.
+#
+# These tests build a real wheel on purpose. Asserting on pyproject.toml would
+# not have caught the original bug: that config was perfectly valid, it just
+# did not include the files.
+
+
+@pytest.fixture(scope="module")
+def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build a real wheel from this checkout, once per module."""
+    pytest.importorskip("build", reason="needs the `build` frontend")
+    pytest.importorskip("hatchling", reason="needs hatchling to build without isolation")
+
+    outdir = tmp_path_factory.mktemp("wheel")
+    proc = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation",
+         "--outdir", str(outdir), str(REPO_ROOT)],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, f"wheel build failed:{chr(10)}{proc.stdout}{chr(10)}{proc.stderr}"
+
+    wheels = list(outdir.glob("*.whl"))
+    assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+    return wheels[0]
+
+
+def test_wheel_ships_every_schema(built_wheel: Path) -> None:
+    """Every schema in the checkout must be inside the wheel."""
+    source_schemas = {p.name for p in (REPO_ROOT / "schemas").glob("*.schema.json")}
+    assert source_schemas, "no schemas in the checkout -- this test is not exercising anything"
+
+    with zipfile.ZipFile(built_wheel) as zf:
+        names = set(zf.namelist())
+
+    packaged = {
+        name.rsplit("/", 1)[-1]
+        for name in names
+        if name.startswith("adlc/_schemas/") and name.endswith(".schema.json")
+    }
+    missing = source_schemas - packaged
+    assert not missing, f"schemas absent from the wheel: {sorted(missing)}"
+
+
+def test_wheel_schema_location_matches_the_lookup_path(built_wheel: Path) -> None:
+    """The packaging target and the runtime candidate list must agree.
+
+    These are two independent declarations of one fact -- one in pyproject.toml,
+    one in adlc/schemas.py. If they drift the fix goes inert and every other
+    test still passes, because the repo-checkout candidate always resolves
+    during development.
+    """
+    from adlc.schemas import SCHEMA_DIR_CANDIDATES
+
+    with zipfile.ZipFile(built_wheel) as zf:
+        schema_entries = [n for n in zf.namelist() if n.endswith(".schema.json")]
+    assert schema_entries, "the wheel contains no schemas at all"
+
+    packaged_dirs = {n.split("/")[1] for n in schema_entries}
+    assert len(packaged_dirs) == 1, f"schemas scattered across {packaged_dirs}"
+    packaged_dir = packaged_dirs.pop()
+
+    in_package = {c.name for c in SCHEMA_DIR_CANDIDATES if c.parent.name == "adlc"}
+    assert packaged_dir in in_package, (
+        f"the wheel puts schemas in adlc/{packaged_dir}, but SCHEMA_DIR_CANDIDATES "
+        f"only looks in {sorted(in_package)}"
+    )
+
+
+def test_installed_package_can_validate_without_a_checkout(
+    built_wheel: Path, tmp_path: Path
+) -> None:
+    """The real regression test: validate from an unpacked wheel, no repo nearby.
+
+    The wheel is extracted somewhere with no `schemas/` directory anywhere above
+    it, so the repo-checkout candidate cannot resolve. That is the situation in
+    CI, and the one the original bug made fatal.
+    """
+    site = tmp_path / "site"
+    with zipfile.ZipFile(built_wheel) as zf:
+        zf.extractall(site)
+
+    # Guard the guard: if a `schemas/` dir existed above the package the
+    # checkout candidate would resolve and this test would prove nothing.
+    pkg = site / "adlc"
+    assert not (site.parent / "schemas").exists()
+    assert not (site / "schemas").is_dir()
+
+    probe = (
+        "import json" + chr(10) +
+        "from adlc.schemas import schema_dir, is_valid" + chr(10) +
+        "d = schema_dir()" + chr(10) +
+        "assert d.is_dir(), d" + chr(10) +
+        "ok, errs = is_valid('human-feedback-pack', {})" + chr(10) +
+        "print(json.dumps({'dir': str(d), 'ok': ok, 'refused': bool(errs)}))" + chr(10)
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(site)   # takes precedence over any editable install
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True, cwd=str(tmp_path), env=env, check=False,
+    )
+    assert proc.returncode == 0, (
+        "an installed adlc could not validate anything:"
+        f"{chr(10)}{proc.stdout}{chr(10)}{proc.stderr}"
+    )
+
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert Path(payload["dir"]).resolve() == (pkg / "_schemas").resolve()
+    # An empty object is not a valid pack; it must be refused, not crash.
+    assert payload["ok"] is False
+    assert payload["refused"] is True
