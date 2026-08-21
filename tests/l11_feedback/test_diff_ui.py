@@ -132,6 +132,17 @@ def test_measurement_row_shows_values_and_delta(cfg: Config) -> None:
     assert "lighthouse" in out
 
 
+def test_boolean_measurement_values_include_words(cfg: Config) -> None:
+    cand = _run(cfg, CAND_ID)
+    out = _render(
+        cfg,
+        cand,
+        _diff_doc(measurements=[_m("flag", value=True, baselineValue=False, delta=None)]),
+    )
+    assert "&#10003; yes" in out
+    assert "&#10007; no" in out
+
+
 def test_budget_crossing_is_surfaced_without_colour(cfg: Config) -> None:
     cand = _run(cfg, CAND_ID)
     doc = _diff_doc(
@@ -228,6 +239,11 @@ def test_changed_screenshot_inlines_pair_and_blend(cfg: Config) -> None:
     # inlined exactly once -- two data URIs, not four.
     assert out.count("data:image/png;base64,") == 2
     assert "ss-cell-base" in out and "ss-cell-cand" in out
+    # The non-visual facts appear before the images, not only in a visual blend.
+    assert "Non-visual change facts" in out
+    assert "SHA-256 changed:" in out
+    assert "120 B &rarr; 128 B (+8 B)" in out
+    assert "Full SHA-256" in out
 
 
 def test_base64_decodes_to_the_captured_png(cfg: Config) -> None:

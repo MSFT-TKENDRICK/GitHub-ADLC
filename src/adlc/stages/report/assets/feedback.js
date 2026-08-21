@@ -131,6 +131,9 @@
   const fallbackEl = byId("adlc-copy-fallback");
   const postNoteEl = byId("adlc-submit-note");
   if (!verdictEl || !routeEl || !summaryEl || !postBtn) return;
+  let egressEnabled = false;
+  let initialized = false;
+  let submitting = false;
 
   const params = new URLSearchParams(location.search);
   const nonce = params.get("nonce") || "";
@@ -242,17 +245,30 @@
     return String(item && item.id != null ? item.id : "?");
   }
 
+  function describeConflict(item, kind) {
+    if (kind === "annotation") {
+      let n = 0;
+      collect(store.annotations).forEach(function (it, i) { if (it && it.id === item.id) n = i + 1; });
+      const path = item && item.artifactPath ? " on " + item.artifactPath : "";
+      return "annotation #" + (n || "?") + path + " (" + idOf(item) + ")";
+    }
+    if (kind === "diff") {
+      return "diff " + (item.targetKind || "item") + " " + (item.targetId || idOf(item)) + " (" + idOf(item) + ")";
+    }
+    return idOf(item);
+  }
+
   function blockingConflicts() {
     if (verdictEl.value !== "accept") return [];
     const ids = [];
     collect(store.annotations).forEach(function (it) {
-      if (it && it.severity === "blocker") ids.push(idOf(it));
+      if (it && it.severity === "blocker") ids.push(describeConflict(it, "annotation"));
     });
     collect(store.critiques).forEach(function (it) {
       if (it && it.severity === "blocker") ids.push(idOf(it));
     });
     collect(store.diffDecisions).forEach(function (it) {
-      if (it && it.decision === "reject") ids.push(idOf(it));
+      if (it && it.decision === "reject") ids.push(describeConflict(it, "diff"));
     });
     return ids.sort();
   }
@@ -260,19 +276,25 @@
   // -- announcements --------------------------------------------------------
 
   function clearOutcome() {
-    statusEl.textContent = "";
-    errorEl.textContent = "";
+    setRegion(statusEl, "");
+    setRegion(errorEl, "");
   }
 
   function announceStatus(msg) {
-    errorEl.textContent = "";
-    statusEl.textContent = msg;
+    setRegion(errorEl, "");
+    setRegion(statusEl, msg);
   }
 
   function announceError(msg) {
-    statusEl.textContent = "";
-    errorEl.textContent = msg;
+    setRegion(statusEl, "");
+    setRegion(errorEl, msg);
     try { errorEl.focus(); } catch (e) {}
+  }
+
+  function setRegion(el, msg) {
+    if (!el) return;
+    if (el.textContent !== msg) el.textContent = msg;
+    if (msg) el.classList.add("has-content"); else el.classList.remove("has-content");
   }
 
   // -- egress ---------------------------------------------------------------
@@ -285,13 +307,39 @@
       || collect(store.diffDecisions).length > 0;
   }
 
+  function setButtonDisabled(btn, disabled) {
+    if (!btn) return;
+    btn.setAttribute("aria-disabled", disabled ? "true" : "false");
+  }
+
+  function blockReason(action) {
+    const conflicts = blockingConflicts();
+    if (conflicts.length) {
+      return "Resolve the blocking conflicts before " + action + ": " + conflicts.join(", ") + ".";
+    }
+    if (!hasSubmittableContent()) {
+      return "Add a summary, or at least one annotation, critique or diff decision, before " + action + ".";
+    }
+    if (action === "submitting" && !served) {
+      return postNoteEl && postNoteEl.textContent ? postNoteEl.textContent
+        : "Direct submission needs the report's loopback server. Download or copy the pack instead.";
+    }
+    return "";
+  }
+
+  function isAriaDisabled(btn) {
+    return btn && btn.getAttribute("aria-disabled") === "true";
+  }
+
   function setEgress(enabled) {
-    dlBtn.disabled = !enabled;
-    copyBtn.disabled = !enabled;
-    postBtn.disabled = !enabled || !served;
+    egressEnabled = !!enabled;
+    setButtonDisabled(dlBtn, !enabled);
+    setButtonDisabled(copyBtn, !enabled);
+    setButtonDisabled(postBtn, !enabled || !served);
   }
 
   async function onDownload() {
+    if (isAriaDisabled(dlBtn)) { announceStatus(blockReason("downloading the pack")); return; }
     clearOutcome();
     try {
       const pack = await assemblePack();
@@ -313,6 +361,7 @@
   }
 
   async function onCopy() {
+    if (isAriaDisabled(copyBtn)) { announceStatus(blockReason("copying the pack")); return; }
     clearOutcome();
     let text;
     try {
@@ -343,6 +392,8 @@
   }
 
   async function onSubmit() {
+    if (submitting) { announceStatus("Submission is already in progress."); return; }
+    if (isAriaDisabled(postBtn)) { announceStatus(blockReason("submitting")); return; }
     clearOutcome();
     if (!served) {
       announceError("Direct submission needs the report's loopback server, which is not present. Download or copy the pack and run:  adlc feedback apply <file>");
@@ -363,7 +414,8 @@
       return;
     }
 
-    postBtn.disabled = true;
+    submitting = true;
+    postBtn.setAttribute("aria-busy", "true");
     announceStatus("Submitting feedback\u2026");
 
     let resp, rawText;
@@ -382,13 +434,15 @@
       });
       rawText = await resp.text();
     } catch (e) {
-      postBtn.disabled = false;
       announceError("The server did not return a response, so the outcome is unknown: "
         + (e && e.message ? e.message : String(e))
         + ". The feedback may or may not have been applied \u2014 resubmitting is safe"
         + " (identical packs are de-duplicated on the server), or download the pack and"
         + " apply it from the command line.");
       return;
+    } finally {
+      submitting = false;
+      postBtn.removeAttribute("aria-busy");
     }
 
     let result = null;
@@ -410,7 +464,6 @@
       announceError("The server REFUSED this feedback (HTTP " + resp.status + "): " + reason
         + "  \u2014 nothing was applied. Fix the issue and resubmit, or download the pack.");
     }
-    postBtn.disabled = false;
     refresh();
   }
 
@@ -420,34 +473,40 @@
     const a = collect(store.annotations).length;
     const c = collect(store.critiques).length;
     const d = collect(store.diffDecisions).length;
-    countsEl.textContent = "Collected " + a + " annotation(s), " + c + " reasoning critique(s) and "
+    const counts = "Collected " + a + " annotation(s), " + c + " reasoning critique(s) and "
       + d + " diff decision(s) from the surfaces above.";
+    if (countsEl.textContent !== counts) countsEl.textContent = counts;
 
     const conflicts = blockingConflicts();
     if (conflicts.length) {
-      conflictEl.textContent = "\u26a0 Blocking conflict: verdict \u201caccept\u201d cannot ship with "
+      setRegion(conflictEl, "\u26a0 Blocking conflict: verdict \u201caccept\u201d cannot ship with "
         + conflicts.length + " unresolved blocker/reject item(s) \u2014 " + conflicts.join(", ")
-        + ". Change the verdict to \u201crevise\u201d or resolve those items before submitting.";
+        + ". Change the verdict to \u201crevise\u201d or resolve those items before submitting.");
     } else {
-      conflictEl.textContent = "";
+      setRegion(conflictEl, "");
     }
 
     const content = hasSubmittableContent();
     if (!conflicts.length && !content) {
-      guidanceEl.textContent = "Add a summary, or at least one annotation, critique or diff decision, before submitting \u2014 an empty pack is refused.";
+      setRegion(guidanceEl, "Add a summary, or at least one annotation, critique or diff decision, before submitting \u2014 an empty pack is refused.");
     } else {
-      guidanceEl.textContent = "";
+      setRegion(guidanceEl, "");
     }
 
-    setEgress(conflicts.length === 0 && content);
+    const nextEnabled = conflicts.length === 0 && content;
+    const wasEnabled = egressEnabled;
+    setEgress(nextEnabled);
+    if (initialized && nextEnabled && !wasEnabled) {
+      announceStatus("Feedback pack actions are now available.");
+    }
   }
 
   function init() {
     if (served) {
-      postBtn.disabled = false;
+      setButtonDisabled(postBtn, false);
       if (postNoteEl) { postNoteEl.textContent = ""; postNoteEl.hidden = true; }
     } else {
-      postBtn.disabled = true;
+      setButtonDisabled(postBtn, true);
       if (postNoteEl) {
         postNoteEl.hidden = false;
         postNoteEl.textContent = location.protocol === "file:"
@@ -462,6 +521,7 @@
     summaryEl.addEventListener("input", refresh);
     store.subscribe(refresh);
     refresh();
+    initialized = true;
   }
 
   init();

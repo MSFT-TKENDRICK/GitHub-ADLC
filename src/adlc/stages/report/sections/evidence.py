@@ -153,8 +153,18 @@ def _json_script(payload: dict[str, Any]) -> str:
     return f'<script type="application/json" id="adlc-evidence-data">{raw}</script>'
 
 
+def _hash_html(sha: str, *, short: int = 16) -> str:
+    esha = escape(sha)
+    label = escape(sha[:short])
+    return (
+        f'<button type="button" class="mono hash" title="{esha}"'
+        f' aria-label="Copy full SHA-256 {esha}">{label}&hellip;</button>'
+        f'<details><summary>Full SHA-256</summary><p class="mono">{esha}</p></details>'
+    )
+
+
 def _table_row(path: str, kind: str, size: int, sha: str, is_img: bool, inlined: bool, reason: str) -> str:
-    epath, ekind, esha = escape(path), escape(kind), escape(sha)
+    epath, ekind = escape(path), escape(kind)
     if not is_img:
         cell = '<span class="muted">n/a</span>'
     elif inlined:
@@ -162,11 +172,11 @@ def _table_row(path: str, kind: str, size: int, sha: str, is_img: bool, inlined:
     else:
         cell = f'<span class="annot-flag bad" title="{escape(reason)}">not inlined</span>'
     return (
-        f'<tr><td class="mono">{epath}</td>'
+        f'<tr><th scope="row" class="mono">{epath}</th>'
         f'<td><span class="tag">{ekind}</span></td>'
         f'<td class="num">{_human_size(size)}</td>'
         f"<td>{cell}</td>"
-        f'<td class="mono hash" title="{esha}">{escape(sha[:16])}&hellip;</td></tr>'
+        f"<td>{_hash_html(sha)}</td></tr>"
     )
 
 
@@ -183,7 +193,7 @@ def _figure(
         f'<span class="mono">{epath}</span> '
         f'<span class="tag">{ekind}</span> '
         f'<span class="num">{human}</span> '
-        f'<span class="mono hash" title="{esha}">{esha16}&hellip;</span> '
+        f"{_hash_html(sha)} "
         f'<span class="annot-flag {flag}">{"inlined" if inlined else "not inlined"}</span>'
         "</figcaption>"
     )
@@ -291,7 +301,8 @@ def render(ctx: ReportContext) -> str:
             "  <h2>Evidence</h2>",
             f"  <style>\n{read_asset('annotate.css')}\n  </style>",
             (
-                "  <table><thead><tr><th>Artifact</th><th>Kind</th><th>Size</th>"
+                '  <table><caption class="sr-only">Evidence artifacts captured for this run</caption>'
+                "<thead><tr><th>Artifact</th><th>Kind</th><th>Size</th>"
                 "<th>Inlined</th><th>SHA-256</th></tr></thead>"
             ),
             f"  <tbody>{''.join(rows)}</tbody></table>",

@@ -108,7 +108,7 @@ RUBRIC_SCORE = {
 
 def _srcs(rendered: str) -> list[str]:
     """The exact (un-escaped) reasoning text of each card, in document order."""
-    raw = re.findall(r'<div class="reasoning-src">(.*?)</div>', rendered, re.DOTALL)
+    raw = re.findall(r'<div class="reasoning-src"[^>]*>(.*?)</div>', rendered, re.DOTALL)
     return [html.unescape(chunk) for chunk in raw]
 
 
@@ -329,6 +329,10 @@ def test_cards_are_keyboard_and_screen_reader_ready(cfg: Config) -> None:
     _write_review(rd)
     out = reasoning.render(_ctx(cfg, rd))
     # native focusable controls, each labelled for its own card
+    assert '<article class="card rcard" data-critique-id="cr-0" aria-labelledby="cr-0-title">' in out
+    assert '<h4 class="rcard-title" id="cr-0-title">' in out
+    assert 'class="reasoning-src" tabindex="0" role="group"' in out
+    assert 'aria-label="Reasoning text for' in out
     assert '<fieldset class="stance">' in out
     assert "<legend>Stance" in out
     assert 'for="cr-0-comment"' in out
@@ -344,6 +348,12 @@ def test_cards_are_keyboard_and_screen_reader_ready(cfg: Config) -> None:
     assert 'aria-live="polite"' in out
     assert 'id="cr-0-status"' in out
     assert ":focus-visible" in out
+
+
+def test_rubric_badge_spells_out_pass_fail(cfg: Config) -> None:
+    rd = _created_run(cfg)
+    out = reasoning.render(_ctx(cfg, rd, score=RUBRIC_SCORE))
+    assert "Pass, score 1.00" in out
 
 
 # ---------------------------------------------------------------------------

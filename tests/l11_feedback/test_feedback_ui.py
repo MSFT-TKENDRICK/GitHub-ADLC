@@ -403,6 +403,12 @@ def test_accessibility_hooks_are_present(cfg: Config) -> None:
     assert 'aria-describedby="adlc-guidance adlc-submit-note"' in html
     # Guidance is a live region so the gating reason is announced when it changes.
     assert 'id="adlc-guidance" role="status" aria-live="polite"' in html
+    # Egress controls remain focusable; JS uses aria-disabled so descriptions are reachable.
+    assert 'id="adlc-submit" disabled' not in html
+    assert '.fb button[aria-disabled="true"]' in html
+    # Empty live regions are visually clipped, not display:none'd out of the a11y tree.
+    assert ":empty { display:none" not in html
+    assert "clip:rect(0,0,0,0)" in html
 
 
 def test_conflict_is_not_conveyed_by_colour_alone(cfg: Config) -> None:
@@ -425,6 +431,26 @@ def test_asset_uses_the_shared_registry_initialiser() -> None:
     assert "window.adlcFeedback = window.adlcFeedback ||" in text
     assert "annotations: [], critiques: [], diffDecisions: [], listeners: []" in text
     assert "subscribe(fn)" in text
+
+
+def test_egress_buttons_use_aria_disabled_and_busy_state() -> None:
+    text = _asset_text()
+    assert "btn.setAttribute(\"aria-disabled\"" in text
+    assert "isAriaDisabled(dlBtn)" in text
+    assert "isAriaDisabled(copyBtn)" in text
+    assert "isAriaDisabled(postBtn)" in text
+    assert "postBtn.setAttribute(\"aria-busy\", \"true\")" in text
+    assert "postBtn.removeAttribute(\"aria-busy\")" in text
+    assert "let submitting = false" in text
+    assert "Feedback pack actions are now available." in text
+
+
+def test_refresh_guards_repeated_live_region_writes() -> None:
+    text = _asset_text()
+    assert "function setRegion" in text
+    assert "if (el.textContent !== msg) el.textContent = msg" in text
+    assert "if (countsEl.textContent !== counts) countsEl.textContent = counts" in text
+    assert "annotation #\" + (n || \"?\")" in text
 
 
 def test_post_is_a_simple_same_origin_request() -> None:

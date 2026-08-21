@@ -118,6 +118,9 @@ def test_png_inlines_as_data_uri_that_roundtrips(cfg: Any) -> None:
     assert m, "expected an inlined data:image/png URI"
     assert base64.b64decode(m.group(1)) == data  # exact bytes, not a re-encode
     assert art["sha256"][:16] in out  # hash shown
+    assert f"<p class=\"mono\">{art['sha256']}</p>" in out  # full hash is keyboard-discoverable
+    assert '<caption class="sr-only">Evidence artifacts captured for this run</caption>' in out
+    assert '<th scope="row" class="mono">evidence/candidate-a/home.png</th>' in out
     assert 'class="annot-flag ok">inlined' in out
 
 
@@ -340,9 +343,27 @@ def test_js_has_keyboard_and_announcement_paths() -> None:
     js = read_asset("annotate.js")
     assert "addEventListener('submit'" in js  # create/edit without a pointer
     assert "ev.key === 'Delete'" in js and "ev.key === 'Enter'" in js  # list keyboard ops
+    assert "Press Delete again to delete annotation" in js  # destructive shortcut is confirmed
+    assert "'aria-keyshortcuts': 'Enter Delete'" in js
     assert "'aria-live': 'polite'" in js  # state changes announced
     assert "role: 'status'" in js
     assert "'Editing '" in js  # entering edit mode is announced, not silent
+
+
+def test_js_links_annotation_validation_to_comment_field() -> None:
+    js = read_asset("annotate.js")
+    assert "'aria-describedby': status.getAttribute('id')" in js
+    assert "comment.setAttribute('aria-invalid', 'true')" in js
+    assert "comment.focus()" in js
+    assert "comment.removeAttribute('aria-invalid')" in js
+
+
+def test_js_summarises_freehand_geometry_and_disables_unused_region_fields() -> None:
+    js = read_asset("annotate.js")
+    assert "points.length + ' points spanning '" in js
+    assert "ann.shape + ', ' + fmtPts" in js
+    assert "inp.setAttribute('disabled', 'disabled')" in js
+    assert "shapeSel.addEventListener('change'" in js
 
 
 def test_js_sanitize_hardens_the_id_field() -> None:

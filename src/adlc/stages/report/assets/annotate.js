@@ -175,13 +175,22 @@
     }
     function num(input) { var v = parseFloat(input.value); return isFinite(v) ? v : 0; }
     function pct(fraction) { return (Math.round(clamp01(fraction) * 1000) / 10).toString(); }
+    function fmtPoint(p) { return Math.round(p[0] * 100) + '%,' + Math.round(p[1] * 100) + '%'; }
     function fmtPts(points) {
-      return points.map(function (p) {
-        return Math.round(p[0] * 100) + '%,' + Math.round(p[1] * 100) + '%';
-      }).join(' to ');
+      if (!points || !points.length) return 'unknown location';
+      if (points.length <= 2) return points.map(fmtPoint).join(' to ');
+      var xs = points.map(function (p) { return p[0]; });
+      var ys = points.map(function (p) { return p[1]; });
+      var minp = [Math.min.apply(null, xs), Math.min.apply(null, ys)];
+      var maxp = [Math.max.apply(null, xs), Math.max.apply(null, ys)];
+      return points.length + ' points spanning ' + fmtPoint(minp) + ' to ' + fmtPoint(maxp);
     }
     function describe(ann) {
-      var where = ann.geometry ? ann.shape + ' at ' + fmtPts(ann.geometry.points) : ann.shape + ' (whole image)';
+      var where = ann.geometry
+        ? (ann.geometry.points && ann.geometry.points.length > 2
+          ? ann.shape + ', ' + fmtPts(ann.geometry.points)
+          : ann.shape + ' at ' + fmtPts(ann.geometry.points))
+        : ann.shape + ' (whole image)';
       return where + ', ' + ann.severity + ' severity.';
     }
     // Re-set an aria-live region: blanking first makes screen readers re-announce
@@ -192,13 +201,13 @@
     function buildForm(fig, sha, path, kind, degraded, status) {
       var state = { editingId: null, pending: null };
 
-      var shapeSel = el('select', { class: 'af-shape', 'aria-label': 'Annotation shape' },
+      var shapeSel = el('select', { class: 'af-shape' },
         SHAPES.map(function (s) { return el('option', { value: s, text: s }); }));
       if (degraded) shapeSel.value = 'whole';
 
       function numInput(cls, label, value) {
         var inp = el('input', {
-          type: 'number', min: '0', max: '100', step: '0.1', value: value, class: cls, 'aria-label': label,
+          type: 'number', min: '0', max: '100', step: '0.1', value: value, class: cls,
         });
         // Typing into a region field is the keyboard taking over from any pointer
         // draw, so drop the pending pointer geometry.
@@ -217,10 +226,14 @@
         labelWrap('Width %', rw), labelWrap('Height %', rh),
       ]);
 
-      var sevSel = el('select', { class: 'af-sev', 'aria-label': 'Severity' },
+      var sevSel = el('select', { class: 'af-sev' },
         SEVERITIES.map(function (s) { return el('option', { value: s, text: s }); }));
 
-      var comment = el('textarea', { class: 'af-comment', rows: '2', 'aria-label': 'Comment', required: 'required' });
+      var comment = el('textarea', {
+        class: 'af-comment', rows: '2', required: 'required',
+        'aria-describedby': status.getAttribute('id') || '',
+      });
+      comment.addEventListener('input', function () { comment.removeAttribute('aria-invalid'); });
 
       var reqBoxes = [];
       var reqNodes = requirements.map(function (r) {
@@ -229,7 +242,7 @@
         return el('label', { class: 'af-req' }, [cb, ' ' + r.id + (r.text ? ': ' + r.text : '')]);
       });
       var reqFree = el('input', {
-        type: 'text', class: 'af-reqfree', 'aria-label': 'Other requirement ids, comma separated',
+        type: 'text', class: 'af-reqfree',
         placeholder: 'other-req-1, other-req-2',
       });
       var reqSet = el('fieldset', { class: 'af-reqs' },
@@ -274,6 +287,14 @@
 
       function setPending(points) { state.pending = points; setRegionFromPoints(points); }
       function focusStart() { shapeSel.focus(); }
+      function setRegionAvailable() {
+        var whole = shapeSel.value === 'whole';
+        [rx, ry, rw, rh].forEach(function (inp) {
+          if (whole) inp.setAttribute('disabled', 'disabled'); else inp.removeAttribute('disabled');
+        });
+      }
+      shapeSel.addEventListener('change', function () { state.pending = null; setRegionAvailable(); });
+      setRegionAvailable();
 
       function reset() {
         state.editingId = null; state.pending = null;
@@ -282,6 +303,8 @@
         reqFree.value = '';
         addBtn.textContent = 'Add annotation';
         cancelBtn.setAttribute('hidden', 'hidden');
+        comment.removeAttribute('aria-invalid');
+        setRegionAvailable();
       }
 
       function setEditing(ann) {
@@ -299,6 +322,7 @@
         else state.pending = null;
         addBtn.textContent = 'Save changes';
         cancelBtn.removeAttribute('hidden');
+        setRegionAvailable();
         announce(status, 'Editing ' + describe(ann) + ' Update the fields and choose Save changes.');
         comment.focus();
       }
@@ -306,9 +330,19 @@
       node.addEventListener('submit', function (ev) {
         ev.preventDefault();
         var fields = readFields();
-        if (!fields.comment) { announce(status, 'A comment is required before saving an annotation.'); comment.focus(); return; }
+        if (!fields.comment) {
+          comment.setAttribute('aria-invalid', 'true');
+          announce(status, 'A comment is required before saving an annotation.');
+          comment.focus();
+          return;
+        }
         var ann = sanitize(fields);
-        if (!ann) { announce(status, 'That annotation is incomplete and was not saved.'); return; }
+        if (!ann) {
+          comment.setAttribute('aria-invalid', 'true');
+          announce(status, 'That annotation is incomplete and was not saved.');
+          comment.focus();
+          return;
+        }
         var editing = !!state.editingId;
         upsert(ann);
         announce(status, (editing ? 'Annotation updated: ' : 'Annotation added: ') + describe(ann));
@@ -359,11 +393,25 @@
           kids.push(el('span', { class: 'annot-reqs', text: 'requirements: ' + ann.requirementIds.join(', ') }));
         }
         kids.push(el('div', { class: 'annot-item-actions' }, [edit, del]));
-        var li = el('li', { class: 'annot-item', tabindex: '0', 'data-id': ann.id }, kids);
+        var li = el('li', {
+          class: 'annot-item', tabindex: '0', 'data-id': ann.id,
+          'aria-keyshortcuts': 'Enter Delete',
+          'aria-label': 'Annotation #' + (idx + 1) + ' on ' + (ann.artifactPath || 'this artifact')
+            + '. Press Enter to edit. Press Delete twice to delete.',
+        }, kids);
         li.addEventListener('keydown', function (ev) {
-          if (ev.key === 'Delete') { ev.preventDefault(); doDelete(ann, status, form); }
-          else if (ev.key === 'Enter') { ev.preventDefault(); form.setEditing(ann); }
+          if (ev.key === 'Delete') {
+            ev.preventDefault();
+            if (li.getAttribute('data-confirm-delete') === 'true') doDelete(ann, status, form);
+            else {
+              li.setAttribute('data-confirm-delete', 'true');
+              announce(status, 'Press Delete again to delete annotation #' + (idx + 1) + ', or Tab away to cancel.');
+            }
+          }
+          else if (ev.key === 'Enter') { ev.preventDefault(); li.removeAttribute('data-confirm-delete'); form.setEditing(ann); }
+          else { li.removeAttribute('data-confirm-delete'); }
         });
+        li.addEventListener('blur', function () { li.removeAttribute('data-confirm-delete'); });
         list.appendChild(li);
       });
     }
@@ -465,12 +513,24 @@
       var overlay = fig.querySelector('.annot-overlay');
       var labels = fig.querySelector('.annot-labels');
       var degraded = fig.hasAttribute('data-degraded');
-      var status = el('div', { class: 'annot-status', role: 'status', 'aria-live': 'polite' });
-      var list = el('ul', { class: 'annot-list' });
+      var status = el('div', {
+        id: 'annot-status-' + sha.slice(0, 12),
+        class: 'annot-status', role: 'status', 'aria-live': 'polite',
+      });
+      var help = el('p', {
+        id: 'annot-help-' + sha.slice(0, 12), class: 'muted annot-help',
+        text: 'Annotations on this artifact. Press Enter on an item to edit; press Delete twice to delete.',
+      });
+      var list = el('ul', {
+        class: 'annot-list',
+        'aria-label': 'Annotations on ' + path,
+        'aria-describedby': help.getAttribute('id'),
+      });
       var form = buildForm(fig, sha, path, kind, degraded, status);
 
       mount.appendChild(status);
       mount.appendChild(form.node);
+      mount.appendChild(help);
       mount.appendChild(list);
 
       store.subscribe(function () {

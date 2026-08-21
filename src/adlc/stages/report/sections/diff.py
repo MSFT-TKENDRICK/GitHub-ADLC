@@ -104,6 +104,9 @@ _STYLE = """  <style>
   .diff-sec .ss.blend-on .ss-cell img { border:0; border-radius:0; background:transparent }
   .diff-sec .ss.blend-on .ss-cell-cand img { mix-blend-mode:difference }
   .diff-sec .ss-degraded { border:1px dashed var(--line); border-radius:6px; padding:10px }
+  .diff-sec .ss-facts { margin:8px 0; padding:8px 10px; border:1px solid var(--line);
+    border-radius:6px; background:var(--panel2); font-size:13px }
+  .diff-sec .ss-facts p { margin:4px 0 }
   </style>"""
 
 
@@ -404,6 +407,7 @@ def _screenshot_figure(
     if change == "changed":
         cand = _prepare_image(cand_path, s.get("sha256"), budget)
         base = _prepare_image(base_path, s.get("baselineSha256"), budget)
+        lines.append(_changed_facts(s, base, cand))
         lines.append('    <div class="ss-pair">')
         lines.append(
             f'      <div class="ss-cell ss-cell-base"><span class="ss-lab">Baseline</span>'
@@ -451,9 +455,7 @@ def _screenshot_figure(
         size = s.get("bytes") if s.get("bytes") is not None else s.get("baselineBytes")
         lines.append("    <details><summary>unchanged &mdash; identical hash</summary>")
         if isinstance(sha, str) and sha:
-            lines.append(
-                f'      <p class="mono hash" title="{escape(sha)}">{escape(sha[:16])}&hellip;</p>'
-            )
+            lines.append(f"      <div>{_hash_html(sha)}</div>")
         if isinstance(size, int):
             lines.append(f'      <p class="num">{escape(_human(size))}</p>')
         lines.append("    </details>")
@@ -470,6 +472,52 @@ def _screenshot_change(change: str) -> str:
         "changed": "Changed",
         "unchanged": f"{_DASH} Unchanged",
     }.get(change, escape(change))
+
+
+def _hash_html(sha: str, *, short: int = 16) -> str:
+    esha = escape(sha)
+    label = escape(sha[:short])
+    return (
+        f'<button type="button" class="mono hash" title="{esha}"'
+        f' aria-label="Copy full SHA-256 {esha}">{label}&hellip;</button>'
+        f'<details><summary>Full SHA-256</summary><p class="mono">{esha}</p></details>'
+    )
+
+
+def _bytes_from(row: dict[str, Any], prep: dict[str, Any], key: str) -> int | None:
+    value = row.get(key)
+    if isinstance(value, int):
+        return value
+    size = prep.get("size")
+    return size if isinstance(size, int) else None
+
+
+def _changed_facts(s: dict[str, Any], base: dict[str, Any], cand: dict[str, Any]) -> str:
+    base_sha = s.get("baselineSha256") if isinstance(s.get("baselineSha256"), str) else base.get("sha")
+    cand_sha = s.get("sha256") if isinstance(s.get("sha256"), str) else cand.get("sha")
+    base_size = _bytes_from(s, base, "baselineBytes")
+    cand_size = _bytes_from(s, cand, "bytes")
+    if isinstance(base_size, int) and isinstance(cand_size, int):
+        delta = cand_size - base_size
+        size_text = f"{_human(base_size)} {_ARROW} {_human(cand_size)} ({delta:+d} B)"
+    elif isinstance(base_size, int):
+        size_text = f"{_human(base_size)} {_ARROW} unknown"
+    elif isinstance(cand_size, int):
+        size_text = f"unknown {_ARROW} {_human(cand_size)}"
+    else:
+        size_text = "unknown"
+
+    parts = [
+        '    <div class="ss-facts" role="group" aria-label="Non-visual change facts">',
+        (
+            f"      <div><strong>SHA-256 changed:</strong> "
+            f"{_hash_html(base_sha) if isinstance(base_sha, str) and base_sha else 'unknown'} "
+            f"{_ARROW} {_hash_html(cand_sha) if isinstance(cand_sha, str) and cand_sha else 'unknown'}</div>"
+        ),
+        f"      <p><strong>Bytes:</strong> {size_text}</p>",
+        "    </div>",
+    ]
+    return "\n".join(parts)
 
 
 def _build_image_index(evidence_dir: Path | None) -> dict[str, Path]:
@@ -549,7 +597,7 @@ def _img_html(prep: dict[str, Any], alt: str) -> str:
 def _degraded(reason: str, sha: Any, size: Any) -> str:
     parts = [f'<div class="ss-degraded"><p class="muted">{escape(reason)}.</p>']
     if isinstance(sha, str) and sha:
-        parts.append(f'<p class="mono hash" title="{escape(sha)}">{escape(sha[:16])}&hellip;</p>')
+        parts.append(f"<div>{_hash_html(sha)}</div>")
     if isinstance(size, int):
         parts.append(f'<p class="num">{escape(_human(size))}</p>')
     parts.append("</div>")
@@ -581,7 +629,7 @@ def _num(value: Any) -> str:
     if value is None:
         return f'<span class="muted">{_DASH}</span>'
     if isinstance(value, bool):
-        return _CHECK if value else _CROSS
+        return f"{_CHECK} yes" if value else f"{_CROSS} no"
     if isinstance(value, (int, float)):
         return escape(f"{value:g}")
     return escape(value)

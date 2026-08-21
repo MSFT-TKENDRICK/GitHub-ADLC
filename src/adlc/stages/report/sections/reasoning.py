@@ -213,10 +213,11 @@ def _persona_cards(ctx: ReportContext, ids: Iterator[str]) -> tuple[list[_Card],
 
 
 def _score_text(crit: dict[str, Any]) -> str:
+    verdict = "Pass" if crit.get("passed") else "FAIL"
     try:
-        return f"score {float(crit.get('score')):.2f}"  # type: ignore[arg-type]
+        return f"{verdict}, score {float(crit.get('score')):.2f}"  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return "score n/a"
+        return f"{verdict}, score n/a"
 
 
 def _rubric_cards(ctx: ReportContext, ids: Iterator[str]) -> tuple[list[_Card], str | None]:
@@ -326,12 +327,15 @@ def _card_html(card: _Card) -> str:
     )
     return "\n".join(
         [
-            f'    <article class="card rcard" data-critique-id="{cid}">',
+            f'    <article class="card rcard" data-critique-id="{cid}" aria-labelledby="{cid}-title">',
             (
                 f'      <header class="rcard-head">'
-                f'<strong class="rcard-title">{title}</strong> {badges}</header>'
+                f'<h4 class="rcard-title" id="{cid}-title">{title}</h4> {badges}</header>'
             ),
-            f'      <div class="reasoning-src">{escape(card.source_text)}</div>',
+            (
+                f'      <div class="reasoning-src" tabindex="0" role="group"'
+                f' aria-label="Reasoning text for {title}">{escape(card.source_text)}</div>'
+            ),
             (
                 f'      <p class="mono muted rcard-ref">{escape(card.ref)} &middot; '
                 f'<span title="{escape(card.digest)}">'
@@ -370,7 +374,7 @@ def _card_html(card: _Card) -> str:
 _STYLE = """  <style>
   .rcards { display:grid; gap:12px; margin:8px 0 6px }
   .rcard .rcard-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px }
-  .rcard .rcard-title { font-size:14px }
+  .rcard .rcard-title { font-size:14px; margin:0 }
   .rcard .reasoning-src { white-space:pre-wrap; word-break:break-word; background:var(--bg);
     border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:4px 0;
     font-size:13px; max-height:280px; overflow:auto }

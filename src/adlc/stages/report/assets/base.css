@@ -11,6 +11,8 @@
   body { margin:0; background:var(--bg); color:var(--fg);
     font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif }
   .mono { font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace; font-size:.86em }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0 }
   .wrap { max-width:1180px; margin:0 auto; padding:28px 22px 64px }
   header.top { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; flex-wrap:wrap }
   h1 { margin:0 0 6px; font-size:26px; letter-spacing:-.02em }
@@ -42,6 +44,8 @@
     border:1px solid var(--line); font-size:11.5px; color:var(--muted) }
   .muted { color:var(--muted) }
   .hash { cursor:copy }
+  button.hash { background:transparent; color:inherit; border:1px solid var(--line);
+    border-radius:4px; padding:1px 4px }
   details summary { cursor:pointer; color:var(--accent); font-size:13px }
   pre { background:var(--bg); border:1px solid var(--line); border-radius:8px;
     padding:12px; overflow:auto; font-size:12px; max-height:340px }

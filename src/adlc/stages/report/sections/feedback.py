@@ -59,10 +59,13 @@ _STYLE = """  <style>
   .fb textarea { resize:vertical; min-height:74px }
   .fb .fb-field { margin-bottom:12px }
   .fb button { cursor:pointer; font:inherit }
-  .fb button[disabled] { opacity:.5; cursor:not-allowed }
+  .fb button[aria-disabled="true"] { opacity:.5; cursor:not-allowed }
+  .fb button[aria-busy="true"] { cursor:progress }
   .fb :focus-visible { outline:2px solid var(--accent); outline-offset:2px }
-  .fb .fb-conflict:empty, .fb .fb-status:empty, .fb .fb-error:empty,
-  .fb .fb-guidance:empty { display:none }
+  .fb .fb-conflict:not(.has-content), .fb .fb-status:not(.has-content),
+  .fb .fb-error:not(.has-content), .fb .fb-guidance:not(.has-content) {
+    position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0 }
   .fb .fb-conflict { margin:12px 0; padding:10px 14px; border-radius:8px;
     border:1px solid var(--warn); border-left:4px solid var(--warn);
     background:var(--panel2); color:var(--fg); font-size:13px }
@@ -170,7 +173,7 @@ def render(ctx: ReportContext) -> str:
                 ' aria-describedby="adlc-guidance">Copy pack</button>'
             ),
             (
-                '      <button type="button" class="btn ok" id="adlc-submit" disabled'
+                '      <button type="button" class="btn ok" id="adlc-submit"'
                 ' aria-describedby="adlc-guidance adlc-submit-note">Submit to loopback'
                 " server</button>"
             ),
