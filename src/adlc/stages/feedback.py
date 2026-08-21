@@ -492,6 +492,122 @@ def _refuse(
     return {"applied": False, "reason": reason, **data}
 
 
+def plan_feedback(
+    raw: Any,
+    run: dict[str, Any],
+    run_id: str,
+    *,
+    route: str | None = None,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Decide what applying ``raw`` to ``run`` would do, without doing any of it.
+
+    Every rule that can refuse a pack on its *contents* lives here, and
+    :func:`apply_feedback` is its only consumer inside the pipeline. That is
+    deliberate: ``adlc feedback validate --run`` renders this same plan, so a GUI
+    author can see exactly what ingestion would refuse or silently discard before
+    a reviewer ever fills the form in. A separate "what would happen" routine
+    would be a second implementation of the refusal rules, free to drift from the
+    first -- and the drift would surface as a reviewer's work being thrown away.
+
+    Filesystem-dependent outcomes (replay detection, the ``O_EXCL`` claim, report
+    digest drift) are *not* here, because they are not properties of the pack.
+
+    ``refusal`` is ``None`` when the pack would be accepted; otherwise it carries
+    the reason and the structured detail ``_refuse`` would record.
+    """
+
+    def refused(reason: str, data: dict[str, Any]) -> dict[str, Any]:
+        return {"refusal": {"reason": reason, "data": data}, "pack": None}
+
+    ok, errors = is_valid(PACK_SCHEMA, raw)
+    if not ok:
+        return refused(
+            f"feedback pack failed {PACK_SCHEMA} validation", {"errors": errors[:20]}
+        )
+
+    declared = str(raw.get("packDigest") or "") if isinstance(raw, dict) else ""
+    if declared:
+        # Verified against the *raw* bytes, because that is what the page hashed.
+        # Checking the sanitised copy would reject honest packs whose prose merely
+        # had a trailing space or a CRLF, which is a digest that fails closed on
+        # its own users.
+        try:
+            recomputed = pack_digest(dict(raw))
+        except UnicodeEncodeError:
+            return refused(
+                "feedback pack contains text that is not valid Unicode",
+                {"declaredDigest": declared},
+            )
+        if declared != recomputed:
+            return refused(
+                "feedback pack digest does not match its contents",
+                {"declaredDigest": declared, "computedDigest": recomputed},
+            )
+
+    pack = sanitise_pack(raw)
+
+    pack_sha = str(pack.get("candidateSha") or "")
+    recorded_sha = str(run.get("headSha") or "")
+    if recorded_sha and not pack_sha:
+        return refused(
+            f"feedback names no candidate commit but the run records "
+            f"{recorded_sha[:8]} - an unbound pack cannot be shown to describe "
+            "the code under review",
+            {"recordedSha": recorded_sha, "unbound": True},
+        )
+    if pack_sha and recorded_sha and pack_sha != recorded_sha:
+        return refused(
+            f"feedback targets {pack_sha[:8]} but the run records "
+            f"{recorded_sha[:8]} - refusing to apply feedback to code the reviewer "
+            "did not see",
+            {"packSha": pack_sha, "recordedSha": recorded_sha, "stale": True},
+        )
+
+    if str(pack.get("runId") or "") != run_id:
+        return refused(
+            f"feedback names run {pack.get('runId')!r} but was applied to {run_id!r}",
+            {"packRunId": pack.get("runId")},
+        )
+
+    if conflicts := blocking_conflicts(pack):
+        return refused(
+            "feedback verdict is 'accept' but carries unresolved blocking items: "
+            + ", ".join(conflicts),
+            {"blocking": conflicts},
+        )
+
+    verdict = str(pack.get("verdict", "revise"))
+    resolved_route = route or str(pack.get("route") or "outer")
+    if resolved_route not in VALID_ROUTES:
+        return refused(
+            f"unknown route '{clean_inline(resolved_route, limit=32)}' - expected one of "
+            + ", ".join(VALID_ROUTES),
+            {"route": resolved_route},
+        )
+
+    kept, discarded = partition_annotations(pack, run)
+    pack["annotations"] = kept
+
+    try:
+        identity = pack_digest(dict(raw)) if isinstance(raw, dict) else ""
+    except (TypeError, ValueError, UnicodeEncodeError):
+        identity = ""
+
+    return {
+        "refusal": None,
+        "pack": pack,
+        "packSha": pack_sha,
+        "discarded": discarded,
+        "citationCheck": "verified" if _artifact_hashes(run) else "skipped-no-artifacts",
+        "verdict": verdict,
+        "outcome": FEEDBACK_OUTCOME[verdict],
+        "route": resolved_route,
+        "reviewer": actor or str(pack.get("submittedBy") or "unknown"),
+        "identity": identity,
+    }
+
+
 def apply_feedback(
     cfg: Config,
     rd: RunDir,
@@ -508,92 +624,25 @@ def apply_feedback(
     refusal is visible in the run rather than only on someone's terminal.
     """
     started = utcnow()
-
-    ok, errors = is_valid(PACK_SCHEMA, raw)
-    if not ok:
-        return _refuse(
-            rd, started, f"feedback pack failed {PACK_SCHEMA} validation",
-            {"errors": errors[:20]},
-        )
-
-    declared = str(raw.get("packDigest") or "") if isinstance(raw, dict) else ""
-    if declared:
-        # Verified against the *raw* bytes, because that is what the page hashed.
-        # Checking the sanitised copy would reject honest packs whose prose merely
-        # had a trailing space or a CRLF, which is a digest that fails closed on
-        # its own users.
-        try:
-            recomputed = pack_digest(dict(raw))
-        except UnicodeEncodeError:
-            return _refuse(
-                rd, started, "feedback pack contains text that is not valid Unicode",
-                {"declaredDigest": declared},
-            )
-        if declared != recomputed:
-            return _refuse(
-                rd, started, "feedback pack digest does not match its contents",
-                {"declaredDigest": declared, "computedDigest": recomputed},
-            )
-
-    pack = sanitise_pack(raw)
     run = load_run(rd)
 
-    pack_sha = str(pack.get("candidateSha") or "")
-    recorded_sha = str(run.get("headSha") or "")
-    if recorded_sha and not pack_sha:
-        return _refuse(
-            rd, started,
-            f"feedback names no candidate commit but the run records "
-            f"{recorded_sha[:8]} - an unbound pack cannot be shown to describe "
-            "the code under review",
-            {"recordedSha": recorded_sha, "unbound": True},
-        )
-    if pack_sha and recorded_sha and pack_sha != recorded_sha:
-        return _refuse(
-            rd, started,
-            f"feedback targets {pack_sha[:8]} but the run records "
-            f"{recorded_sha[:8]} - refusing to apply feedback to code the reviewer "
-            "did not see",
-            {"packSha": pack_sha, "recordedSha": recorded_sha, "stale": True},
-        )
+    plan = plan_feedback(raw, run, rd.run_id, route=route, actor=actor)
+    if refusal := plan["refusal"]:
+        return _refuse(rd, started, refusal["reason"], refusal["data"])
 
-    if str(pack.get("runId") or "") != rd.run_id:
-        return _refuse(
-            rd, started,
-            f"feedback names run {pack.get('runId')!r} but was applied to {rd.run_id!r}",
-            {"packRunId": pack.get("runId")},
-        )
-
-    if conflicts := blocking_conflicts(pack):
-        return _refuse(
-            rd, started,
-            "feedback verdict is 'accept' but carries unresolved blocking items: "
-            + ", ".join(conflicts),
-            {"blocking": conflicts},
-        )
-
-    kept, discarded = partition_annotations(pack, run)
-    pack["annotations"] = kept
-    citation_check = "verified" if _artifact_hashes(run) else "skipped-no-artifacts"
+    pack = plan["pack"]
+    pack_sha = plan["packSha"]
+    discarded = plan["discarded"]
+    kept = pack.get("annotations") or []
+    citation_check = plan["citationCheck"]
+    verdict = plan["verdict"]
+    outcome = plan["outcome"]
+    resolved_route = plan["route"]
+    reviewer = plan["reviewer"]
+    identity = plan["identity"]
 
     report_drift = _report_drift(rd, pack)
-    verdict = str(pack.get("verdict", "revise"))
-    outcome = FEEDBACK_OUTCOME[verdict]
-    resolved_route = route or str(pack.get("route") or "outer")
-    reviewer = actor or str(pack.get("submittedBy") or "unknown")
 
-    if resolved_route not in VALID_ROUTES:
-        return _refuse(
-            rd, started,
-            f"unknown route '{clean_inline(resolved_route, limit=32)}' - expected one of "
-            + ", ".join(VALID_ROUTES),
-            {"route": resolved_route},
-        )
-
-    try:
-        identity = pack_digest(dict(raw)) if isinstance(raw, dict) else ""
-    except (TypeError, ValueError, UnicodeEncodeError):
-        identity = ""
     if prior := find_replay(rd, identity):
         return _replay_result(
             rd, prior, verdict=verdict, outcome=outcome, route=resolved_route

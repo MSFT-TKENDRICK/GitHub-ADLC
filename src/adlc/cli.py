@@ -490,13 +490,71 @@ def feedback_apply(
 @feedback_app.command("validate")
 def feedback_validate(
     pack: Path = typer.Argument(..., help="Path to an adlc-human-feedback/v1 JSON pack."),
+    run_id: str = typer.Option(
+        "", "--run", "-r",
+        help="Dry-run against this run: report everything ingestion would refuse "
+             "or silently discard, without applying anything.",
+    ),
+    route: str = typer.Option("", "--route", help="Route to plan for (default: the pack's)."),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Check a pack against its schema without applying it."""
-    ok, errors = is_valid("human-feedback-pack", _read_json_arg(pack, "pack"))
-    _emit({"valid": ok, "errors": errors}, as_json,
-          "valid" if ok else "INVALID\n  " + "\n  ".join(errors[:10]))
-    if not ok:
+    """Check a pack without applying it.
+
+    Schema validation alone is not the contract. A pack can be perfectly valid
+    and still be refused for a stale ``candidateSha``, or applied with half its
+    annotations silently discarded for citing an artifact the run does not have.
+    Pass ``--run`` to see that verdict up front: it renders the very plan
+    ``adlc feedback apply`` would execute, so a GUI author finds out here rather
+    than after a reviewer has filled in the form.
+    """
+    raw = _read_json_arg(pack, "pack")
+    ok, errors = is_valid("human-feedback-pack", raw)
+
+    if not run_id:
+        _emit({"valid": ok, "errors": errors}, as_json,
+              "valid" if ok else "INVALID\n  " + "\n  ".join(errors[:10]))
+        if not ok:
+            raise typer.Exit(1)
+        return
+
+    from adlc.stages.feedback import plan_feedback
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    plan = plan_feedback(raw, load_run(rd), rd.run_id, route=route or None)
+    refusal = plan["refusal"]
+    discarded = plan.get("discarded") or []
+
+    payload = {
+        "valid": ok,
+        "errors": errors,
+        "run": rd.run_id,
+        "wouldApply": refusal is None,
+        "refusal": refusal,
+        "discardedAnnotations": discarded,
+        "citationCheck": plan.get("citationCheck"),
+        "verdict": plan.get("verdict"),
+        "outcome": plan.get("outcome"),
+        "route": plan.get("route"),
+        "packIdentity": plan.get("identity"),
+    }
+    if refusal:
+        text = f"WOULD REFUSE ({rd.run_id}): {refusal['reason']}"
+    else:
+        text = (
+            f"would apply to {rd.run_id}: {plan['verdict']} -> {plan['outcome']} "
+            f"(route={plan['route']})"
+        )
+        if discarded:
+            # Not a refusal, which is exactly why it needs saying loudly: the
+            # pack applies and the reviewer's work is thrown away anyway.
+            text += f"\n  WARNING: {len(discarded)} annotation(s) would be DISCARDED as uncited"
+            for item in discarded[:10]:
+                text += f"\n    - {item}"
+        if plan.get("citationCheck") != "verified":
+            text += "\n  note: citation check skipped (run records no artifacts)"
+    _emit(payload, as_json, text)
+    if refusal or not ok:
         raise typer.Exit(1)
 
 
