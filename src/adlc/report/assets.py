@@ -634,10 +634,24 @@ JS = r"""
       var fig = el('figure');
       fig.appendChild(el('figcaption', null, 'Difference blend \u2014 lit pixels changed'));
       var box = el('div', 'shot overlay');
-      var b = el('img'); b.className = 'b'; b.src = p.before.src; b.alt = 'Before';
-      var a = el('img'); a.className = 'a'; a.src = p.after.src; a.alt = 'After, blended';
+      // The blend only carries meaning as a composite, so expose it as one
+      // labelled image. Announcing two separate images would describe a thing
+      // the reader cannot perceive; the honest move is to say the view is
+      // visual-only and name the routes that are not.
+      box.setAttribute('role', 'img');
+      box.setAttribute('aria-label',
+        'Difference blend of ' + p.label + ': the before and after captures ' +
+        'composited so the pixels that changed appear lit. This view is visual ' +
+        'only.');
+      var b = el('img'); b.className = 'b'; b.src = p.before.src; b.alt = '';
+      var a = el('img'); a.className = 'a'; a.src = p.after.src; a.alt = '';
+      b.setAttribute('aria-hidden', 'true');
+      a.setAttribute('aria-hidden', 'true');
       box.appendChild(b); box.appendChild(a);
       fig.appendChild(box);
+      fig.appendChild(el('p', 'muted',
+        'Difference blend is a visual-only comparison. Use Side by side to read ' +
+        'each capture on its own, or the Diff tab for the textual change.'));
       stage.appendChild(fig);
     } else if (shotMode === 'after' || !p.before) {
       stage.className = 'slide-stage one';

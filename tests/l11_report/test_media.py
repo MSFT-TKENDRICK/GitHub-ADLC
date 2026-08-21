@@ -195,6 +195,64 @@ class TestPairingRules:
         }
         assert shown == {"a-before.png", "a-after.png", "orphan.png"}
 
+    def test_a_name_carrying_both_markers_never_pairs_with_itself(self, rd: RunDir) -> None:
+        """``before-after.png`` matches both markers; it is one capture, not two."""
+        write(rd, "before-after.png", png())
+        pair = build_media(rd, [])["pairs"][0]
+        assert not (pair["before"] and pair["after"]
+                    and pair["before"]["path"] == pair["after"]["path"])
+
+    def test_pairing_does_not_rescan_the_after_list_for_every_before(
+        self, rd: RunDir, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pairing stays linear in the capture count.
+
+        This asserts the *shape* of the work rather than wall-clock time, so it
+        cannot go flaky on a loaded runner.
+
+        The captures here deliberately do not correspond: 120 ``before`` shots of
+        one subject and 120 ``after`` shots of another, which is what a run
+        produces when nobody coordinated the filenames. That is the case that
+        actually hurt. When names *do* line up, a per-before rescan finds its
+        match immediately and looks linear by accident; when nothing matches,
+        every before drags the whole after list, and the normalising regexes run
+        on each comparison. Measured before the fix, this cost 14,520
+        normalisations against 240 after it.
+
+        The module docstring names a 200-screenshot run as the case that has to
+        degrade gracefully, so that is roughly the size measured here.
+        """
+        from adlc.report import media as media_mod
+
+        names = (
+            [f"alpha-{chr(97 + i // 26)}{chr(97 + i % 26)}-before.png" for i in range(120)]
+            + [f"beta-{chr(97 + i // 26)}{chr(97 + i % 26)}-after.png" for i in range(120)]
+        )
+        for name in names:
+            write(rd, name, png())
+
+        calls = 0
+        original = media_mod._normalise
+
+        def counting(path: Path) -> str:
+            nonlocal calls
+            calls += 1
+            return original(path)
+
+        monkeypatch.setattr(media_mod, "_normalise", counting)
+        media = build_media(rd, [])
+
+        shown = {
+            shot["name"]
+            for pair in media["pairs"]
+            for shot in (pair["before"], pair["after"])
+            if shot
+        }
+        assert shown == set(names), "no capture may be dropped by the faster path"
+        assert calls <= 5 * len(names), (
+            f"{calls} normalisations for {len(names)} captures looks quadratic"
+        )
+
 
 class TestBudget:
     def test_an_oversized_screenshot_is_linked_rather_than_dropped(self, rd: RunDir) -> None:

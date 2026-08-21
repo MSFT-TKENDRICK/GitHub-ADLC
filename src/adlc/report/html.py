@@ -439,7 +439,7 @@ _SHELL = """<!doctype html>
     <div class="slide-nav">
       <button class="btn" id="slide-prev" aria-label="Previous comparison">&larr; Prev</button>
       <button class="btn" id="slide-next" aria-label="Next comparison">Next &rarr;</button>
-      <span id="slide-label" class="muted"></span>
+      <span id="slide-label" class="muted" role="status" aria-live="polite"></span>
       <div class="modes" id="shot-modes" role="group" aria-label="Comparison mode">
         <button data-mode="side" aria-pressed="true">Side by side</button>
         <button data-mode="before" aria-pressed="false">Before</button>
@@ -449,7 +449,7 @@ _SHELL = """<!doctype html>
       <div class="slide-dots" id="slide-dots"></div>
     </div>
     <div class="slide-stage" id="slide-stage"></div>
-    <p class="note" id="slide-rule"></p>
+    <p class="note" id="slide-rule" role="status" aria-live="polite"></p>
   </div>
 </section>
 

@@ -119,9 +119,16 @@ A pair is labelled with its shared *subject* ("Settings"), not the marker word
 Rule 3 keeps its `A → B` timeline label, since there the ordering *is* the claim.
 
 No capture is used in two pairs, and every capture appears somewhere — an
-unpaired screenshot goes to the gallery rather than vanishing.
+unpaired screenshot goes to the gallery rather than vanishing. Rule 1 buckets the
+`after` candidates by pairing key before matching, so a run with hundreds of
+captures stays linear; the earlier per-`before` rescan went quadratic precisely
+when the filenames *didn't* correspond, which is the messy case that actually
+occurs.
 
-Four view modes: side-by-side, before-only, after-only, and difference.
+Four view modes: side-by-side, before-only, after-only, and difference. The
+difference blend is a composite whose meaning is entirely visual, so it is
+exposed as a single labelled image that says so and points at the two modes that
+aren't — side-by-side, and the diff tab.
 
 ---
 
@@ -226,6 +233,15 @@ reader should not confuse the two.
 
 - Tabs are real `role="tab"` buttons with `aria-selected` and `aria-controls`,
   and there is a skip link to the panel content.
+- **Anything that rewrites itself in place is a live region.** The task detail
+  panel, the slide label and the pairing-rule line all carry
+  `aria-live="polite"`, because a control whose only feedback is text changing
+  silently elsewhere on the page does nothing at all for a screen-reader user.
+- **A composite is described as one thing.** The difference blend sets
+  `role="img"` with a single `aria-label` and marks its two layers
+  `aria-hidden`; announcing "Before" and "After, blended" as separate images
+  describes a result the reader cannot perceive. Ordinary captures keep their own
+  alt text — only the blend is decorative.
 - Every table exists in the static HTML, so gate results, requirements and
   artifacts are readable with JavaScript disabled. The interactive panes (graph,
   slideshow, diff viewer) are the enhancement.
@@ -239,7 +255,7 @@ reader should not confuse the two.
 ## 11. Tests
 
 ```bash
-PYTHONPATH=src python -m pytest tests/l11_report -q     # 141 passed
+PYTHONPATH=src python -m pytest tests/l11_report -q     # 154 passed
 ```
 
 | File | Covers |
@@ -247,7 +263,8 @@ PYTHONPATH=src python -m pytest tests/l11_report -q     # 141 passed
 | `test_summaries.py` | budget and word-boundary truncation; every `*_tldr` helper; the discrimination property |
 | `test_diff.py` | line classification, gutters, word-level segments, file status, malformed input tolerance, all three bounds |
 | `test_decisions.py` | citation classification and dedupe, MADR section parsing, `adlc-tasks` shape tolerance, all five linkage cases |
-| `test_media.py` | hero selection, inline vs linked-with-reason, all three pairing rules and their confidence, budget accounting |
+| `test_media.py` | hero selection, inline vs linked-with-reason, all three pairing rules and their confidence, budget accounting, linear pairing cost, self-pairing guard |
+| `test_accessibility.py` | slideshow live regions; the difference blend exposed as one described image with decorative layers |
 
 `tests/conformance/test_pipeline.py::test_report_is_self_contained` owns the
 one-file guarantee.

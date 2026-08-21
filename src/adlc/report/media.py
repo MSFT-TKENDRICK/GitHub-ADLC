@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import re
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -150,15 +151,31 @@ def _pair_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     # Rule 1 -- explicit before/after markers in the filename. Someone named
     # these on purpose; trust that over anything we could infer.
-    befores = [s for s in remaining if _BEFORE.search(Path(s["name"]).stem)]
-    afters = [s for s in remaining if _AFTER.search(Path(s["name"]).stem)]
-    for before in befores:
-        key = _normalise(Path(before["name"]))
-        match = next(
-            (a for a in afters
-             if a["path"] not in used and _normalise(Path(a["name"])) == key),
-            None,
-        )
+    #
+    # The "after" candidates are bucketed by pairing key up front so this stays
+    # O(befores + afters). Rescanning the after list for every before made it
+    # quadratic *and* re-ran the normalising regexes on names whose key never
+    # changes -- and a 200-screenshot run is exactly the case this module
+    # promises to degrade gracefully on.
+    afters_by_key: dict[str, deque[dict[str, Any]]] = {}
+    for shot in remaining:
+        if _AFTER.search(Path(shot["name"]).stem):
+            afters_by_key.setdefault(_normalise(Path(shot["name"])), deque()).append(shot)
+
+    for before in remaining:
+        if not _BEFORE.search(Path(before["name"]).stem):
+            continue
+        bucket = afters_by_key.get(_normalise(Path(before["name"])), deque())
+        match = None
+        while bucket:
+            # A consumed candidate can never match again, so drop it rather
+            # than re-skipping it on every later pass. A name carrying *both*
+            # markers must not pair with itself.
+            if bucket[0]["path"] in used or bucket[0]["path"] == before["path"]:
+                bucket.popleft()
+                continue
+            match = bucket.popleft()
+            break
         if match:
             used.update({before["path"], match["path"]})
             pairs.append({
