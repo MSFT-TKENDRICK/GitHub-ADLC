@@ -30,6 +30,9 @@ network:
 
 engine:
   id: copilot
+  copilot-sdk: true
+  env:
+    COPILOT_GITHUB_TOKEN: ${{ github.token }}
 
 # ---------------------------------------------------------------------------
 # STRUCTURAL SANDBOX.
