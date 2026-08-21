@@ -350,7 +350,7 @@ adlc qualify|spec|enrich|graph RUN
 adlc build RUN [--max-parallel N] [--runner fake|copilot-sdk|agent-task]
 adlc evidence RUN --variant KEY
 adlc eval RUN
-adlc gate RUN --ids security,code_quality,evals,… [--profile minimal|full]
+adlc gate RUN --ids security,code_quality,evals,…
 adlc reduce RUN                     # stages/*.json → run.json  (the only writer)
 adlc report RUN
 adlc adr new|list|set-status
@@ -370,25 +370,24 @@ All commands: idempotent, `--json`, non-zero exit on required-gate failure.
 GitHub-ADLC/
 ├── .github/workflows/          # ← reusable workflows MUST live here for cross-repo `uses:`
 │   ├── adlc.yml                #   the single versioned entry point consumers call
-│   ├── adlc-gates.yml  adlc-report.yml  adlc-autoresearch.yml
-│   ├── *.md + *.lock.yml       #   gh-aw sources + compiled (dogfood)
+│   ├── adlc-*.md + adlc-*.lock.yml # gh-aw sources + compiled (dogfood)
 ├── .github/agents/*.agent.md   #   squad members
-├── actions/{setup,gate,evidence,report}/action.yml
 ├── src/adlc/
 │   ├── cli.py config.py ports.py runs.py reduce.py schemas.py executor.py
 │   ├── stages/  adapters/  maf/  templates/
-├── schemas/                    # adlc-run, taskgraph, rubric, benchmarks, gate,
-│                               #   evidence-review-pack, capabilities
+├── schemas/                    # adlc-run, taskgraph, rubric, benchmarks,
+│                               #   evidence-review-pack
 ├── templates/                  # what `adlc init` vendors (thin caller + config only)
-├── examples/{demo-app,briefs,consumer-repo,azure}/
+├── examples/{briefs,azure}/
 ├── docs/  docs/decisions/
 ├── bootstrap.sh                # installs the CLI, then runs `adlc init`
 └── tests/{conformance,smoke}/
 ```
 
-`adlc init` vendors **only** `.github/workflows/adlc-caller.yml` (pinned to a tag),
-`.adlc/{config,policy,squads}.yaml`, and an `AGENTS.md` stanza. It never overwrites
-existing CI and records the installed version in `config.yaml`.
+`adlc init` vendors **only** `.github/workflows/adlc.yml` (pinned to a tag),
+`.adlc/{config,policy,squads}.yaml`, and a `.gitignore` entry for run artifacts.
+It never overwrites existing files unless `--force` is supplied and records the
+installed version in `config.yaml`.
 
 ---
 
@@ -470,8 +469,8 @@ Green requires **all** of:
 9. `adlc review apply` on a `changes_requested` fixture creates a **new** run with
    `referencesRun` and leaves the prior run byte-identical.
 10. ≥ 1 MADR v4 ADR in `docs/decisions/`, bound to `reviewSha`.
-11. `examples/consumer-repo/` — a clean repo — is installed by `adlc init`, **and** by
-    `bootstrap.sh`, and runs the same flow via the pinned reusable workflow.
+11. A clean consumer repository can be installed by `adlc init` and
+    `bootstrap.sh`, then run the same flow via the pinned reusable workflow.
 12. Kill-and-resume: interrupting `adlc build` and re-running resumes from the last
     completed level barrier.
 

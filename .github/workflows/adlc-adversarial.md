@@ -20,12 +20,14 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 
 network:
   allowed: [defaults]
 
 engine:
   id: copilot
+model: gpt-5
 
 tools:
   github:

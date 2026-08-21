@@ -24,12 +24,14 @@ permissions:
   pull-requests: read
   issues: read
   actions: read
+  copilot-requests: write
 
 network:
   allowed: [defaults]
 
 engine:
   id: copilot
+model: gpt-5
 
 # ---------------------------------------------------------------------------
 # STRUCTURAL SANDBOX.
