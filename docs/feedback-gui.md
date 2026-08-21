@@ -42,11 +42,11 @@ field you do not recognise is a version skew, not an extension.
 
 | Key | What a GUI does with it |
 |---|---|
-| `run` | Identity: `runId`, `candidateSha`, `referencesRun`, `reportDigest`. Display it; echo `runId`/`candidateSha` back in the pack. |
+| `run` | Identity: `runId`, `candidateSha`, `baselineRunId`, `reportDigest`. Display it; echo `runId`/`candidateSha` back in the pack. |
 | `requirements[]` | The things evidence is *for*. Offer them as linkable ids on annotations and critiques. |
 | `artifacts[]` | Evidence files. `inline` is a `data:` URI when it fit the budget; otherwise `inline` is `null` and `inlineOmittedReason` says why. **Never drop an omitted artifact** — the reviewer must still be able to annotate it as a whole. |
 | `reasoning[]` | Every agent-authored argument: squad findings, personas, rubric rationales, ADR justifications. Each carries a `sourceDigest` over the exact text shown. |
-| `diff` | `measurements`, `coverage`, `screenshots` against `referencesRun`. Each row is normalised to a `targetId` and carries a pre-computed `regression` flag. |
+| `diff` | `measurements`, `coverage`, `screenshots` against `baselineRunId`. Each row is normalised to a `targetId` and carries a pre-computed `regression` flag. A changed screenshot row's own `inline` is `null` by design — the candidate image is inlined once under `artifacts[]`; recover it by matching the row's `sha256`. |
 | `submission` | The output contract, machine-readable: enums, limits, id pattern, and the endpoint (if any). **Read your enums from here, never hard-code them.** |
 | `budgets` | What was inlined and what was skipped, so a GUI can be honest about it. |
 

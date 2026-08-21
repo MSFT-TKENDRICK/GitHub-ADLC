@@ -23,11 +23,12 @@ import pytest
 
 from adlc.config import Config
 from adlc.reduce import reduce_run
+from adlc.stages.evidence_diff import run_evidence_diff
 from adlc.stages.feedback_console import build_console, console_asset, write_console
 from adlc.stages.feedback_sdk import sdk_source
 from adlc.stages.feedback_targets import compute_targets
 
-from .conftest import CANDIDATE_SHA, make_run
+from .conftest import BASELINE_SHA, CANDIDATE_SHA, make_run
 
 NODE = shutil.which("node")
 needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -484,4 +485,480 @@ def test_severity_is_never_carried_by_colour_alone() -> None:
     assert "annotation.severity" in js
     css = console_asset("console.css")
     assert "li.annotation.sev-blocker" in css
+
+
+# ---------------------------------------------------------------------------
+# The console must read the manifest the way the manifest is actually written
+#
+# A code reviewer and an architecture reviewer independently found the same
+# drift: the console read three keys the manifest schema forbids
+# (`additionalProperties: false`) and therefore never emits -- `run.referencesRun`
+# (the manifest emits `run.baselineRunId`), `row.candidateValue` (the manifest
+# emits `row.value`), and `row.candidateInline` (the candidate image is inlined
+# once under `artifacts`, keyed by sha256, and `row.inline` is null by design).
+#
+# The tests below assert on the DOM the *real* console builds from a *real*
+# manifest, because a DOM-level assertion is the one thing that would have caught
+# this. The manifests come from `compute_targets` over real runs -- never a
+# hand-written fixture, which is exactly how the drift survived: a hand-built
+# copy in test_sdk_parity.py once masked the same class of bug.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def diffed_targets(cfg: Config) -> dict:
+    """A real manifest with a baseline, a regressed measurement and a changed
+    screenshot whose candidate image is inlined once under ``artifacts``."""
+    baseline = make_run(
+        cfg,
+        "2026-08-19-a1b2",
+        head_sha=BASELINE_SHA,
+        screenshots={"home.png": (10, 20, 30)},
+        measurements=[
+            {"metricId": "lcp_ms", "value": 1800.0, "budget": 2500.0, "passed": True}
+        ],
+        coverage=[
+            {"requirementId": "US1-AC1", "present": True, "evidenceKinds": ["screenshot"]}
+        ],
+    )
+    reduce_run(cfg, baseline)
+    candidate = make_run(
+        cfg,
+        "2026-08-20-c0de",
+        head_sha=CANDIDATE_SHA,
+        references_run=baseline.run_id,
+        screenshots={"home.png": (99, 99, 99)},
+        measurements=[
+            {"metricId": "lcp_ms", "value": 2600.0, "budget": 2500.0, "passed": False}
+        ],
+        coverage=[{"requirementId": "US1-AC1", "present": False, "evidenceKinds": []}],
+    )
+    reduce_run(cfg, candidate)
+    run_evidence_diff(cfg, candidate)
+    return compute_targets(cfg, candidate)
+
+
+@pytest.fixture
+def baseline_but_no_diff_targets(cfg: Config) -> dict:
+    """A run that references a baseline but has no evidence diff computed: the
+    manifest carries ``run.baselineRunId`` yet ``diff`` is null, so the console
+    reaches the empty-diff notice while a baseline genuinely exists."""
+    baseline = make_run(
+        cfg, "2026-08-19-a1b2", head_sha=BASELINE_SHA, screenshots={"home.png": (10, 20, 30)}
+    )
+    reduce_run(cfg, baseline)
+    candidate = make_run(
+        cfg, "2026-08-20-c0de", head_sha=CANDIDATE_SHA, references_run=baseline.run_id
+    )
+    reduce_run(cfg, candidate)
+    return compute_targets(cfg, candidate)
+
+
+@pytest.fixture
+def reasoning_targets(cfg: Config) -> dict:
+    """A real manifest carrying one squad finding (so a critique form renders)
+    and one inline artifact (so an annotation form renders alongside it)."""
+    run = make_run(
+        cfg, "2026-08-20-rzn", head_sha=CANDIDATE_SHA, screenshots={"home.png": (10, 20, 30)}
+    )
+    run.reviews_dir.mkdir(parents=True, exist_ok=True)
+    (run.reviews_dir / "adversarial_review.security-adversary.md").write_text(
+        "---\nsquad: adversarial_review\nmember: security-adversary\nverdict: block\n---\n\n"
+        "## [high] Unescaped slug\n\nThe repo slug is interpolated raw into an href.\n",
+        encoding="utf-8",
+    )
+    reduce_run(cfg, run)
+    return compute_targets(cfg, run)
+
+
+# A DOM just real enough to let the console's own mount() run to completion in
+# node, so a test can read back what the console actually put on the page. There
+# is no jsdom or linkedom available here, so this is the closest a test can get
+# to a DOM-level assertion -- and a DOM-level assertion is what the manifest-key
+# drift needed. The console never touches interaction-only APIs at mount
+# (`form.elements`, geometry, pointer capture), so those are omitted.
+_MOUNT_HARNESS = r"""
+'use strict';
+var fs = require('fs');
+
+function FakeNode(tag, ns) {
+  this.tag = String(tag).toLowerCase();
+  this.ns = ns || null;
+  this.attrs = {};
+  this.children = [];
+  this._text = null;
+  this._handlers = {};
+  this.parent = null;
+  this.value = undefined;
+  this.checked = false;
+  this.hidden = false;
+  this.disabled = false;
+}
+Object.defineProperty(FakeNode.prototype, 'textContent', {
+  get: function () {
+    if (this._text !== null) return this._text;
+    return this.children.map(function (c) { return c.textContent; }).join('');
+  },
+  set: function (v) {
+    this._text = (v === null || v === undefined) ? '' : String(v);
+    this.children = [];
+  }
+});
+Object.defineProperty(FakeNode.prototype, 'firstChild', {
+  get: function () { return this.children[0] || null; }
+});
+FakeNode.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+FakeNode.prototype.getAttribute = function (k) {
+  return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null;
+};
+FakeNode.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
+FakeNode.prototype.appendChild = function (kid) { kid.parent = this; this.children.push(kid); return kid; };
+FakeNode.prototype.removeChild = function (kid) {
+  this.children = this.children.filter(function (c) { return c !== kid; });
+  return kid;
+};
+FakeNode.prototype.addEventListener = function (type, fn) {
+  (this._handlers[type] = this._handlers[type] || []).push(fn);
+};
+FakeNode.prototype.dispatchEvent = function () { return true; };
+FakeNode.prototype.setPointerCapture = function () {};
+FakeNode.prototype.releasePointerCapture = function () {};
+FakeNode.prototype.getBoundingClientRect = function () { return { left: 0, top: 0, width: 100, height: 100 }; };
+FakeNode.prototype.focus = function () {};
+FakeNode.prototype.select = function () {};
+FakeNode.prototype.click = function () {};
+
+function classListOf(node) {
+  return (node.attrs['class'] || '').split(/\s+/).filter(Boolean);
+}
+function hasClass(node, cls) { return classListOf(node).indexOf(cls) >= 0; }
+function lastToken(sel) {
+  return sel.trim().split(/\s+/).pop().replace(':checked', '').replace(':scope', '');
+}
+function matchesSimple(node, token) {
+  if (!token) return false;
+  if (token[0] === '#') return node.attrs.id === token.slice(1);
+  var parts = token.split('.');
+  var tag = parts.shift();
+  if (tag && node.tag !== tag.toLowerCase()) return false;
+  var cls = classListOf(node);
+  for (var i = 0; i < parts.length; i++) {
+    if (cls.indexOf(parts[i]) < 0) return false;
+  }
+  return true;
+}
+function walkDesc(node, visit) {
+  for (var i = 0; i < node.children.length; i++) {
+    visit(node.children[i]);
+    walkDesc(node.children[i], visit);
+  }
+}
+FakeNode.prototype.querySelector = function (sel) {
+  var token = lastToken(sel);
+  var found = null;
+  walkDesc(this, function (n) { if (!found && matchesSimple(n, token)) found = n; });
+  return found;
+};
+FakeNode.prototype.querySelectorAll = function (sel) {
+  var token = lastToken(sel);
+  var out = [];
+  walkDesc(this, function (n) { if (matchesSimple(n, token)) out.push(n); });
+  return out;
+};
+
+var byId = {};
+var document = {
+  readyState: 'complete',
+  body: new FakeNode('body'),
+  createElement: function (t) { return new FakeNode(t); },
+  createElementNS: function (ns, t) { return new FakeNode(t, ns); },
+  createTextNode: function (s) {
+    var n = new FakeNode('#text');
+    n._text = (s === null || s === undefined) ? '' : String(s);
+    return n;
+  },
+  getElementById: function (id) { return byId[id] || null; },
+  querySelector: function (sel) {
+    if (sel[0] === '#') {
+      var id = sel.slice(1);
+      if (!byId[id]) { var n = new FakeNode('div'); n.attrs.id = id; byId[id] = n; }
+      return byId[id];
+    }
+    return document.body.querySelector(sel);
+  },
+  querySelectorAll: function (sel) { return document.body.querySelectorAll(sel); },
+  addEventListener: function () {}
+};
+
+global.document = document;
+/* node >= 25 exposes `navigator`, `URL` and `Event` as read-only globals, and
+ * the console only touches those inside click handlers this harness never fires,
+ * so they are left as node's own. `localStorage` is the one the console reaches
+ * at restore time, so force ours in regardless of node's webstorage state. */
+Object.defineProperty(global, 'localStorage', {
+  configurable: true,
+  writable: true,
+  value: (function () {
+    var m = {};
+    return {
+      getItem: function (k) { return Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null; },
+      setItem: function (k, v) { m[k] = String(v); },
+      removeItem: function (k) { delete m[k]; }
+    };
+  })()
+});
+
+function queryAll(root, pred) {
+  var out = [];
+  (function rec(n) {
+    if (pred(n)) out.push(n);
+    (n.children || []).forEach(rec);
+  })(root);
+  return out;
+}
+
+var targetsJson = fs.readFileSync('targets.json', 'utf8');
+byId['adlc-targets'] = new FakeNode('script');
+byId['adlc-targets']._text = targetsJson;
+
+var realSDK = require('./sdk.js');
+var _origCreate = realSDK.createSession;
+realSDK.createSession = function (t) { var s = _origCreate(t); global.__session = s; return s; };
+
+require('./console.js');
+"""
+
+
+def _mount(targets: dict, tmp_path: Path, probe: str) -> dict:
+    """Mount the real console against a real manifest in the fake DOM, then run
+    ``probe`` (which must ``console.log(JSON.stringify(...))`` exactly once)."""
+    (tmp_path / "sdk.js").write_text(sdk_source(), encoding="utf-8")
+    (tmp_path / "console.js").write_text(console_asset("console.js"), encoding="utf-8")
+    (tmp_path / "targets.json").write_text(json.dumps(targets), encoding="utf-8")
+    (tmp_path / "runner.js").write_text(_MOUNT_HARNESS + "\n" + probe + "\n", encoding="utf-8")
+    proc = subprocess.run(
+        [NODE or "node", str(tmp_path / "runner.js")],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@needs_node
+def test_the_header_names_the_baseline_when_one_exists(
+    diffed_targets: dict, tmp_path: Path
+) -> None:
+    """Defect 1a: the header read `run.referencesRun`, which the schema forbids,
+    so it said "no baseline" for every run -- including runs that have one."""
+    out = _mount(
+        diffed_targets,
+        tmp_path,
+        "console.log(JSON.stringify({ runLine: byId['run-line'].textContent }));",
+    )
+    assert "vs 2026-08-19-a1b2" in out["runLine"], out["runLine"]
+    assert "no baseline" not in out["runLine"], out["runLine"]
+
+
+@needs_node
+def test_the_empty_diff_notice_tells_the_truth_about_the_baseline(
+    baseline_but_no_diff_targets: dict, tmp_path: Path
+) -> None:
+    """Defect 1a: with a baseline present but no diff rows, the notice read
+    `run.referencesRun` and printed the false "this run has no baseline"."""
+    out = _mount(
+        baseline_but_no_diff_targets,
+        tmp_path,
+        "var notices = queryAll(byId['diff'], function (n) {"
+        " return n.tag === 'p' && hasClass(n, 'muted'); })"
+        ".map(function (p) { return p.textContent; });"
+        "console.log(JSON.stringify({ notices: notices }));",
+    )
+    assert "Nothing changed against the baseline run." in out["notices"], out["notices"]
+    assert "This run has no baseline, so there is nothing to diff." not in out["notices"], (
+        "the console printed a false statement about a run that has a baseline"
+    )
+
+
+@needs_node
+def test_a_measurement_row_shows_the_regressed_candidate_value(
+    diffed_targets: dict, tmp_path: Path
+) -> None:
+    """Defect 1b: the row read `row.candidateValue` (forbidden), so a reviewer
+    saw "was 1800" and never the regressed "now 2600" they must judge."""
+    out = _mount(
+        diffed_targets,
+        tmp_path,
+        "var rows = queryAll(byId['diff'], function (n) {"
+        " return n.tag === 'section' && hasClass(n, 'diff-row'); })"
+        ".map(function (c) {"
+        "  var h = queryAll(c, function (n) { return n.tag === 'h3'; })[0];"
+        "  var p = queryAll(c, function (n) { return hasClass(n, 'muted'); })[0];"
+        "  return { id: h ? h.textContent : null, facts: p ? p.textContent : '' };"
+        "});"
+        "console.log(JSON.stringify({ rows: rows }));",
+    )
+    row = next(r for r in out["rows"] if r["id"] == "lcp_ms")
+    assert "now 2600" in row["facts"], row["facts"]
+    assert "was 1800" in row["facts"], row["facts"]
+
+
+@needs_node
+def test_a_changed_screenshot_shows_the_candidate_image(
+    diffed_targets: dict, tmp_path: Path
+) -> None:
+    """Defect 1c: the row read `row.candidateInline` (always absent), so only the
+    baseline "before" image rendered. The candidate is inlined under `artifacts`
+    and must be recovered by sha256 -- `row.inline` is null by design."""
+    out = _mount(
+        diffed_targets,
+        tmp_path,
+        "var imgs = queryAll(byId['diff'], function (n) { return n.tag === 'img'; });"
+        "var alts = imgs.map(function (n) { return n.attrs.alt; });"
+        "var srcs = imgs.map(function (n) { return n.attrs.src; });"
+        "var s = global.__session;"
+        "var row = (s.diffRows() || []).filter(function (r) {"
+        " return r.targetKind === 'screenshot' && r.targetId === 'home.png'; })[0];"
+        "var art = row && row.sha256 ? s.artifactBySha(row.sha256) : null;"
+        "var expected = art ? art.inline : null;"
+        "console.log(JSON.stringify({"
+        " alts: alts,"
+        " candidateSrcMatchesArtifact: expected !== null && srcs.indexOf(expected) >= 0,"
+        " rowInline: row ? row.inline : 'NO_ROW'"
+        "}));",
+    )
+    assert "Candidate rendering of home.png" in out["alts"], out["alts"]
+    assert "Baseline rendering of home.png" in out["alts"], out["alts"]
+    assert out["candidateSrcMatchesArtifact"], (
+        "the candidate <img> src must be the artifact's inlined image, found by sha256"
+    )
+    assert out["rowInline"] is None, (
+        "row.inline is null by design; the candidate must come from artifacts, not the row"
+    )
+
+
+@needs_node
+def test_restoring_a_draft_updates_the_form_dom_not_only_the_session(
+    diffed_targets: dict, tmp_path: Path
+) -> None:
+    """Defect 2: restore() rewrote the session but not the controls seeded once at
+    mount, so the verdict select and summary box kept showing stale values while
+    the pack carried the restored ones -- the reviewer submits what they cannot
+    see, and the next keystroke overwrites the restored prose."""
+    probe = (
+        "var s = global.__session;"
+        "var st = s.state();"
+        "var draftVerdict = (s.enums.verdict || []).filter(function (v) { return v !== st.verdict; })[0];"
+        "var draftRoute = (s.enums.route || []).filter(function (v) { return v !== st.route; })[0];"
+        "var draftDecision = (s.enums.diffDecision || []).filter(function (d) { return d !== 'reject'; })[0];"
+        "var mrow = (s.diffRows() || []).filter(function (r) { return r.targetKind === 'measurement'; })[0];"
+        # Author a draft in the session and persist it.
+        "s.setVerdict(draftVerdict);"
+        "s.setRoute(draftRoute);"
+        "s.setSummary('restored prose');"
+        "s.setSubmittedBy('reviewer');"
+        "s.decide({ targetKind: mrow.targetKind, targetId: mrow.targetId, decision: draftDecision, comment: '' });"
+        "s.save();"
+        # The controls seeded once at mount now hold stale/empty values, exactly
+        # as they would on a fresh page load before the reviewer clicks Restore.
+        "byId['verdict'].value = st.verdict;"
+        "byId['route'].value = st.route;"
+        "byId['summary'].value = '';"
+        "byId['submitted-by'].value = '';"
+        # Click Restore.
+        "byId['restore']._handlers.click[0]();"
+        "var pressed = queryAll(byId['diff'], function (n) {"
+        " return n.tag === 'button' && n.attrs['aria-pressed'] === 'true'; })"
+        ".map(function (b) { return b.attrs['aria-label']; });"
+        "var decisions = queryAll(byId['diff'], function (n) { return hasClass(n, 'decision'); })"
+        ".map(function (sp) { return sp.textContent; });"
+        "console.log(JSON.stringify({"
+        " draftVerdict: draftVerdict, draftRoute: draftRoute, draftDecision: draftDecision,"
+        " verdictValue: byId['verdict'].value, routeValue: byId['route'].value,"
+        " summaryValue: byId['summary'].value, submittedByValue: byId['submitted-by'].value,"
+        " announcement: byId['status'].textContent,"
+        " pressedLabels: pressed, decisionSpans: decisions"
+        "}));"
+    )
+    out = _mount(diffed_targets, tmp_path, probe)
+    assert out["verdictValue"] == out["draftVerdict"], "verdict select not updated on restore"
+    assert out["routeValue"] == out["draftRoute"], "route select not updated on restore"
+    assert out["summaryValue"] == "restored prose", "summary box not updated on restore"
+    assert out["submittedByValue"] == "reviewer", "submitted-by field not updated on restore"
+    # The diff row's pressed state and status text must match the restored decision.
+    assert any(
+        out["draftDecision"] in lbl and "lcp_ms" in lbl for lbl in out["pressedLabels"]
+    ), out["pressedLabels"]
+    assert out["draftDecision"] in out["decisionSpans"], out["decisionSpans"]
+    # The announcement must be true: reloading would lose the restored session.
+    assert out["draftVerdict"] in out["announcement"], out["announcement"]
+    assert "Reload" not in out["announcement"], (
+        "the old announcement told the reviewer to reload, which discards the restore"
+    )
+
+
+@needs_node
+def test_the_critique_form_offers_no_requirement_picker(
+    reasoning_targets: dict, tmp_path: Path
+) -> None:
+    """Defect 3: the critique form rendered a requirement picker whose selections
+    the pack schema (`additionalProperties: false`) and the SDK's fixed allowlist
+    both drop in silence. It must be gone -- while the annotation form, which
+    legitimately carries requirementIds, keeps its own picker."""
+    out = _mount(
+        reasoning_targets,
+        tmp_path,
+        "function reqCount(form) {"
+        " return queryAll(form, function (n) { return hasClass(n, 'reqs'); }).length; }"
+        "var annotate = queryAll(byId['artifacts'], function (n) {"
+        " return n.tag === 'form' && hasClass(n, 'annotate'); });"
+        "var critique = queryAll(byId['reasoning'], function (n) {"
+        " return n.tag === 'form' && hasClass(n, 'critique'); });"
+        "console.log(JSON.stringify({"
+        " annotateForms: annotate.length,"
+        " critiqueForms: critique.length,"
+        " annotateReqs: annotate.map(reqCount),"
+        " critiqueReqs: critique.map(reqCount)"
+        "}));",
+    )
+    assert out["annotateForms"] >= 1, "no annotation form rendered to compare against"
+    assert out["critiqueForms"] >= 1, "no critique form rendered"
+    assert all(n >= 1 for n in out["annotateReqs"]), (
+        "the annotation form legitimately carries requirementIds and must keep its picker"
+    )
+    assert all(n == 0 for n in out["critiqueReqs"]), (
+        "the critique form must not offer a requirement picker: the selections are "
+        "silently dropped by the pack schema and the SDK allowlist"
+    )
+
+
+@needs_node
+def test_requirement_chips_show_the_manifest_text_not_only_the_id(
+    reasoning_targets: dict, tmp_path: Path
+) -> None:
+    """Same drift class as Defect 1: the requirement picker read `req.title`,
+    which the schema forbids (`additionalProperties: false`, fields are
+    `id`/`text`/`source`), so every chip showed a bare id and dropped the prose
+    the manifest carries under `req.text`. Found by the property-access audit."""
+    out = _mount(
+        reasoning_targets,
+        tmp_path,
+        "var chips = queryAll(byId['artifacts'], function (n) {"
+        " return n.tag === 'label' && hasClass(n, 'chip'); })"
+        ".map(function (n) { return n.textContent; });"
+        "console.log(JSON.stringify({"
+        " chips: chips,"
+        " requirements: require('./targets.json').requirements"
+        "}));",
+    )
+    texts = [r["text"] for r in out["requirements"] if r.get("text")]
+    assert texts, "the fixture manifest must carry requirement text to prove the point"
+    joined = " || ".join(out["chips"])
+    for text in texts:
+        assert text in joined, (
+            f"requirement text {text!r} never appears in any picker chip: {out['chips']}"
+        )
 

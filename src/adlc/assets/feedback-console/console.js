@@ -59,7 +59,11 @@
       box.appendChild(
         el("label", { for: id, class: "chip" }, [
           el("input", { type: "checkbox", id: id, value: req.id }),
-          " " + req.id + (req.title ? " \u2014 " + req.title : "")
+          /* The manifest emits requirement prose under `text`; there is no
+           * `title` (the schema is additionalProperties:false), so reading one
+           * showed the bare id and silently dropped the words that make it
+           * legible -- "US1-AC1" instead of "US1-AC1 -- A theme toggle exists." */
+          " " + req.id + (req.text ? " \u2014 " + req.text : "")
         ])
       );
     });
@@ -460,16 +464,19 @@
     });
     form.appendChild(stances);
     form.appendChild(el("label", {}, ["Critique ", comment]));
-    form.appendChild(requirementPicker(slug));
+    /* No requirement picker here, deliberately. The pack's `critique` object is
+     * additionalProperties:false with no requirementIds field, and the SDK's
+     * addCritique builds each record from a fixed allowlist -- so a requirementIds
+     * value passed here would be dropped in silence, never reaching the pack. A
+     * picker would be a data-loss trap: the reviewer ticks boxes that vanish with
+     * no error. Annotations legitimately carry requirementIds; critiques do not. */
     form.appendChild(el("button", { type: "submit", text: "Add critique" }));
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       var chosen = form.querySelector("input[type=radio]:checked");
       try {
-        var record = session.critiqueFor(target.id, chosen.value, comment.value, {
-          requirementIds: pickedRequirements(form)
-        });
+        var record = session.critiqueFor(target.id, chosen.value, comment.value);
         comment.value = "";
         announce("Critique " + record.id + " recorded against " + target.targetRef + ".");
       } catch (err) {
@@ -481,6 +488,18 @@
   }
 
   // -- evidence diff --------------------------------------------------------
+
+  /* Diff rows own their accept/reject buttons in closures, so a state change
+   * that did not come from a click -- restoring a draft -- has no way to reach
+   * them. Each row registers a resync here; `syncDiffRows` replays the current
+   * decisions onto every row's buttons and status text. */
+  var diffRowSyncers = [];
+
+  function syncDiffRows(state) {
+    diffRowSyncers.forEach(function (fn) {
+      fn(state);
+    });
+  }
 
   function renderDiffRow(row, index) {
     var slug = "diff-" + index;
@@ -494,15 +513,24 @@
     if (row.baselineValue !== undefined && row.baselineValue !== null) {
       facts.push("was " + row.baselineValue);
     }
-    if (row.candidateValue !== undefined && row.candidateValue !== null) {
-      facts.push("now " + row.candidateValue);
+    if (row.value !== undefined && row.value !== null) {
+      facts.push("now " + row.value);
     }
     if (row.budgetCrossed) facts.push(row.budgetCrossed);
     /* Spelled out rather than shown only as a colour. */
     if (row.regression) facts.push("REGRESSION");
     card.appendChild(el("p", { class: "muted", text: facts.join(" \u00b7 ") }));
 
-    if (row.candidateInline || row.baselineInline) {
+    /* The candidate image is inlined exactly once, in `targets.artifacts`;
+     * `row.inline` is null by design (see feedback_targets.py: re-encoding it
+     * into the diff row would double the document). Recover it by content hash
+     * -- the row's `sha256` IS the candidate's -- via the SDK's own index. Do
+     * NOT match on `row.targetId`: a screenshot's targetId is variant-relative
+     * (e.g. "home.png") while an artifact's path is evidence-relative (e.g.
+     * "evidence/candidate-a/home.png"), so a path match silently finds nothing. */
+    var candidateArtifact = row.sha256 ? session.artifactBySha(row.sha256) : null;
+    var candidateInline = candidateArtifact ? candidateArtifact.inline : null;
+    if (candidateInline || row.baselineInline) {
       var pair = el("div", { class: "pair" });
       if (row.baselineInline) {
         pair.appendChild(
@@ -512,10 +540,10 @@
           ])
         );
       }
-      if (row.candidateInline) {
+      if (candidateInline) {
         pair.appendChild(
           el("figure", {}, [
-            el("img", { src: row.candidateInline, alt: "Candidate rendering of " + row.targetId }),
+            el("img", { src: candidateInline, alt: "Candidate rendering of " + row.targetId }),
             el("figcaption", { text: "candidate" })
           ])
         );
@@ -534,6 +562,7 @@
     var state = el("span", { class: "decision", "aria-live": "off", text: "undecided" });
     form.appendChild(note);
     var buttons = [];
+    var buttonByDecision = {};
     (session.enums.diffDecision || []).forEach(function (decision) {
       /* Without these two attributes the buttons list reads "accept, reject,
        * accept, reject..." for every row in the diff, with nothing to say which
@@ -547,6 +576,7 @@
         "aria-label": decision + " change to " + row.targetKind + " " + row.targetId
       });
       buttons.push(button);
+      buttonByDecision[decision] = button;
       button.addEventListener("click", function () {
         try {
           session.decide({
@@ -566,6 +596,23 @@
         }
       });
       form.appendChild(button);
+    });
+    /* Replay an already-recorded decision onto this row -- used on restore,
+     * where the decision arrives in session state with no click to fire the
+     * handler above. Kept identical to that handler in what it shows: same
+     * status text, same aria-pressed toggling, so a restored row is
+     * indistinguishable from a freshly clicked one to a screen reader. */
+    diffRowSyncers.push(function (currentState) {
+      var decided = (currentState.diffDecisions || []).filter(function (d) {
+        return d.targetKind === row.targetKind && d.targetId === row.targetId;
+      })[0];
+      var decision = decided ? decided.decision : null;
+      state.textContent = decision || "undecided";
+      if (decision) card.setAttribute("data-decision", decision);
+      else card.removeAttribute("data-decision");
+      buttons.forEach(function (other) {
+        other.setAttribute("aria-pressed", other === buttonByDecision[decision] ? "true" : "false");
+      });
     });
     form.appendChild(state);
     card.appendChild(form);
@@ -613,7 +660,7 @@
       targets.run.runId +
       " \u00b7 " +
       String(targets.run.candidateSha).slice(0, 12) +
-      (targets.run.referencesRun ? " \u00b7 vs " + targets.run.referencesRun : " \u00b7 no baseline");
+      (targets.run.baselineRunId ? " \u00b7 vs " + targets.run.baselineRunId : " \u00b7 no baseline");
 
     var artifacts = $("#artifacts");
     (targets.artifacts || []).forEach(function (a, i) {
@@ -642,7 +689,7 @@
       diff.appendChild(
         el("p", {
           class: "muted",
-          text: targets.run.referencesRun
+          text: targets.run.baselineRunId
             ? "Nothing changed against the baseline run."
             : "This run has no baseline, so there is nothing to diff."
         })
@@ -785,11 +832,32 @@
       announce(session.save() ? "Draft saved in this browser." : "This browser refused storage.");
     });
     $("#restore").addEventListener("click", function () {
-      if (session.restore()) {
-        announce("Draft restored. Reload the page to redraw saved marks.");
-      } else {
+      if (!session.restore()) {
         announce("No draft found for this run and this report.");
+        return;
       }
+      /* restore() rewrote session state and notified, so the annotation lists
+       * and overlays (which subscribe) have already redrawn and the counts have
+       * refreshed. What restore() cannot reach is the DOM that is seeded from
+       * state only once, at mount: the verdict and route selects, the summary
+       * and submitted-by fields, and each diff row's pressed state. Push state
+       * into them now, BEFORE announcing. Skip this and the select still shows
+       * `revise` while the pack carries `accept` -- the reviewer submits the
+       * opposite of what they see -- and the summary box stays empty, so the
+       * next keystroke overwrites the restored prose with the stale DOM value. */
+      var restored = session.state();
+      verdict.value = restored.verdict;
+      route.value = restored.route;
+      $("#summary").value = restored.summary || "";
+      $("#submitted-by").value = restored.submittedBy || "";
+      syncDiffRows(restored);
+      announce(
+        "Draft restored. Verdict is now " +
+          restored.verdict +
+          ", route " +
+          restored.route +
+          ". The form, annotations and diff decisions on this page now match the saved draft."
+      );
     });
 
     session.subscribe(refreshCounts);
