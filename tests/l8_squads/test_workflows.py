@@ -36,6 +36,13 @@ PROFILES = (
 
 FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<yaml>.*?)\n---\s*\n", re.DOTALL)
 
+# `copilot-requests` is the one permission key whose value may be `write`. It is
+# not a repository scope and grants no access to repository data: it authorises
+# Copilot *inference* against the built-in Actions token, which is what lets
+# these workflows run without a `COPILOT_GITHUB_TOKEN` PAT. See docs/squads.md
+# section 8.6.
+INFERENCE_SCOPES = frozenset({"copilot-requests"})
+
 
 def frontmatter(path: Path) -> dict:
     match = FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
@@ -111,12 +118,45 @@ class TestEveryWorkflow:
             assert isinstance(fm[cap], int) and fm[cap] > 0
 
     def test_agent_job_holds_no_write_permission(self, name: str) -> None:
+        """No write scope over *repository* data.
+
+        `copilot-requests` is exempt and checked separately by the test below: it
+        buys model inference, not access to anything in the repository.
+        """
         fm = frontmatter(WORKFLOWS / f"{name}.md")
         permissions = fm.get("permissions") or {}
         assert permissions, f"{name} does not declare permissions"
+        repository = {
+            key: value
+            for key, value in permissions.items()
+            if key not in INFERENCE_SCOPES
+        }
         assert all(
-            value == "read" for value in permissions.values()
-        ), f"{name} grants a write scope to the agent job: {permissions}"
+            value == "read" for value in repository.values()
+        ), f"{name} grants a write scope to the agent job: {repository}"
+
+    def test_copilot_inference_uses_the_ambient_actions_token(self, name: str) -> None:
+        """Ambient auth, asserted against the artifact GitHub actually runs.
+
+        `copilot-requests: write` makes gh-aw authenticate Copilot inference with
+        the built-in Actions token. Drop it and the compiler puts back a preflight
+        step that hard-fails every run on any repository without a
+        `COPILOT_GITHUB_TOKEN` secret -- before the agent starts, so the failure
+        says nothing about the change under review and is easy to misread.
+        """
+        fm = frontmatter(WORKFLOWS / f"{name}.md")
+        permissions = fm.get("permissions") or {}
+        assert permissions.get("copilot-requests") == "write", (
+            f"{name} does not request ambient Copilot auth; without it the run "
+            f"needs a COPILOT_GITHUB_TOKEN PAT"
+        )
+        lock = WORKFLOWS / f"{name}.lock.yml"
+        assert "name: Validate COPILOT_GITHUB_TOKEN secret" not in lock.read_text(
+            encoding="utf-8"
+        ), f"{lock.name} still gates on a PAT secret -- run `gh aw compile`"
+        assert "COPILOT_GITHUB_TOKEN: ${{ github.token }}" in agent_job(lock), (
+            f"{lock.name} does not wire Copilot inference to the Actions token"
+        )
 
     def test_writes_go_through_safe_outputs(self, name: str) -> None:
         fm = frontmatter(WORKFLOWS / f"{name}.md")

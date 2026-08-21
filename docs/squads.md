@@ -41,9 +41,10 @@ gh aw compile                         # .md -> .lock.yml
 **Both the `.md` source and the generated `.lock.yml` are committed.** The lock
 file is what GitHub actually runs; the Markdown is what humans review.
 
-These workflows run a model, so they need a model credential —
-`COPILOT_GITHUB_TOKEN` — and they fail loudly rather than quietly when it is
-absent. If every squad check on every pull request is red, read §8.6 first.
+These workflows run a model, and they authenticate that model with the built-in
+GitHub Actions token rather than a stored PAT — one line of frontmatter, no
+secret to provision. See §8.6, and read it first if every squad check on every
+pull request is red.
 
 Verified against **gh-aw v0.86.2** and the frontmatter schema at
 <https://github.github.com/gh-aw/>. Corrections to older guidance you may find
@@ -100,7 +101,7 @@ what makes it acceptable to point a language model at a repository at all.
 flowchart LR
     T["event<br/>issue · PR · schedule"] --> A
     subgraph AJ["agent job — READ-ONLY"]
-        A["agentic run<br/>contents: read<br/>no write scope at all"]
+        A["agentic run<br/>contents: read<br/>no repository write scope"]
     end
     A -->|"buffered as an artifact,<br/>not an API call"| TD["AI threat detection"]
     TD --> SO
@@ -123,9 +124,14 @@ Consequences that matter:
   `max: 1` comment, `allowed: [...]` labels. A compromised agent cannot spam.
 - Every write is **auditable**: the buffered request survives as an artifact.
 
-Every workflow in this leaf declares `permissions:` with `read` values only, and
+Every workflow in this leaf declares `permissions:` whose repository scopes are
+all `read`. Exactly one key may be `write`: `copilot-requests`, which is not a
+repository scope at all — it authorises Copilot *inference* against the built-in
+Actions token and grants no access to repository data (§8.6).
 `tests/l8_squads/test_workflows.py::TestEveryWorkflow::test_agent_job_holds_no_write_permission`
-fails the build if anyone ever changes that.
+fails the build if any repository scope ever becomes a write, and
+`test_copilot_inference_uses_the_ambient_actions_token` fails it if the
+inference permission is dropped.
 
 ### Cost caps
 
@@ -636,24 +642,41 @@ Three properties are load-bearing, and each is pinned by
 
 Only findings that survive screening reach the successor brief (§7.1).
 
-### 8.6 The squads need a credential, and say so loudly when they lack one
+### 8.6 Copilot inference runs on the built-in Actions token
 
 The squad workflows are agentic: `gh aw` compiles them into jobs that run the
-GitHub Copilot CLI, and that CLI needs a credential. gh-aw validates it in a
-preflight step that runs before any agent starts:
+GitHub Copilot CLI, and that CLI has to authenticate its *inference* calls. It
+does so with the token GitHub Actions already mints for the run. Each workflow
+asks for that in one line of frontmatter:
 
 ```yaml
-- name: Validate COPILOT_GITHUB_TOKEN secret
-  run: bash "${RUNNER_TEMP}/gh-aw/actions/validate_multi_secret.sh" COPILOT_GITHUB_TOKEN 'GitHub Copilot CLI' ...
+permissions:
+  contents: read
+  copilot-requests: write   # inference, not repository access
 ```
 
-`COPILOT_GITHUB_TOKEN` is the **only** name that step accepts under
-`engine: copilot`. It does not fall back to the workflow's built-in
-`GITHUB_TOKEN`, because that token authenticates the GitHub API, not the model.
-Changing `engine.id` does not avoid the requirement either — every engine gh-aw
-supports wants some provider credential.
+`copilot-requests` is the only key in these workflows whose value is `write`, and
+it is deliberately not a repository scope: it grants no ability to read or write
+repository data, only to spend Copilot inference. The guarantee in §2 is
+therefore intact — the agent job still holds no repository write permission, and
+every actual write still leaves through safe-outputs.
 
-With no such secret configured, every pull request gets this shape:
+With the permission present, the compiler wires the engine straight to the run's
+own token. You can confirm it in the committed lock file:
+
+```yaml
+COPILOT_GITHUB_TOKEN: ${{ github.token }}
+```
+
+**No repository secret is involved.** Nothing has to be provisioned, nothing
+expires, and forks and organisation-owned repositories work the same way.
+
+#### What it looks like when the permission is missing
+
+Drop `copilot-requests: write` and gh-aw compiles a materially different
+workflow: one that demands a `COPILOT_GITHUB_TOKEN` PAT and validates it in a
+preflight step before the agent starts. On a repository with no such secret,
+every run then fails in the same shape:
 
 | Job | Result |
 |---|---|
@@ -662,36 +685,23 @@ With no such secret configured, every pull request gets this shape:
 | `agent`, `detection`, `safe_outputs` | skipped |
 | `conclusion` | pass |
 
-That shape is itself the diagnosis. The failure is in preflight, *before* any
-checkout and before any agent, so no repository code ran and the red tick says
-nothing whatsoever about the change under review. Confirm it by looking at one
-unrelated branch: if the same squad is red there, it is the credential, not the
-pull request.
+That failure is easy to misdiagnose, which is why it is written down here. It
+happens in preflight, *before* any checkout and before any agent, so no
+repository code ran and the red tick says nothing whatsoever about the change
+under review — and it reproduces on every branch at once. The fix is the
+permission, not a secret. Reaching for a PAT here solves a problem you do not
+have.
 
-**This deliberately does not degrade to a green or `skipped` check.** A squad
-that never ran has not approved anything, and `.github/workflows/adlc.yml` states
-the rule this repository enforces everywhere:
+`test_copilot_inference_uses_the_ambient_actions_token` pins all of this against
+the compiled lock: it fails if the permission is dropped, if the PAT preflight
+step reappears, or if the engine stops being wired to `github.token`.
 
-> A required gate that did not run counts as a failure.
+The PAT path still exists in gh-aw, for repositories that need to bill inference
+to a specific user; when `copilot-requests: write` is set, `COPILOT_GITHUB_TOKEN`
+is ignored for inference. This leaf does not use it.
 
-That is §8.4's rule expressed in CI instead of in Python. Marking the check
-`skipped` so the mergebox goes clean would purchase a green tick by asserting
-something nobody verified — the exact failure mode that citation-or-discard (§7)
-and the completeness gate (§8.3) exist to prevent. The cost is real and is
-accepted knowingly: until the secret exists, these checks hold the mergebox at
-`UNSTABLE`, so pull requests will not auto-merge and a human has to merge them
-deliberately.
-
-To provision it, a repository admin creates the secret with a token that carries
-Copilot access:
-
-```bash
-gh secret set COPILOT_GITHUB_TOKEN --repo <owner>/<repo>
-```
-
-Organisation secrets are invisible to a token without organisation scope, so
-`gh secret list` coming back empty does **not** prove none exists. Check at the
-organisation level and grant the repository access before minting a new token.
+Both the `.md` and the `.lock.yml` are committed, so changing frontmatter means
+running `gh aw compile` and committing the regenerated lock (§1).
 
 ---
 
@@ -711,7 +721,7 @@ Verify in an isolated environment that no sibling can clobber:
 python -m venv --system-site-packages .venv-l8
 .venv-l8/bin/python -m pip install -e . --no-deps
 .venv-l8/bin/python -m pytest tests/conformance -q   # 41 passed
-.venv-l8/bin/python -m pytest tests/l8_squads  -q    # 296 passed
+.venv-l8/bin/python -m pytest tests/l8_squads  -q    # 301 passed
 ruff check src/adlc/adapters/gate/adversarial_review.py \
            src/adlc/adapters/gate/evidence_review.py \
            src/adlc/adapters/gate/feature_completeness.py \
@@ -737,7 +747,7 @@ workstream at once.
 | `test_delegation.py` | that the blocking check is **delegated, not duplicated** (including a source scan for `sha256_file`/`evidence_dir`); precondition absent/`not_run`/`fail`/`pass`; that an LLM `pass` cannot rescue a red precondition and an LLM `warn` cannot fail a build |
 | `test_detect.py` | `detect()` contract, `GateRunner` protocol conformance, `GateResult` shape, every `not_run` degrade path, profile-driven `required` |
 | `test_spine_integration.py` | the spine's real `run_gates` driving both gates over a real run directory, against a **real** `evidence_completeness` verdict — including a genuinely hash-mismatched pack — plus entry-point registration and hostile-input degradation |
-| `test_workflows.py` | frontmatter of all five workflows; cost caps; read-only permissions; **the evidence sandbox asserted against the compiled `.lock.yml`**; the leak-marker screen kept in lockstep with the spine's conformance test; agent profiles; `squads.yaml` |
+| `test_workflows.py` | frontmatter of all five workflows; cost caps; read-only repository permissions and **ambient Copilot auth asserted against the compiled lock** (the permission is present, the PAT preflight is absent, inference is wired to `github.token`); **the evidence sandbox asserted against the compiled `.lock.yml`**; the leak-marker screen kept in lockstep with the spine's conformance test; agent profiles; `squads.yaml` |
 | `test_completeness_pack.py` | that no code, diff, transcript, chain of thought or replay script reaches `completeness-pack.json`; every `LEAK_MARKERS` entry enforced; the refusal-to-write path; the `excluded[]` declaration; brief truncation and count consistency |
 | `test_feature_completeness_gate.py` | the blocking gate: every fail-closed path; pack identity; quorum on cited findings and the outer-loop routing in the message; uncited and fabricated citations discarded; unreachable quorum reported as `not_run` rather than `pass` |
 | `test_outer_loop.py` | `iterate_on_feedback`: that only a `fail` creates a successor; that the route is always `outer`; the append-only trail (`referencesRun`, untouched predecessor, original brief carried forward); that the failure stays visible on the run that failed; that uncited **and fabricated** findings never reach the successor brief, in the citation field *or* in reviewer prose; `--no-iterate`; verdict fallback to a reduced `run.json`; that another gate's failure never triggers a redesign |

@@ -14,10 +14,13 @@ on:
   workflow_dispatch:
   reaction: eyes
 
-# Read-only. Every write leaves through safe-outputs.
+# Read-only against repository data. Every write leaves through safe-outputs.
+# `copilot-requests: write` is not a repository scope — it authorises Copilot
+# inference on the built-in Actions token (see docs/squads.md §8.6).
 permissions:
   contents: read
   issues: read
+  copilot-requests: write
 
 network:
   allowed: [defaults]
