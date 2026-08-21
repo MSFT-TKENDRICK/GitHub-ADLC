@@ -327,6 +327,20 @@ Bound to the review's commit SHA and workflow run id. Only `write`-permission us
 trigger reruns. A review on a stale SHA is rejected. `report.html` renders deep links
 that pre-fill these native reviews. **No YAML-fence command protocol.**
 
+**Structured evidence feedback — built as leaf L11.** The channel above carries review
+prose; L11 adds an artifact-anchored pack so a reviewer can annotate visual evidence,
+critique agent-authored reasoning (squad findings, personas, rubric and ADR rationales),
+and accept/reject evidence-vs-baseline deltas without leaving `report.html`. It obeys the
+rule above — possession of a pack confers no authority, so in CI a pack is applied only
+when it arrives via a native PR review or `workflow_dispatch` (both already write-gated),
+never via an unauthenticated issue comment.
+
+- **Schemas**: `adlc-human-feedback/v1` (`schemas/human-feedback-pack.schema.json`), the exported pack; `adlc-evidence-diff/v1` (`schemas/evidence-diff.schema.json`), the run-vs-baseline delta.
+- **Stages**: `evidence_diff` writes `evidence-diff.json`; `feedback` applies a pack — an immutable feedback record plus a recorded decision, and on a `revise` verdict a successor run carrying `referencesRun` + `route` that **actually re-runs the design loop**.
+- **`route` on `adlc-run/v1`**: `outer` re-runs `qualify → spec → enrich → graph`; `inner` re-specs nothing. It is **persisted on the run**, not merely the routing label of the table above.
+- **CLI**: `adlc evidence-diff RUN`, `adlc feedback validate PACK`, `adlc feedback apply PACK [RUN]`, `adlc report-serve RUN` (loopback submission server; the downloaded pack is the contract, the server only a convenience).
+- **Tests**: `tests/l11_feedback/**`. Pack prose reaches `spec.md` via the successor brief, so ingestion strips control/bidi/zero-width characters, blockquotes prose, flattens every interpolated value and caps the brief budget. Full contract: `docs/feedback.md`.
+
 ### 4.8 Permission & trust matrix
 
 | Job | Trigger | Token | Secrets | Runs agent-authored code |
@@ -426,6 +440,7 @@ aggregator; static `report.html`; ADR engine + `review apply`; `adlc init` +
 | L8 | gh-aw workflows & squads | `.github/workflows/*.md` + `.lock.yml`, `.github/agents/*.agent.md` | autoresearch, intake, adversarial squad, evidence squad (**sanitized pack only, no checkout, `edit-file:false`, toolsets `[issues]`**), quorum from `squads.yaml` |
 | L9 | Enrichment generators | `stages/enrich_*.py`, templates | architecture/sitemap/data-model `.mmd`, `wireframe.excalidraw`, `personas.md` |
 | L10 | Day-2 Azure | `adapters/daytwo/**`, `examples/azure/**` | `repository_dispatch` receiver for SRE Agent; ACA git-mirror sidecar manifest (**disabled example**); Foundry hosted-agent `adlc hotfix` definition; App Insights telemetry adapter |
+| L11 | Human evidence feedback | `stages/{feedback,evidence_diff}.py`, `serve.py`, `tests/l11_feedback/**` | Annotatable `report.html` → `adlc-human-feedback/v1` pack (+ `adlc-evidence-diff/v1`); `feedback`/`evidence_diff` stages; `route`-persisted, write-gated design-loop retrigger |
 
 ---
 

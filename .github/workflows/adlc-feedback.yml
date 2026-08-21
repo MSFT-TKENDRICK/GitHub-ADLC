@@ -1,0 +1,226 @@
+# ADLC human-feedback workflow.
+#
+# Applies an `adlc-human-feedback/v1` pack captured on `report.html` (see
+# docs/feedback.md). A pack is UNTRUSTED input and possession of one confers no
+# authority, so this workflow only acts when the pack arrives through a channel
+# that already proves write permission:
+#
+#   * pull_request_review  -- a native review carries a real identity and the
+#                             reviewer's author_association; or
+#   * workflow_dispatch     -- which GitHub only lets users with write access run.
+#
+# Trust model (mirrors docs/PLAN.md 4.8):
+#   * The `authorize` job decides whether the submitter may drive the loop. A
+#     fork PR author, who has no write access, is refused here.
+#   * The `apply` job holds no write permission on the repository. It records
+#     feedback and re-runs the design loop into the run directory, then uploads
+#     that directory as an artifact. It never pushes to the repo.
+#   * Untrusted, actor-controlled text (the pack, the review body) is only ever
+#     passed through `env:` and parsed from a file or the environment. It is
+#     never interpolated into a `run:` block, which would be shell injection.
+
+name: ADLC feedback
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The ADLC run id the pack targets (must equal the pack's runId)."
+        type: string
+        required: true
+      pack:
+        description: "The adlc-human-feedback/v1 pack JSON (may be minified)."
+        type: string
+        required: true
+  pull_request_review:
+    types: [submitted]
+
+# Least privilege by default; every job narrows or restates this explicitly.
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    name: Authorize the submitter
+    runs-on: ubuntu-latest
+    # This job reads only the event payload and makes no API calls, so it needs
+    # no permissions at all.
+    permissions: {}
+    outputs:
+      authorized: ${{ steps.gate.outputs.authorized }}
+      actor: ${{ steps.gate.outputs.actor }}
+    steps:
+      - name: Decide whether the submitter may drive the loop
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const event = context.eventName;
+            let authorized = false;
+            let actor = context.actor;
+            if (event === 'workflow_dispatch') {
+              // GitHub only allows users with write access to trigger a
+              // workflow_dispatch, so the actor is privileged by construction.
+              authorized = true;
+            } else if (event === 'pull_request_review') {
+              // A pack on a native review inherits the reviewer's real identity.
+              // Only OWNER / MEMBER / COLLABORATOR have write access; CONTRIBUTOR,
+              // FIRST_TIME_CONTRIBUTOR and NONE (a fork author) do not -- so a
+              // fork PR cannot drive the loop.
+              const assoc = context.payload.review.author_association;
+              actor = context.payload.review.user.login;
+              authorized = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(assoc);
+              core.info(`review author_association=${assoc} -> authorized=${authorized}`);
+            }
+            core.setOutput('authorized', authorized ? 'true' : 'false');
+            core.setOutput('actor', actor);
+
+  apply:
+    name: Apply the feedback pack
+    needs: authorize
+    # The authority gate, enforced: an unauthorized submitter never reaches the
+    # apply job at all.
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read   # check out the framework and install it
+      actions: read    # download the run artifact produced by adlc.yml
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PACK_FILE: ${{ runner.temp }}/adlc-feedback/pack.json
+    steps:
+      # Written before checkout, into RUNNER_TEMP, so `actions/checkout`'s clean
+      # step cannot delete it. The pack is untrusted: it is passed through the
+      # environment and parsed by a script that reads os.environ -- it is NEVER
+      # interpolated into the shell.
+      - name: Bind the submitted pack to a file
+        id: extract
+        env:
+          GH_EVENT_NAME: ${{ github.event_name }}
+          PACK_INPUT: ${{ inputs.pack }}
+          DISPATCH_RUN_ID: ${{ inputs.run_id }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+        run: |
+          python3 <<'PY'
+          import json, os, re, sys
+
+          event = os.environ.get("GH_EVENT_NAME", "")
+          run_id_re = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+          out = os.environ["GITHUB_OUTPUT"]
+
+          def emit(**kw):
+              with open(out, "a", encoding="utf-8") as fh:
+                  for key, value in kw.items():
+                      fh.write(f"{key}={value}\n")
+
+          def fail(msg):
+              print(f"::error::{msg}")
+              sys.exit(1)
+
+          if event == "workflow_dispatch":
+              raw = (os.environ.get("PACK_INPUT") or "").strip()
+              if not raw:
+                  fail("workflow_dispatch requires the 'pack' input")
+          else:
+              body = os.environ.get("REVIEW_BODY") or ""
+              # The report's "submit as review" deep link wraps the pack in a
+              # fenced ```adlc-human-feedback block. A review without one is a
+              # normal review and is not an error.
+              match = re.search(r"```adlc-human-feedback\s*\n(.*?)```", body, re.DOTALL)
+              if not match:
+                  emit(has_pack="false")
+                  print("no adlc-human-feedback block in this review; nothing to apply")
+                  sys.exit(0)
+              raw = match.group(1).strip()
+
+          try:
+              pack = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              fail(f"submitted pack is not valid JSON: {exc}")
+
+          run_id = str(pack.get("runId", ""))
+          if not run_id_re.match(run_id):
+              # Guards every later use of run_id in an API path and a file path.
+              fail("pack 'runId' is missing or is not a safe run id")
+
+          if event == "workflow_dispatch":
+              want = (os.environ.get("DISPATCH_RUN_ID") or "").strip()
+              if want and want != run_id:
+                  fail(f"run_id input ({want!r}) does not match the pack runId ({run_id!r})")
+
+          path = os.environ["PACK_FILE"]
+          os.makedirs(os.path.dirname(path), exist_ok=True)
+          # Write the exact bytes submitted, so a declared packDigest still verifies.
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.write(raw)
+          emit(has_pack="true", run_id=run_id)
+          print(f"bound pack for run {run_id}")
+          PY
+
+      - name: Check out the ADLC framework
+        if: steps.extract.outputs.has_pack == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        if: steps.extract.outputs.has_pack == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ADLC
+        if: steps.extract.outputs.has_pack == 'true'
+        run: pip install --disable-pip-version-check .
+
+      - name: Download the run under review
+        if: steps.extract.outputs.has_pack == 'true'
+        env:
+          RUN_ID: ${{ steps.extract.outputs.run_id }}
+        run: |
+          # RUN_ID is charset-validated in the extract step, so it is safe in an
+          # API path. adlc.yml uploads the run directory as `adlc-<run-id>`; find
+          # it by exact name and unzip it back into place.
+          art_id=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=adlc-$RUN_ID&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$art_id" ]; then
+            echo "::error::no run artifact named adlc-$RUN_ID was found to apply feedback to"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$art_id/zip" > "$RUNNER_TEMP/run.zip"
+          mkdir -p ".adlc/runs/$RUN_ID"
+          unzip -q "$RUNNER_TEMP/run.zip" -d ".adlc/runs/$RUN_ID"
+
+      # Validate before applying: an invalid pack must fail loudly here, not be
+      # discovered halfway through creating a successor run.
+      - name: Validate the pack
+        if: steps.extract.outputs.has_pack == 'true'
+        run: |
+          if ! adlc feedback validate "$PACK_FILE" --json; then
+            echo "::error::feedback pack failed schema validation; refusing to apply"
+            exit 1
+          fi
+
+      - name: Apply the pack
+        if: steps.extract.outputs.has_pack == 'true'
+        env:
+          # RUN_ID and ACTOR travel through the environment and are quoted; the
+          # pack is a file. No actor-controlled text is expanded by the shell.
+          RUN_ID: ${{ steps.extract.outputs.run_id }}
+          ACTOR: ${{ needs.authorize.outputs.actor }}
+        run: adlc feedback apply "$PACK_FILE" "$RUN_ID" --actor "$ACTOR" --json
+
+      - name: Upload the resulting run directory
+        if: always() && steps.extract.outputs.has_pack == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: adlc-feedback-${{ steps.extract.outputs.run_id }}
+          path: .adlc/runs
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Nothing to apply
+        if: steps.extract.outputs.has_pack != 'true'
+        run: echo "This review carried no adlc-human-feedback pack; nothing to do."
