@@ -43,6 +43,7 @@ from adlc.runs import RunDir, read_json, sha256_bytes, utcnow, write_json
 from adlc.schemas import is_valid, load_schema
 from adlc.stages.evidence import extract_requirements
 from adlc.stages.evidence_diff import diff_path
+from adlc.stages.feedback import PACK_SCHEMA_VERSION, REVIEW_FENCE
 
 __all__ = [
     "DEFAULT_PER_ARTIFACT_BYTES",
@@ -161,12 +162,13 @@ def submission_contract(
         "submittedByChars": _int(pack, "properties", "submittedBy", "maxLength"),
     }
     return {
-        "packSchemaVersion": "adlc-human-feedback/v1",
+        "packSchemaVersion": PACK_SCHEMA_VERSION,
         "endpoint": endpoint,
         "nonceHeader": nonce_header,
         "nonce": nonce,
         "maxBodyBytes": max_body_bytes,
         "idPattern": str(_walk(pack, (*defs, "id", "pattern"))),
+        "reviewFence": REVIEW_FENCE,
         "enums": enums,
         "limits": limits,
     }

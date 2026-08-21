@@ -58,86 +58,6 @@ def run_node(tmp_path: Path, script: str, **env: str) -> str:
     return proc.stdout
 
 
-@pytest.fixture
-def targets_doc() -> dict:
-    """A minimal but structurally real adlc-feedback-targets/v1 document."""
-    from adlc.stages.feedback_targets import SCHEMA_VERSION, submission_contract
-
-    return {
-        "schemaVersion": SCHEMA_VERSION,
-        "generatedAt": "2024-01-01T00:00:00Z",
-        "run": {
-            "runId": "20240101-000000-abcdef",
-            "candidateSha": "a" * 40,
-            "baselineRunId": None,
-            "reportDigest": "sha256:" + "c" * 64,
-            "profile": "minimal",
-            "title": None,
-            "passed": False,
-        },
-        "requirements": [{"id": "AC-1", "text": "it works", "source": "spec/spec.md"}],
-        "artifacts": [
-            {
-                "id": "art-1",
-                "path": "evidence/candidate-a/home.png",
-                "sha256": "b" * 64,
-                "kind": "screenshot",
-                "mediaType": "image/png",
-                "bytes": 100,
-                "width": 800,
-                "height": 600,
-                "annotatable": True,
-                "inline": None,
-                "inlineOmittedReason": "not inlined: test fixture",
-            }
-        ],
-        "reasoning": [
-            {
-                "id": "rsn-1",
-                "targetKind": "squad_finding",
-                "targetRef": "reviews/security.md#finding-1",
-                "targetTitle": "unescaped input",
-                "sourceDigest": "sha256:" + "d" * 64,
-                "author": "security-adversary",
-                "text": "the slug is interpolated raw",
-                "severity": "high",
-                "confidence": "high",
-                "citations": ["src/adlc/x.py:12"],
-            }
-        ],
-        "diff": {
-            "baselineRunId": None,
-            "measurements": [
-                {
-                    "targetKind": "measurement",
-                    "targetId": "lcp",
-                    "label": "lcp",
-                    "change": "changed",
-                    "value": 2.5,
-                    "baselineValue": 1.5,
-                    "delta": 1.0,
-                    "budget": 2.0,
-                    "passed": False,
-                    "baselinePassed": True,
-                    "budgetCrossed": "entered_breach",
-                    "collector": "lighthouse",
-                    "regression": True,
-                }
-            ],
-            "coverage": [],
-            "screenshots": [],
-        },
-        "submission": submission_contract(),
-        "budgets": {
-            "perArtifactBytes": 1,
-            "totalBytes": 1,
-            "inlinedBytes": 0,
-            "inlinedCount": 0,
-            "omittedCount": 1,
-        },
-    }
-
-
 # ---------------------------------------------------------------------------
 # The asset itself
 # ---------------------------------------------------------------------------
@@ -226,8 +146,7 @@ def test_canonicalize_matches_python(tmp_path: Path) -> None:
     same on both sides". That is what ingestion actually does.
     """
     script = (
-        REQUIRE_SDK
-        +         "const cases = JSON.parse(process.env.CASES);\n"
+        REQUIRE_SDK + "const cases = JSON.parse(process.env.CASES);\n"
         "console.log(JSON.stringify(cases.map(c => [sdk.canonicalize(c), JSON.stringify(c)])));\n"
     )
     produced = json.loads(run_node(tmp_path, script, CASES=json.dumps(PARITY_CASES)))
@@ -250,8 +169,7 @@ def test_float_with_more_precision_than_the_grid_is_refused(tmp_path: Path) -> N
     see an integrity error for feedback that was never corrupted.
     """
     script = (
-        REQUIRE_SDK
-        +         "const out = {};\n"
+        REQUIRE_SDK + "const out = {};\n"
         "try { sdk.canonicalize({x: 0.000012345}); out.offGrid = 'accepted'; }\n"
         "catch (e) { out.offGrid = 'refused'; }\n"
         "try { sdk.canonicalize({x: 0.1234}); out.onGrid = 'accepted'; }\n"
@@ -290,8 +208,7 @@ def test_pack_digest_matches_python(tmp_path: Path) -> None:
         ],
     }
     script = (
-        REQUIRE_SDK
-        +         "const pack = JSON.parse(process.env.PACK);\n"
+        REQUIRE_SDK + "const pack = JSON.parse(process.env.PACK);\n"
         "sdk.packDigest(pack).then(d => console.log(JSON.stringify(\n"
         "  {digest: d, wire: JSON.stringify(pack)})));\n"
     )
@@ -326,8 +243,7 @@ def test_blocking_conflicts_matches_python(tmp_path: Path) -> None:
     # guards its own state, so smuggling records past those guards to test this
     # would be testing the smuggling, not the rule.
     script = (
-        REQUIRE_SDK
-        +         "function conflicts(pack) {\n"
+        REQUIRE_SDK + "function conflicts(pack) {\n"
         "  if (pack.verdict !== 'accept') return [];\n"
         "  let ids = [];\n"
         "  ['annotations','critiques'].forEach(c => (pack[c]||[]).forEach(i => {\n"
@@ -345,8 +261,7 @@ def test_blocking_conflicts_matches_python(tmp_path: Path) -> None:
 @needs_node
 def test_session_enforces_the_contract_it_advertises(tmp_path: Path, targets_doc: dict) -> None:
     script = (
-        REQUIRE_SDK
-        +         "const targets = JSON.parse(process.env.TARGETS);\n"
+        REQUIRE_SDK + "const targets = JSON.parse(process.env.TARGETS);\n"
         "const s = sdk.createSession(targets);\n"
         "const out = {};\n"
         "// citation-or-discard, enforced where the reviewer can still see it\n"

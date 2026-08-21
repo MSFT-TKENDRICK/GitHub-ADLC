@@ -109,6 +109,25 @@ jobs:
           run_id_re = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
           out = os.environ["GITHUB_OUTPUT"]
 
+          # A GUI wraps the pack in a fenced block tagged with the fence string
+          # published as `submission.reviewFence` in feedback-targets.json, so
+          # no GUI has to read this file to learn it.
+          #
+          # Both ends of the fence are anchored to the start of a line. That is
+          # load-bearing, not tidiness: a non-anchored `(.*?)```' stops at the
+          # first backtick run *anywhere*, including one a reviewer typed inside
+          # their own comment -- which truncates the pack. A truncated pack is
+          # usually a JSON error, but a crafted one can be a valid prefix, and
+          # then CI would silently apply feedback with the findings after the
+          # injected fence removed. Every line of `json.dumps(indent=2)` output
+          # begins with a quote or a bracket (newlines inside strings are
+          # escaped), so an anchored closing fence cannot be forged from
+          # reviewer-controlled text.
+          fence_re = re.compile(
+              r"^```adlc-human-feedback[^\n]*\n(.*?)^```",
+              re.DOTALL | re.MULTILINE,
+          )
+
           def emit(**kw):
               with open(out, "a", encoding="utf-8") as fh:
                   for key, value in kw.items():
@@ -124,10 +143,8 @@ jobs:
                   fail("workflow_dispatch requires the 'pack' input")
           else:
               body = os.environ.get("REVIEW_BODY") or ""
-              # The report's "submit as review" deep link wraps the pack in a
-              # fenced ```adlc-human-feedback block. A review without one is a
-              # normal review and is not an error.
-              match = re.search(r"```adlc-human-feedback\s*\n(.*?)```", body, re.DOTALL)
+              # A review without a pack is a normal review, not an error.
+              match = fence_re.search(body)
               if not match:
                   emit(has_pack="false")
                   print("no adlc-human-feedback block in this review; nothing to apply")

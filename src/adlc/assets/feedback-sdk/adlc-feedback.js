@@ -575,6 +575,42 @@
     }
 
     /*
+     * A PR review body carrying the pack in a fenced block. The fence tag comes
+     * from the manifest, never from a copy of the workflow's regex: CI is the
+     * one transport that can actually authorise an apply, and a GUI that had to
+     * learn the magic word by reading .github/workflows would be hard-coding
+     * exactly the thing this manifest exists to publish.
+     *
+     * JSON.stringify escapes newlines inside strings, so every line of the body
+     * begins with whitespace then a quote or a bracket. A literal "```" at the
+     * start of a line -- which would close the fence early -- is therefore not
+     * expressible, no matter what a reviewer types into a comment.
+     */
+    function toReviewBody(extra) {
+      var fence = submission.reviewFence;
+      if (!fence) throw new Error("targets.submission.reviewFence is missing");
+      return toText(extra).then(function (text) {
+        /*
+         * Belt and braces. JSON.stringify escapes newlines inside strings, so
+         * every line here begins with a quote or a bracket and a reviewer
+         * cannot type a line that closes the fence. That is a property of the
+         * serialiser, not of this function -- so check it rather than trust it.
+         * Refusing loudly beats posting a review CI will parse as truncated.
+         */
+        if (/^[ \t]{0,3}```/m.test(text)) {
+          throw new Error("pack JSON contains a line that would close the fence");
+        }
+        var head =
+          "Structured feedback for run `" +
+          targets.run.runId +
+          "` at `" +
+          targets.run.candidateSha +
+          "`.\n\n";
+        return head + "```" + fence + "\n" + text + "```\n";
+      });
+    }
+
+    /*
      * Only usable when the GUI is served from the loopback server itself. A
      * custom nonce header from any other origin triggers a CORS preflight, and
      * the server answers OPTIONS with 405 on purpose -- if a page you did not
@@ -717,6 +753,7 @@
       buildSignedPack: buildSignedPack,
       toText: toText,
       toBlob: toBlob,
+      toReviewBody: toReviewBody,
       suggestedFilename: suggestedFilename,
       submit: submit,
       canSubmit: function () {

@@ -49,6 +49,19 @@ from adlc.schemas import is_valid
 PACK_SCHEMA = "human-feedback-pack"
 PACK_SCHEMA_VERSION = "adlc-human-feedback/v1"
 
+#: The fence label a pack carries when it travels inside a native PR review body.
+#:
+#: A downloaded pack has no authority of its own, so in CI it must arrive through
+#: something that already proves write access -- and the cheapest such channel is
+#: a review body, which is prose. This label is how the workflow finds the pack
+#: inside that prose.
+#:
+#: It lives here, and is published in the feedback-targets ``submission`` block,
+#: so a GUI never has to read a workflow YAML to learn the transport. The CI
+#: regex and this constant are pinned to each other by
+#: ``tests/l11_feedback/test_review_fence.py``.
+REVIEW_FENCE = "adlc-human-feedback"
+
 #: Total characters of human prose allowed into the successor brief. The schema
 #: already caps each field, but 500 annotations x 4000 characters is 2 MB -- more
 #: than enough to bury the actual brief under reviewer commentary. Truncation is

@@ -122,7 +122,7 @@
     }
 
     var form = el("form", { class: "annotate", novalidate: "" });
-    var shape = enumSelect("annotationShape", "Shape");
+    var shape = enumSelect("shape", "Shape");
     shape.value = artifact.inline ? "rect" : "whole";
     var sev = enumSelect("severity", "Severity");
 
@@ -516,22 +516,49 @@
         .catch(say);
     });
 
+    /* One clipboard path for both copy buttons: a fallback that only some of
+     * them honoured would be a fallback nobody could rely on. */
+    function copyText(text, okMsg, fallbackMsg) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).then(function () {
+          announce(okMsg);
+        });
+      }
+      /* No silent failure: hand the reviewer the bytes to copy manually. */
+      var out = $("#fallback");
+      out.value = text;
+      out.hidden = false;
+      out.focus();
+      out.select();
+      announce(fallbackMsg);
+      return Promise.resolve();
+    }
+
     $("#copy").addEventListener("click", function () {
       session
         .toText()
         .then(function (text) {
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            return navigator.clipboard.writeText(text).then(function () {
-              announce("Pack copied to the clipboard.");
-            });
-          }
-          /* No silent failure: hand the reviewer the bytes to copy manually. */
-          var out = $("#fallback");
-          out.value = text;
-          out.hidden = false;
-          out.focus();
-          out.select();
-          announce("Clipboard unavailable. The pack is in the text box below; copy it manually.");
+          return copyText(
+            text,
+            "Pack copied to the clipboard.",
+            "Clipboard unavailable. The pack is in the text box below; copy it manually."
+          );
+        })
+        .catch(say);
+    });
+
+    /* The pack fenced for a native PR review. That transport is the only one
+     * that carries authority in CI -- a downloaded file proves nothing about
+     * who you are, but a review does. */
+    $("#copy-review").addEventListener("click", function () {
+      session
+        .toReviewBody()
+        .then(function (body) {
+          return copyText(
+            body,
+            "Review body copied. Paste it into a PR review on the candidate commit.",
+            "Clipboard unavailable. The review body is in the text box below; copy it manually."
+          );
         })
         .catch(say);
     });

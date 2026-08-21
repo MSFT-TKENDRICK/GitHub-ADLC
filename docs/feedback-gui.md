@@ -55,7 +55,8 @@ field you do not recognise is a version skew, not an extension.
 ```json
 {
   "packSchemaVersion": "adlc-human-feedback/v1",
-  "enums": { "verdict": [...], "route": [...], "severity": [...], "annotationShape": [...],
+  "reviewFence": "adlc-human-feedback",
+  "enums": { "verdict": [...], "route": [...], "severity": [...], "shape": [...],
              "critiqueTargetKind": [...], "critiqueStance": [...],
              "diffTargetKind": [...], "diffDecision": [...] },
   "limits": { "commentChars": 4000, "annotations": 500, ... },
@@ -73,6 +74,14 @@ follows automatically, and one that hard-coded the old list starts producing
 packs the CLI rejects. Derivation fails loudly (`SchemaDerivationError`) rather
 than emitting an empty enum, because an empty enum is the same rot as a stale
 hand-copied one, just discovered later.
+
+The key names matter as much as the values. `enums.shape` is spelled exactly
+that, because it is the `shape` property of an annotation in the pack schema. A
+GUI reading `enums.annotationShape` gets `undefined`, renders an empty control,
+and fails at submit — which is precisely how the reference console shipped
+broken until a test compared it against the real manifest instead of a
+hand-written fixture. Do not retype these names from this document; read them
+from the file.
 
 ## Step 2 — use the SDK (or reimplement it exactly)
 
@@ -177,9 +186,27 @@ degraded one.
 
 A downloaded JSON file carries no permission. Locally, `adlc feedback apply` is
 fine — it is your machine. In CI a pack must arrive through something that
-already proves write access: a native PR review
-(`adlc review apply --feedback-pack`) or `workflow_dispatch`. Never an
+already proves write access: a native PR review or `workflow_dispatch`. Never an
 unauthenticated issue comment.
+
+**Review transport (the authorised path in CI):**
+
+```js
+const body = await session.toReviewBody();  // paste as a PR review
+```
+
+That wraps the pack in a fenced block tagged with `submission.reviewFence`.
+The fence string is published in the manifest for one reason: CI finds the pack
+by matching that tag, and a GUI that had to learn it by reading
+`.github/workflows/adlc-feedback.yml` would be hard-coding exactly the thing
+this manifest exists to delete. Read it from `submission.reviewFence`.
+
+Both ends of the fence are anchored to the start of a line, in the workflow and
+in the SDK. That is load-bearing: an unanchored closing fence stops at the first
+backtick run *anywhere*, so a reviewer who typed a code block into their own
+summary would silently truncate their pack. `tests/l11_feedback/test_review_fence.py`
+extracts the regex from the real workflow file and runs it over a body the real
+SDK produced, so the two cannot drift apart.
 
 ## What happens on submit
 
@@ -209,6 +236,7 @@ History is never rewritten. Feedback always moves forward.
 
 - [ ] Reads `feedback-targets.json`; imports nothing from `adlc.stages.report`.
 - [ ] Takes enums, limits and the id pattern from `submission`, not from source.
+- [ ] Takes the PR-review fence from `submission.reviewFence`, never from workflow YAML.
 - [ ] Renders omitted artifacts with their reason and still allows a `whole` annotation.
 - [ ] Stores geometry as `0..1` fractions of natural size.
 - [ ] Shows `sourceDigest` reasoning text verbatim — the digest pins what the human read.

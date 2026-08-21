@@ -29,6 +29,94 @@ CANDIDATE_SHA = "a" * 40
 BASELINE_SHA = "b" * 40
 
 
+@pytest.fixture
+def targets_doc() -> dict[str, Any]:
+    """A minimal but structurally real ``adlc-feedback-targets/v1`` document.
+
+    Lives here rather than in one test module because several suites need it,
+    and because the ``submission`` block is built by the *real*
+    :func:`submission_contract` -- a hand-written copy would happily disagree
+    with the shipped manifest and hide exactly the drift these tests exist to
+    catch. It did, once: a hand-built copy masked a GUI reading ``enums`` under
+    a key the manifest has never emitted.
+    """
+    from adlc.stages.feedback_targets import SCHEMA_VERSION, submission_contract
+
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "generatedAt": "2024-01-01T00:00:00Z",
+        "run": {
+            "runId": "20240101-000000-abcdef",
+            "candidateSha": CANDIDATE_SHA,
+            "baselineRunId": None,
+            "reportDigest": "sha256:" + "c" * 64,
+            "profile": "minimal",
+            "title": None,
+            "passed": False,
+        },
+        "requirements": [{"id": "AC-1", "text": "it works", "source": "spec/spec.md"}],
+        "artifacts": [
+            {
+                "id": "art-1",
+                "path": "evidence/candidate-a/home.png",
+                "sha256": "b" * 64,
+                "kind": "screenshot",
+                "mediaType": "image/png",
+                "bytes": 100,
+                "width": 800,
+                "height": 600,
+                "annotatable": True,
+                "inline": None,
+                "inlineOmittedReason": "not inlined: test fixture",
+            }
+        ],
+        "reasoning": [
+            {
+                "id": "rsn-1",
+                "targetKind": "squad_finding",
+                "targetRef": "reviews/security.md#finding-1",
+                "targetTitle": "unescaped input",
+                "sourceDigest": "sha256:" + "d" * 64,
+                "author": "security-adversary",
+                "text": "the slug is interpolated raw",
+                "severity": "high",
+                "confidence": "high",
+                "citations": ["src/adlc/x.py:12"],
+            }
+        ],
+        "diff": {
+            "baselineRunId": None,
+            "measurements": [
+                {
+                    "targetKind": "measurement",
+                    "targetId": "lcp",
+                    "label": "lcp",
+                    "change": "changed",
+                    "value": 2.5,
+                    "baselineValue": 1.5,
+                    "delta": 1.0,
+                    "budget": 2.0,
+                    "passed": False,
+                    "baselinePassed": True,
+                    "budgetCrossed": "entered_breach",
+                    "collector": "lighthouse",
+                    "regression": True,
+                }
+            ],
+            "coverage": [],
+            "screenshots": [],
+        },
+        "submission": submission_contract(),
+        "budgets": {
+            "perArtifactBytes": 1,
+            "totalBytes": 1,
+            "inlinedBytes": 0,
+            "inlinedCount": 0,
+            "omittedCount": 1,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tiny PNG writer -- a real, decodable image with no third-party dependency
 # ---------------------------------------------------------------------------

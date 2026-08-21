@@ -179,10 +179,17 @@
     "submission": {
       "type": "object",
       "description": "How to turn reviewer input into an accepted pack. Enums and limits are derived from human-feedback-pack.schema.json when this document is built, so a GUI can populate its controls with no schema parser and cannot offer a value ingestion would refuse.",
-      "required": ["packSchemaVersion", "enums", "limits"],
+      "required": ["packSchemaVersion", "reviewFence", "enums", "limits"],
       "additionalProperties": false,
       "properties": {
         "packSchemaVersion": { "const": "adlc-human-feedback/v1" },
+        "reviewFence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9-]+$",
+          "description": "Fenced-code-block info string the CI review transport looks for. A GUI wraps the pack JSON in a fence tagged with this value to submit through a native PR review, and therefore never needs to read workflow YAML to learn the magic word."
+        },
         "endpoint": {
           "type": ["string", "null"],
           "maxLength": 512,
