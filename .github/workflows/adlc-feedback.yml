@@ -181,7 +181,13 @@ jobs:
       actions: read    # download the run artifact produced by adlc.yml
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PACK_FILE: ${{ runner.temp }}/adlc-feedback/pack.json
+      # NOTE: PACK_FILE is deliberately NOT defined here. `jobs.<id>.env` may only
+      # reference the github, needs, strategy, matrix, vars, secrets and inputs
+      # contexts; `runner` is not among them, and using it makes GitHub reject the
+      # whole workflow file at compile time -- the run is created with zero jobs
+      # and no check runs, so there is no log to read. The path is bound in the
+      # `extract` step below (where `runner` IS in scope) and exported through
+      # $GITHUB_ENV for the steps that follow.
     steps:
       # Written before checkout, into RUNNER_TEMP, so `actions/checkout`'s clean
       # step cannot delete it. The pack is untrusted: it is passed through the
@@ -190,6 +196,8 @@ jobs:
       - name: Bind the submitted pack to a file
         id: extract
         env:
+          # `runner` is in scope at step level, unlike at job level.
+          PACK_FILE: ${{ runner.temp }}/adlc-feedback/pack.json
           GH_EVENT_NAME: ${{ github.event_name }}
           PACK_INPUT: ${{ inputs.pack }}
           DISPATCH_RUN_ID: ${{ inputs.run_id }}
@@ -264,6 +272,11 @@ jobs:
           # Write the exact bytes submitted, so a declared packDigest still verifies.
           with open(path, "w", encoding="utf-8") as fh:
               fh.write(raw)
+          # Later steps need the same path. It cannot live in the job-level `env:`
+          # because that block may not reference the `runner` context, so it is
+          # exported here instead. The value is runner-derived, not actor-derived.
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"PACK_FILE={path}\n")
           emit(has_pack="true", run_id=run_id)
           print(f"bound pack for run {run_id}")
           PY
