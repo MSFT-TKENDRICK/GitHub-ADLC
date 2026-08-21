@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADLC feedback console</title>
+<style>/*ADLC:CSS*/</style>
+</head>
+<body>
+<a class="skip" href="#artifacts">Skip to evidence</a>
+<header>
+  <h1>ADLC feedback console</h1>
+  <p class="muted" id="run-line"></p>
+  <p class="muted">
+    A reference review surface built only from <code>adlc-feedback-targets/v1</code>
+    and the feedback SDK. It shares no code with <code>report.html</code>.
+  </p>
+  <p id="status" role="status" aria-live="polite"></p>
+</header>
+
+<main>
+  <h2 id="artifacts-h">Evidence artifacts</h2>
+  <div id="artifacts" aria-labelledby="artifacts-h"></div>
+
+  <h2 id="reasoning-h">Agent reasoning</h2>
+  <div id="reasoning" aria-labelledby="reasoning-h"></div>
+
+  <h2 id="diff-h">Evidence diff</h2>
+  <div id="diff" aria-labelledby="diff-h"></div>
+
+  <h2 id="submit-h">Submit</h2>
+  <section aria-labelledby="submit-h">
+    <div id="counts">
+      <span><strong id="count-annotations">0</strong> annotations</span>
+      <span><strong id="count-critiques">0</strong> critiques</span>
+      <span><strong id="count-decisions">0</strong> diff decisions</span>
+      <span><strong id="count-undecided">0</strong> rows undecided</span>
+    </div>
+    <p id="conflicts" hidden></p>
+    <form id="submission" novalidate>
+      <label for="verdict">Verdict <select id="verdict"></select></label>
+      <label for="route">Route <select id="route"></select></label>
+      <label for="submitted-by">Submitted by <input id="submitted-by" type="text"></label>
+      <label for="summary">Summary <textarea id="summary" rows="3"></textarea></label>
+    </form>
+    <div id="actions">
+      <button type="button" id="download">Download pack</button>
+      <button type="button" id="copy">Copy pack</button>
+      <button type="button" id="submit">Submit to ADLC</button>
+      <button type="button" id="save">Save draft</button>
+      <button type="button" id="restore">Restore draft</button>
+    </div>
+    <p class="muted" id="submit-note"></p>
+    <label for="fallback" class="muted">Pack text (fallback)</label>
+    <textarea id="fallback" hidden readonly aria-label="Pack text"></textarea>
+  </section>
+</main>
+
+<script type="application/json" id="adlc-targets">/*ADLC:TARGETS*/</script>
+<script>/*ADLC:SDK*/</script>
+<script>/*ADLC:CONSOLE*/</script>
+</body>
+</html>

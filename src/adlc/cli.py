@@ -500,6 +500,100 @@ def feedback_validate(
         raise typer.Exit(1)
 
 
+@feedback_app.command("targets")
+def feedback_targets_cmd(
+    run_id: str = typer.Argument("latest"),
+    out: Path = typer.Option(None, "--out", help="Write here instead of the run directory."),
+    endpoint: str = typer.Option("", "--endpoint", help="Loopback submission URL, if any."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Build feedback-targets.json: everything in a run a human can respond to.
+
+    This is the GUI-agnostic half of the loop. Any review surface that reads this
+    document and emits an adlc-human-feedback/v1 pack is a first-class ADLC
+    review GUI -- no Python, no run-directory access, no ADLC internals.
+    """
+    from adlc.stages.feedback_targets import compute_targets, run_feedback_targets, targets_path
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    if out is not None:
+        targets = compute_targets(cfg, rd, endpoint=endpoint or None)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(targets, indent=2) + "\n", encoding="utf-8")
+        written = out
+    else:
+        targets = run_feedback_targets(cfg, rd, endpoint=endpoint or None)
+        reduce_run(cfg, rd)
+        written = targets_path(rd)
+
+    diff = targets.get("diff") or {}
+    _emit(
+        targets if as_json else {"path": str(written)},
+        as_json,
+        f"{written}: {len(targets['artifacts'])} artifact(s), "
+        f"{len(targets['reasoning'])} reasoning target(s), "
+        f"{sum(len(diff.get(k) or []) for k in ('measurements', 'coverage', 'screenshots'))} "
+        f"diff row(s); {targets['budgets']['inlinedBytes']} byte(s) inlined, "
+        f"{targets['budgets']['omittedCount']} omitted",
+    )
+
+
+@feedback_app.command("sdk")
+def feedback_sdk_cmd(
+    out: Path = typer.Option(..., "--out", help="Directory to write the SDK into."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Export the portable feedback SDK for use by any GUI.
+
+    Writes adlc-feedback.js (classic script / CommonJS) and adlc-feedback.mjs
+    (ES module). Both are the same source, so no two consumers can disagree
+    about the canonical pack digest.
+    """
+    from adlc.stages.feedback_sdk import write_sdk
+
+    written = write_sdk(out)
+    _emit(
+        {"written": [str(p) for p in written]},
+        as_json,
+        "wrote " + ", ".join(str(p) for p in written),
+    )
+
+
+@feedback_app.command("console")
+def feedback_console_cmd(
+    run_id: str = typer.Argument("latest"),
+    out: Path = typer.Option(..., "--out", help="HTML file to write."),
+    targets: Path = typer.Option(
+        None, "--targets", help="Read this manifest instead of building one from the run."
+    ),
+    endpoint: str = typer.Option("", "--endpoint", help="Loopback submission URL, if any."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Build a standalone review console from a feedback-targets document.
+
+    This is the second consumer of the manifest, and it shares no code with
+    report.html. It exists so the contract is provably GUI-agnostic: if this
+    keeps working when the report GUI is replaced, the seam is real.
+    """
+    from adlc.stages.feedback_console import write_console
+
+    if targets is not None:
+        doc = _read_json_arg(targets, "targets")
+    else:
+        from adlc.stages.feedback_targets import compute_targets
+
+        cfg = _cfg()
+        doc = compute_targets(cfg, _rd(cfg, run_id), endpoint=endpoint or None)
+
+    written = write_console(doc, out)
+    _emit(
+        {"path": str(written), "bytes": written.stat().st_size},
+        as_json,
+        f"{written}: {written.stat().st_size} bytes, self-contained; open it with file://",
+    )
+
+
 @app.command()
 def validate(
     run_id: str = typer.Argument("latest"),
