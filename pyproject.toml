@@ -92,6 +92,7 @@ evals = "adlc.adapters.gate.evals:EvalsGate"                          # L3
 governance = "adlc.adapters.gate.governance:GovernanceGate"           # L2
 adversarial_review = "adlc.adapters.gate.adversarial_review:AdversarialReviewGate"  # L8
 evidence_review = "adlc.adapters.gate.evidence_review:EvidenceReviewGate"           # L8
+feature_completeness = "adlc.adapters.gate.feature_completeness:FeatureCompletenessGate"  # L8
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/adlc"]

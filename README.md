@@ -6,7 +6,7 @@ brief into a specified, decomposed, tested, measured, and reviewable change:
 
 ```text
 brief -> qualify -> spec -> enrich -> graph -> build -> evidence
-      -> eval -> gates -> report -> PR review -> ADR
+      -> eval -> gates -> completeness review -> report -> PR review -> ADR
 ```
 
 The framework is deliberately small and composable. It has credential-free
@@ -100,6 +100,9 @@ adlc build latest --runner fake --max-parallel 4
 adlc evidence latest --variant candidate-a
 adlc eval latest
 adlc gate latest
+adlc reduce latest
+adlc personas latest
+adlc complete latest
 adlc report latest --open
 adlc validate latest
 ```
@@ -117,6 +120,7 @@ adlc qualify "$RUN_ID" && adlc spec "$RUN_ID" && adlc enrich "$RUN_ID"
 adlc graph "$RUN_ID" && adlc build "$RUN_ID" --runner fake
 adlc evidence "$RUN_ID" --variant candidate-a
 adlc eval "$RUN_ID" && adlc gate "$RUN_ID"
+adlc reduce "$RUN_ID" && adlc personas "$RUN_ID" && adlc complete "$RUN_ID"
 adlc report "$RUN_ID" && adlc validate "$RUN_ID"
 ```
 
@@ -135,6 +139,8 @@ adlc report "$RUN_ID" && adlc validate "$RUN_ID"
 | `adlc eval` | Score the candidate against its rubric |
 | `adlc gate` | Run selected gates and enforce fail-closed aggregation |
 | `adlc reduce` | Fold immutable stage results into canonical `run.json` |
+| `adlc personas` | Walk the scenarios as each persona and record the reasoning as evidence |
+| `adlc complete` | Build the code-blind completeness pack and run the feature-completeness gate |
 | `adlc report` | Render a standalone HTML report |
 | `adlc validate` | Validate run artifacts against JSON Schemas |
 | `adlc adr new/list/set-status` | Create and manage MADR decision records |
@@ -205,6 +211,14 @@ spend money or write to live GitHub resources. See the adapter guides in
 - **Sanitized evidence review:** the evidence reviewer receives hashes,
   measurements, and coverage claims, not raw traces, HAR files, or console
   logs.
+- **Code-blind completeness review:** every other gate checks the *change*;
+  `feature_completeness` checks the *run*. A squad that has seen the brief and
+  the evidence and nothing else -- no code, no diffs, no agent sessions, no
+  chains of thought -- decides whether the evidence demonstrates what was asked
+  for. The isolation is structural (`checkout: false`, no repository toolset, a
+  pack built by allowlist that is refused if a leak marker survives), and a
+  failure routes back to the **outer** loop, because if the evidence does not
+  answer the brief then patching the code is guessing.
 - **Native decisions:** GitHub pull-request reviews become the human decision;
   revisions create new runs instead of mutating history.
 

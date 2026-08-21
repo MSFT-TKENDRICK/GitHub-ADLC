@@ -28,6 +28,8 @@ ADLC. The root [`README.md`](../README.md) is the short onboarding path.
   dependency-review, timeouts, and required permissions.
 - [`squads.md`](squads.md) — gh-aw reviewer squads, sanitized evidence review,
   citations, quorum, and safe outputs.
+- [`report.md`](report.md) — the standalone HTML report: task graph, hero
+  recording, before/after slideshow, diff viewer, ADR citations, and personas.
 - [`taskstore.md`](taskstore.md) — SQLite defaults and GitHub Issues,
   sub-issues, and Projects integration.
 

@@ -127,9 +127,11 @@ flowchart TB
         BUILD --> GE[evals] & GG[governance] & GD["evidence_completeness<br/>deterministic"]
         GS & GQ & GE & GG & GD --> GA1["adversarial squad · code"]
         GA1 --> GA2["evidence squad<br/>sanitized pack only"]
-        GA2 --> AGG["ADLC / required<br/>single branch-protection check"]
+        GA2 --> GA3["feature-completeness squad<br/>code-blind · BLOCKING<br/>brief vs evidence only"]
+        GA3 --> AGG["ADLC / required<br/>single branch-protection check"]
     end
 
+    GA3 -->|"quorum: evidence does not<br/>demonstrate the request"| NEW
     AGG --> REP["report.html + artifacts → PR"]
     REP --> HR["native PR review<br/>approve · changes-requested · comments"]
     HR --> ADR["ADR · MADR v4<br/>bound to reviewSha"]
@@ -141,6 +143,13 @@ flowchart TB
 
 **Loops are bounded and immutable:** a revision never mutates a prior run; it creates a
 new run with `referencesRun`. `maxInnerIterations` = 2, `maxOuterIterations` = 1.
+
+**Why feature-completeness routes *outward*.** Every other gate failure is a
+defect in the change, so the inner loop repairs it. This one is a defect in what
+we set out to prove — the brief was misread, the design does not deliver it, or
+nobody planned to capture proof of it. Patching the code against that verdict is
+guessing, so the run re-enters at `spec`/`enrich`, not at the executor.
+
 
 ---
 
@@ -167,7 +176,9 @@ new run with `referencesRun`. `maxInnerIterations` = 2, `maxOuterIterations` = 1
     ├── evidence/<variant>/            # trace.zip video.webm network.har console.jsonl
     │                                  #   screenshots/ otel.jsonl lighthouse.json
     │                                  #   k6.json axe.json replay.spec.ts
+    ├── evidence/personas/*.json       # persona-feedback/v1 — hashed as artifacts (§4.6b)
     ├── evidence-review-pack.json      # sanitized, allowlisted (§4.6)
+    ├── completeness-pack.json         # code-blind reviewer input (§4.6c)
     ├── evals/            gates/<gate>.json      reviews/*.md
     ├── report.html       oes.json     # exported, conditional
 docs/decisions/NNNN-*.md               # ADRs — permanent, git-tracked
@@ -315,6 +326,70 @@ The **blocking** part is deterministic: every requirement must have ≥ 1 hash-v
 artifact produced by the declared collector at the declared SHA. The LLM squad verdict is
 **advisory** and must cite `artifactSha256` values; an uncited verdict is discarded.
 
+### 4.6b `evidence/personas/*.json` — persona feedback as evidence
+
+One record per persona per scenario, written by the `persona_feedback` stage
+*under* `evidence/` so `scan_artifacts()` hashes each one as a first-class
+artifact. That placement is the design: persona feedback is evidence, so it must
+be hash-addressable, citable by a reviewer, and impossible to edit after the fact
+without the digest changing.
+
+```jsonc
+{ "personaId":"reader","name":"Goran","role":"Reader","scenarioId":"US1-AC2",
+  "tldr":"…≤150 chars…","verdict":"satisfied|partial|confused|blocked",
+  "sentiment":0.6,"simulated":true,"source":"…",
+  "steps":[{"index":0,"observation":"…","thought":"…","action":"…",
+            "outcome":"…","confidence":0.9}],
+  "friction":[{"summary":"…","severity":"medium","requirementId":"US1-AC2"}],
+  "artifactSha256":["…"] }
+```
+
+Two rules keep it from being decorative rather than honest:
+
+- **`simulated` is required and set by the producing code path**, never by a
+  caller's argument. A deterministic walkthrough derived from the spec and the
+  captured evidence is useful, but it is not a human sitting in front of the
+  product, and conflating the two would be the worst thing this record could do.
+  Real sessions are ingested by dropping a conforming file with
+  `simulated: false`; regeneration never overwrites one.
+- **Verdicts restate signals.** `blocked` = no artifact covers the requirement.
+  `partial` = a measurement tied to it missed its budget. `confused` = evidence
+  exists but nothing visual proves the user could *see* the outcome. Coverage is
+  read from the review pack's map rather than re-derived, so the persona pane can
+  never claim evidence the `evidence_completeness` gate disagrees it has.
+
+`steps[].thought` is what makes the pane worth having: the reasoning is shown, so
+a reader can disagree with it.
+
+### 4.6c `completeness-pack.json` — code-blind reviewer input
+
+The input to the `feature_completeness` squad (§4.9, `docs/squads.md` §4.3). It
+excludes everything `evidence-review-pack.json` excludes, **plus the reasoning**:
+agent sessions, transcripts, chains of thought, stage rationales, patches and
+replay scripts.
+
+An agent's reasoning is the most persuasive available account of why the work is
+sufficient, written by the party with an interest in that conclusion, and it
+explains away exactly the gaps the reviewer exists to find. It is not evidence,
+and this reviewer's whole remit is evidence.
+
+```jsonc
+{ "runId":"…","candidateSha":"…","collector":"adlc.stages.complete",
+  "brief":{"text":"…","source":"brief.md","sha256":"…"},
+  "requirements":[{"id":"US1-AC2","text":"…","covered":true,"artifactSha256":["…"]}],
+  "evidence":[{"artifactSha256":"…","kind":"video","bytes":142,"redacted":true}],
+  "personaFeedback":[{"personaId":"reader","scenarioId":"US1-AC2","verdict":"…","tldr":"…"}],
+  "counts":{"requirements":2,"covered":2,"uncovered":0,"artifacts":7,"personaRecords":3},
+  "excluded":[{"what":"Source code and diffs","why":"…"}] }
+```
+
+Built by allowlist, then re-checked against `LEAK_MARKERS` (`diff --git`, `@@ -`,
+`thinking`, `tool_call`, `system prompt`, …). On a hit the stage **refuses to
+write the pack at all** rather than writing a redacted one: a pack that had to be
+scrubbed is a pack whose construction is wrong, and the next leak might not carry
+a marker. `excluded[]` is declared *in* the pack so the reviewer knows what it
+cannot see and can honestly answer "I cannot judge this from the evidence alone".
+
 ### 4.7 Feedback = native PR review (no bespoke protocol)
 
 | Human action | Effect |
@@ -349,9 +424,11 @@ adlc run new --brief FILE | --issue N
 adlc qualify|spec|enrich|graph RUN
 adlc build RUN [--max-parallel N] [--runner fake|copilot-sdk|agent-task]
 adlc evidence RUN --variant KEY
+adlc personas RUN [--variant KEY]    # persona walkthroughs → evidence/personas/*.json
 adlc eval RUN
 adlc gate RUN --ids security,code_quality,evals,…
 adlc reduce RUN                     # stages/*.json → run.json  (the only writer)
+adlc complete RUN [--no-iterate]    # build completeness-pack.json; route a FAIL outward
 adlc report RUN
 adlc adr new|list|set-status
 adlc review apply RUN --event FILE  # native PR review payload
@@ -361,6 +438,12 @@ adlc autoresearch | adlc hotfix --incident FILE
 ```
 
 All commands: idempotent, `--json`, non-zero exit on required-gate failure.
+
+`adlc complete` must run **after** the first `adlc reduce`, because the pack is
+built from the reduced run. It is two phases in one command on purpose: build the
+pack, then act on the verdict the gate recorded for it. On a `fail` it opens a
+successor run in the *outer* loop carrying the original brief plus the reviewers'
+cited findings — `--no-iterate` suppresses that and exits non-zero instead.
 
 ---
 
@@ -451,6 +534,7 @@ adlc qualify $RUN && adlc spec $RUN && adlc enrich $RUN && adlc graph $RUN
 adlc build $RUN --max-parallel 4 --runner fake
 adlc evidence $RUN --variant candidate-a && adlc eval $RUN
 adlc gate $RUN --ids tests,secrets_local,deps_local,evidence_completeness --profile minimal
+adlc reduce $RUN && adlc personas $RUN && adlc complete $RUN --no-iterate
 adlc reduce $RUN && adlc report $RUN && adlc validate $RUN
 ```
 
@@ -465,13 +549,18 @@ Green requires **all** of:
 6. A required gate returning `not_run` makes the aggregate **fail** (negative test).
 7. `evidence-review-pack.json` contains **no** raw HAR/trace/console/replay content
    (asserted by content scan).
-8. `report.html` opens standalone; renders diagrams, evidence index, ADR + review deep links.
-9. `adlc review apply` on a `changes_requested` fixture creates a **new** run with
-   `referencesRun` and leaves the prior run byte-identical.
-10. ≥ 1 MADR v4 ADR in `docs/decisions/`, bound to `reviewSha`.
-11. A clean consumer repository can be installed by `adlc init` and
+8. `completeness-pack.json` contains **no** source, diff, agent transcript, chain of
+   thought or replay script (asserted by content scan against `LEAK_MARKERS`), and
+   declares its own `excluded[]`.
+9. `report.html` opens standalone; renders the task graph with per-node ≤150-char
+   summaries, the hero recording, the before/after slideshow, the diff viewer, ADR
+   detail views with a citations pane, persona records, and review deep links.
+10. `adlc review apply` on a `changes_requested` fixture creates a **new** run with
+    `referencesRun` and leaves the prior run byte-identical.
+11. ≥ 1 MADR v4 ADR in `docs/decisions/`, bound to `reviewSha`.
+12. A clean consumer repository can be installed by `adlc init` and
     `bootstrap.sh`, then run the same flow via the pinned reusable workflow.
-12. Kill-and-resume: interrupting `adlc build` and re-running resumes from the last
+13. Kill-and-resume: interrupting `adlc build` and re-running resumes from the last
     completed level barrier.
 
 ### 8.2 Real-agent smoke — opt-in, declared cost
