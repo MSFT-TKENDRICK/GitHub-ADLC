@@ -20,14 +20,13 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 
 network:
   allowed: [defaults]
 
 engine:
   id: copilot
-  env:
-    COPILOT_GITHUB_TOKEN: ${{ github.token }}
 model: gpt-5
 
 tools:

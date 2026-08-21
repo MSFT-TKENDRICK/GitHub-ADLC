@@ -100,9 +100,18 @@ class TestEveryWorkflow:
         fm = frontmatter(WORKFLOWS / f"{name}.md")
         permissions = fm.get("permissions") or {}
         assert permissions, f"{name} does not declare permissions"
-        assert all(
-            value == "read" for value in permissions.values()
-        ), f"{name} grants a write scope to the agent job: {permissions}"
+        repo_write_scopes = {
+            scope: value
+            for scope, value in permissions.items()
+            if value != "read" and scope != "copilot-requests"
+        }
+        assert not repo_write_scopes, (
+            f"{name} grants a repository write scope to the agent job: {permissions}"
+        )
+        if "copilot-requests" in permissions:
+            assert permissions["copilot-requests"] == "write", (
+                f"{name} must use copilot-requests: write for Copilot inference"
+            )
 
     def test_writes_go_through_safe_outputs(self, name: str) -> None:
         fm = frontmatter(WORKFLOWS / f"{name}.md")
