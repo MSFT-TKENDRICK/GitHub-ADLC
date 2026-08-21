@@ -11,12 +11,26 @@
       });
     });
     // Mermaid is progressive enhancement: offline the diagram source stays readable.
-    if (window.mermaid) {
-      mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'strict' });
+    // Its <script> is deferred so a CDN that blackholes the connection (captive
+    // portal, corporate proxy) cannot hold the OS connect timeout -- ~21s on
+    // Windows, ~130s on Linux -- in front of the handlers above. Deferred scripts
+    // run before DOMContentLoaded, so by here mermaid has either loaded or failed.
+    function initMermaid() {
+      if (window.mermaid) {
+        // startOnLoad:false + explicit run(): initialising from inside a
+        // DOMContentLoaded handler races mermaid's own auto-start listener.
+        mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+        mermaid.run();
+      } else {
+        document.querySelectorAll('.mermaid').forEach(function (el) {
+          var pre = document.createElement('pre'); pre.textContent = el.textContent;
+          el.replaceWith(pre);
+        });
+      }
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaid);
     } else {
-      document.querySelectorAll('.mermaid').forEach(function (el) {
-        var pre = document.createElement('pre'); pre.textContent = el.textContent;
-        el.replaceWith(pre);
-      });
+      initMermaid();
     }
   })();

@@ -29,7 +29,11 @@ from adlc.runs import RunDir, write_json
 from adlc.schemas import is_valid
 from adlc.stages.evidence_diff import diff_path
 from adlc.stages.report import render as render_report
-from adlc.stages.report.context import ReportContext
+from adlc.stages.report.context import (
+    InlineBudget,
+    ReportContext,
+    encoded_data_uri_len,
+)
 from adlc.stages.report.sections import diff as diff_section
 from adlc.stages.report.shell import read_asset
 from tests.l11_feedback.conftest import CANDIDATE_SHA, png_bytes, write_png
@@ -65,9 +69,12 @@ def _diff_doc(**overrides: Any) -> dict[str, Any]:
     return doc
 
 
-def _render(cfg: Config, cand: RunDir, doc: dict[str, Any]) -> str:
+def _render(
+    cfg: Config, cand: RunDir, doc: dict[str, Any], budget: InlineBudget | None = None
+) -> str:
     write_json(diff_path(cand), doc)
-    return diff_section.render(ReportContext(cfg=cfg, rd=cand))
+    extra = {"inline_budget": budget} if budget is not None else {}
+    return diff_section.render(ReportContext(cfg=cfg, rd=cand, **extra))
 
 
 def _m(metric_id: str, **kw: Any) -> dict[str, Any]:
@@ -295,13 +302,13 @@ def test_over_per_image_budget_degrades_with_reason(cfg: Config, monkeypatch: py
     assert "Difference blend unavailable" in out
 
 
-def test_section_budget_exhaustion_degrades_with_reason(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_section_budget_exhaustion_degrades_with_reason(cfg: Config) -> None:
     # Identical bytes for every image so the running total is deterministic and
     # does not depend on how a given colour happens to compress: four images of
     # size `unit`, a section budget of `3 * unit`, so the fourth must degrade.
     rgb = (1, 2, 3)
     unit = len(png_bytes(rgb=rgb))
-    monkeypatch.setattr(diff_section, "_MAX_SECTION_BYTES", 3 * unit)
+    budget = InlineBudget(total=3 * encoded_data_uri_len(unit, "image/png"))
     base = _run(cfg, BASE_ID)
     cand = _run(cfg, CAND_ID, references=BASE_ID)
     shots = []
@@ -309,8 +316,8 @@ def test_section_budget_exhaustion_degrades_with_reason(cfg: Config, monkeypatch
         cs = write_png(cand.evidence_dir / "candidate-a" / f"s{i}.png", rgb=rgb)
         bs = write_png(base.evidence_dir / "candidate-a" / f"s{i}.png", rgb=rgb)
         shots.append(_s(f"s{i}.png", "changed", sha256=cs, baselineSha256=bs, bytes=unit, baselineBytes=unit))
-    out = _render(cfg, cand, _diff_doc(screenshots=shots))
-    assert "screenshot-section budget is exhausted" in out
+    out = _render(cfg, cand, _diff_doc(screenshots=shots), budget)
+    assert "document inline budget is exhausted" in out
     # Degradation, not a drop. Each image is inlined at most once (the blend reuses
     # them), so the first pair spends 2 units, the second pair's candidate spends
     # the third, and its baseline degrades to a hash. Three inlined images total,
@@ -516,3 +523,89 @@ def test_diff_js_is_loaded_into_the_section(cfg: Config) -> None:
     out = _render(cfg, cand, _diff_doc(measurements=[_m("lcp_ms", value=1.0, baselineValue=0.0, delta=1.0)]))
     assert read_asset("diff.js") in out
     assert '<script type="application/json" id="adlc-diff-model">' in out
+
+
+def test_one_document_budget_is_shared_by_every_section(cfg: Config) -> None:
+    """The inline allowance belongs to the document, not to a section.
+
+    Regression test for a bug that no section-local test could see: the evidence
+    section and the screenshot-diff section each held a private 12 MiB budget,
+    charged in raw bytes. Each section's own accounting was internally correct,
+    so both looked right; the emitted file was 2x the intended inline payload,
+    and 2.67x once base64 expansion is counted. Inlining exists *only* to keep
+    report.html mailable, so that silently defeated the feature's whole premise.
+
+    Rendering both sections against one context is the only place the invariant
+    is observable, which is exactly why it went unnoticed.
+    """
+    from adlc.stages.report.sections import evidence as evidence_section
+
+    rgb = (7, 8, 9)
+    data = png_bytes(rgb=rgb)
+    one_image = encoded_data_uri_len(len(data), "image/png")
+
+    base = _run(cfg, BASE_ID)
+    cand = _run(cfg, CAND_ID, references=BASE_ID)
+    cs = write_png(cand.evidence_dir / "candidate-a" / "home.png", rgb=rgb)
+    bs = write_png(base.evidence_dir / "candidate-a" / "home.png", rgb=(1, 1, 1))
+    write_json(
+        diff_path(cand),
+        _diff_doc(screenshots=[
+            _s("home.png", "changed", sha256=cs, baselineSha256=bs,
+               bytes=len(data), baselineBytes=len(data)),
+        ]),
+    )
+
+    # Room for exactly one image in the whole document.
+    budget = InlineBudget(total=one_image)
+    ctx = ReportContext(
+        cfg=cfg,
+        rd=cand,
+        artifacts=[{
+            "path": "evidence/candidate-a/home.png",
+            "kind": "screenshot",
+            "bytes": len(data),
+            "sha256": cs,
+        }],
+        inline_budget=budget,
+    )
+
+    ev_html = evidence_section.render(ctx)
+    diff_html = diff_section.render(ctx)
+
+    # The evidence section spends the allowance; the diff section must then find
+    # it gone. Under the old code both inlined, because neither could see the
+    # other's spend.
+    assert ev_html.count("data:image/png;base64,") == 1
+    assert diff_html.count("data:image/png;base64,") == 0
+    assert "document inline budget is exhausted" in diff_html
+
+    # The invariant that actually matters: the document never carries more
+    # inlined bytes than the budget allows.
+    inlined = re.findall(r'data:image/[a-z]+;base64,[A-Za-z0-9+/=]+', ev_html + diff_html)
+    assert sum(len(uri) for uri in inlined) <= budget.total
+    assert budget.spent <= budget.total
+
+
+def test_budget_is_charged_in_encoded_not_raw_bytes(cfg: Config) -> None:
+    """Charging raw bytes under-counts the document by a third.
+
+    base64 is 4/3, so a budget spent in raw bytes lets ~1.33x the intended
+    payload into the file. The check is arithmetic, not a magic constant.
+    """
+    rgb = (3, 1, 4)
+    data = png_bytes(rgb=rgb)
+    raw = len(data)
+    encoded = encoded_data_uri_len(raw, "image/png")
+    assert encoded > raw * 4 // 3  # the prefix plus base64 padding
+
+    budget = InlineBudget(total=encoded)
+    assert budget.charge(encoded) is True
+    assert budget.remaining == 0
+    # A rejected charge must cost nothing, so one oversized image cannot strand
+    # the budget for the images after it.
+    assert budget.charge(1) is False
+    assert budget.spent == encoded
+
+    raw_sized = InlineBudget(total=raw)
+    assert raw_sized.charge(encoded) is False, "a raw-sized budget must not admit an encoded image"

@@ -39,6 +39,59 @@ def omission(reason: str) -> str:
     return f'<p class="muted">{escape(reason)}</p>'
 
 
+#: Whole-document ceiling on inlined ``data:`` image bytes.
+#:
+#: Two properties of this number were previously wrong in ways that cancelled
+#: out of every test but not out of the artifact:
+#:
+#: * It is charged in **encoded** bytes -- what actually lands in the file --
+#:   not raw file size. base64 is 4/3, so charging raw under-counts by a third.
+#: * It is scoped to the **document**, not to a section. Two sections each
+#:   holding a private allowance of the same nominal size produce a document
+#:   twice the intended size, and each section's own accounting looks correct.
+#:
+#: The number exists only to keep ``report.html`` mailable -- that is the entire
+#: reason images are inlined rather than referenced -- so it is sized against
+#: real attachment limits (Outlook 20 MB, Gmail 25 MB) with room for the rest of
+#: the document.
+MAX_INLINE_BYTES_DOCUMENT = 12 * 1024 * 1024
+
+
+def encoded_data_uri_len(raw_len: int, mime: str) -> int:
+    """Exact length of the ``data:`` URI for ``raw_len`` bytes, without encoding.
+
+    Lets a caller test the budget *before* paying for the base64 allocation.
+    """
+    return len(f"data:{mime};base64,") + 4 * ((raw_len + 2) // 3)
+
+
+@dataclass
+class InlineBudget:
+    """One document-scoped allowance for inlined image bytes.
+
+    Deliberately mutable and deliberately shared: it is the only thing that
+    knows the true size of the document being assembled.
+    """
+
+    total: int = MAX_INLINE_BYTES_DOCUMENT
+    spent: int = 0
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.spent)
+
+    def charge(self, encoded_len: int) -> bool:
+        """Charge ``encoded_len`` against the budget if it fits.
+
+        Returns whether it fit. A rejected charge costs nothing, so a single
+        oversized image never strands the budget for the images after it.
+        """
+        if encoded_len > self.remaining:
+            return False
+        self.spent += encoded_len
+        return True
+
+
 @dataclass(frozen=True)
 class ReportContext:
     """Everything the sections need, computed once from ``(cfg, rd)``."""
@@ -56,3 +109,7 @@ class ReportContext:
     pr: int | None = None
     passed: bool = True
     failures: list[str] = field(default_factory=list)
+    #: Shared across every section -- see :class:`InlineBudget`. Mutable by
+    #: design even though the context is frozen: sections charge against one
+    #: allowance as they render.
+    inline_budget: InlineBudget = field(default_factory=lambda: InlineBudget())

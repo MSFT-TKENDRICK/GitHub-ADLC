@@ -37,7 +37,7 @@ _SHELL = """<!doctype html>
 {body}
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
 {scripts}
 </script>

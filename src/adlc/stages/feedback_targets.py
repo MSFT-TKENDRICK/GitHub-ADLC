@@ -70,6 +70,12 @@ _ANNOTATABLE_MEDIA = ("image/", "video/")
 _REASONING_TEXT_CAP = 20_000
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
+#: Change kinds whose baseline image is worth inlining. ``unchanged`` is excluded
+#: because its baseline is byte-identical to the candidate, which is already
+#: inlined in ``artifacts``; ``added`` has no baseline at all. Spending the
+#: shared budget on either starves the changed pairs the manifest exists to show.
+_BASELINE_INLINE_CHANGES = frozenset({"changed", "removed"})
+
 
 def targets_path(rd: RunDir) -> Path:
     return rd.path / "feedback-targets.json"
@@ -270,7 +276,8 @@ def _png_size(path: Path) -> tuple[int | None, int | None]:
     somewhere that is not the reviewer's viewport.
     """
     try:
-        head = path.read_bytes()[:24]
+        with path.open("rb") as handle:
+            head = handle.read(24)
     except OSError:
         return None, None
     if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
@@ -477,12 +484,23 @@ def _diff(rd: RunDir, budget: _Budget) -> dict[str, Any] | None:
         return None
     if not isinstance(raw, dict):
         return None
+    baseline_run_id = raw.get("baselineRunId")
+    # Enumerate the baseline's variant dirs once for the whole manifest. Doing it
+    # inside the row loop re-read the directory once per screenshot, which is
+    # S x (1 opendir + 2V stats) -- the same quadratic the report's screenshot
+    # section already avoids with a one-shot index.
+    variants: list[Path] | None = None
+    if isinstance(baseline_run_id, str) and baseline_run_id:
+        runs_root = rd.path.parent.resolve()
+        base_dir = (runs_root / baseline_run_id / "evidence").resolve()
+        if base_dir.is_relative_to(runs_root) and base_dir.is_dir():
+            variants = _variant_dirs(base_dir)
     return {
-        "baselineRunId": raw.get("baselineRunId"),
+        "baselineRunId": baseline_run_id,
         "measurements": [_measurement_row(m) for m in _rows(raw, "measurements")],
         "coverage": [_coverage_row(c) for c in _rows(raw, "coverage")],
         "screenshots": [
-            _screenshot_row(rd, s, budget, raw.get("baselineRunId"))
+            _screenshot_row(rd, s, budget, baseline_run_id, variants)
             for s in _rows(raw, "screenshots")
         ],
     }
@@ -532,7 +550,11 @@ def _coverage_row(c: dict[str, Any]) -> dict[str, Any]:
 
 
 def _screenshot_row(
-    rd: RunDir, s: dict[str, Any], budget: _Budget, baseline_run_id: Any
+    rd: RunDir,
+    s: dict[str, Any],
+    budget: _Budget,
+    baseline_run_id: Any,
+    variants: list[Path] | None = None,
 ) -> dict[str, Any]:
     rel = str(s.get("path") or "")
     change = str(s.get("change") or "unchanged")
@@ -556,8 +578,19 @@ def _screenshot_row(
     # The candidate image is already inlined once in ``artifacts``; re-encoding it
     # here would double the document for no gain. Only the baseline -- which is
     # in another run dir and therefore absent from ``artifacts`` -- is inlined.
-    if baseline_run_id and s.get("baselineSha256"):
-        candidate = _baseline_screenshot(rd, str(baseline_run_id), rel)
+    #
+    # And only for rows where the baseline is a *different* image. Diff rows
+    # arrive in path order, uncorrelated with change status, so inlining every
+    # baseline spends the whole budget on whatever sorts first -- overwhelmingly
+    # unchanged images, whose baseline is byte-identical to the candidate that is
+    # already inlined. The changed pairs, the only reason this manifest exists,
+    # would then be the ones reported as over budget.
+    if change not in _BASELINE_INLINE_CHANGES:
+        row["inlineOmittedReason"] = (
+            f"baseline not inlined: '{change}' has no distinct baseline image to compare"
+        )
+    elif baseline_run_id and s.get("baselineSha256"):
+        candidate = _baseline_screenshot(rd, str(baseline_run_id), rel, variants)
         if candidate is not None and candidate.is_file():
             size = candidate.stat().st_size
             row["baselineInline"], row["inlineOmittedReason"] = budget.take(
@@ -566,11 +599,17 @@ def _screenshot_row(
     return row
 
 
-def _baseline_screenshot(rd: RunDir, baseline_run_id: str, rel: str) -> Path | None:
+def _baseline_screenshot(
+    rd: RunDir, baseline_run_id: str, rel: str, variants: list[Path] | None = None
+) -> Path | None:
     """Locate ``rel`` inside the baseline run's evidence, under any variant dir.
 
     ``rel`` is variant-relative by design -- that is what makes the diff stable
     across a variant rename -- so it has to be re-anchored rather than joined.
+    Because it is variant-relative *by construction*, the direct join below
+    essentially never hits; the variant scan is the real path, which is why the
+    caller passes a ``variants`` listing enumerated once for the whole manifest
+    rather than re-reading the directory once per screenshot.
 
     Both ``baseline_run_id`` and ``rel`` are read out of a diff document, and the
     result is base64-inlined into the manifest. Neither is attacker-controlled
@@ -591,10 +630,18 @@ def _baseline_screenshot(rd: RunDir, baseline_run_id: str, rel: str) -> Path | N
 
     if found := _confined(base_dir / rel):
         return found
-    for variant in sorted(p for p in base_dir.iterdir() if p.is_dir()):
+    for variant in _variant_dirs(base_dir) if variants is None else variants:
         if found := _confined(variant / rel):
             return found
     return None
+
+
+def _variant_dirs(base_dir: Path) -> list[Path]:
+    """Immediate subdirectories of an evidence tree, one enumeration."""
+    try:
+        return sorted(p for p in base_dir.iterdir() if p.is_dir())
+    except OSError:
+        return []
 
 
 # ---------------------------------------------------------------------------

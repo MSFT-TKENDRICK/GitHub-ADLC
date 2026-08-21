@@ -32,16 +32,23 @@ from pathlib import Path
 from typing import Any
 
 from adlc.runs import RunDir
-from adlc.stages.report.context import ReportContext, escape
+from adlc.stages.report.context import (
+    MAX_INLINE_BYTES_DOCUMENT,
+    ReportContext,
+    encoded_data_uri_len,
+    escape,
+)
 from adlc.stages.report.shell import read_asset
 
 #: Per-image inline budget. An image larger than this degrades to hash + size
 #: with a stated reason rather than bloating the single-file report.
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 
-#: Cumulative inline budget for the whole screenshots section. Once exhausted,
-#: the remaining images degrade -- never silently drop.
-_MAX_SECTION_BYTES = 12 * 1024 * 1024
+#: The cumulative budget is deliberately *not* owned here. It is document-scoped
+#: and shared with the evidence section -- see
+#: :class:`adlc.stages.report.context.InlineBudget`. A private section budget of
+#: the same nominal size silently doubled the document, because each section's
+#: own accounting still looked correct in isolation.
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 _MIME = {
@@ -360,7 +367,6 @@ def _screenshots_block(
     # linear in the number of files even with many screenshot pairs.
     cand_index = _build_image_index(ctx.rd.evidence_dir)
     base_index = _build_image_index(baseline_rd.evidence_dir if baseline_rd else None)
-    budget = {"remaining": _MAX_SECTION_BYTES}
     blocks = []
     for i, s in enumerate(screenshots):
         rel = str(s.get("path", ""))
@@ -373,12 +379,13 @@ def _screenshots_block(
         model_rows[did] = meta
         blocks.append(
             _screenshot_figure(
-                s, rel, change, i, did, cand_index.get(rel), base_index.get(rel), budget
+                ctx, s, rel, change, i, did, cand_index.get(rel), base_index.get(rel)
             )
         )
     note = (
         f'  <p class="note">Baseline and candidate images are inlined offline (up to '
-        f"{_human(_MAX_IMAGE_BYTES)} each, {_human(_MAX_SECTION_BYTES)} total); the difference "
+        f"{_human(_MAX_IMAGE_BYTES)} each, against a {_human(MAX_INLINE_BYTES_DOCUMENT)} "
+        "budget shared with the evidence section); the difference "
         "blend is computed by the browser. Anything larger degrades to its hash and size with a "
         "stated reason.</p>"
     )
@@ -386,6 +393,7 @@ def _screenshots_block(
 
 
 def _screenshot_figure(
+    ctx: ReportContext,
     s: dict[str, Any],
     rel: str,
     change: str,
@@ -393,7 +401,6 @@ def _screenshot_figure(
     did: str,
     cand_path: Path | None,
     base_path: Path | None,
-    budget: dict[str, int],
 ) -> str:
     fig_id = f"ss-diff-{idx}"
     lines = [
@@ -405,8 +412,8 @@ def _screenshot_figure(
     ]
 
     if change == "changed":
-        cand = _prepare_image(cand_path, s.get("sha256"), budget)
-        base = _prepare_image(base_path, s.get("baselineSha256"), budget)
+        cand = _prepare_image(ctx, cand_path, s.get("sha256"))
+        base = _prepare_image(ctx, base_path, s.get("baselineSha256"))
         lines.append(_changed_facts(s, base, cand))
         lines.append('    <div class="ss-pair">')
         lines.append(
@@ -439,13 +446,13 @@ def _screenshot_figure(
                 "(see reason above).</p>"
             )
     elif change == "added":
-        cand = _prepare_image(cand_path, s.get("sha256"), budget)
+        cand = _prepare_image(ctx, cand_path, s.get("sha256"))
         lines.append(
             f'    <div><span class="ss-lab">Candidate (new, no baseline)</span>'
             f'{_img_html(cand, "Candidate " + rel)}</div>'
         )
     elif change == "removed":
-        base = _prepare_image(base_path, s.get("baselineSha256"), budget)
+        base = _prepare_image(ctx, base_path, s.get("baselineSha256"))
         lines.append(
             f'    <div><span class="ss-lab">Baseline (removed in candidate)</span>'
             f'{_img_html(base, "Baseline " + rel)}</div>'
@@ -553,8 +560,14 @@ def _build_image_index(evidence_dir: Path | None) -> dict[str, Path]:
     return index
 
 
-def _prepare_image(path: Path | None, sha: Any, budget: dict[str, int]) -> dict[str, Any]:
+def _prepare_image(ctx: ReportContext, path: Path | None, sha: Any) -> dict[str, Any]:
     """Read, budget-check and base64-encode one image; never raises.
+
+    Size comes from ``stat()`` and **both** budgets are tested before any bytes
+    are read. That matters twice: a BMP is uncompressed, so a full-page capture
+    can run to hundreds of MiB that we would otherwise allocate purely to
+    reject; and once the document budget is exhausted every remaining image
+    costs one ``stat`` instead of a full read that is thrown away.
 
     Returns ``{"uri", "reason", "size", "sha"}``: ``uri`` is a ``data:`` URI when
     the image is inlined, else ``None`` with a stated ``reason`` for the degraded
@@ -564,9 +577,35 @@ def _prepare_image(path: Path | None, sha: Any, budget: dict[str, int]) -> dict[
     if path is None:
         return {"uri": None, "reason": "image not found in the run directory", "size": None, "sha": sha_str}
     try:
+        size = path.stat().st_size
+    except OSError:
+        return {"uri": None, "reason": "image could not be read", "size": None, "sha": sha_str}
+    if size > _MAX_IMAGE_BYTES:
+        return {
+            "uri": None,
+            "reason": f"not inlined: {_human(size)} exceeds the {_human(_MAX_IMAGE_BYTES)} per-image budget",
+            "size": size,
+            "sha": sha_str,
+        }
+    mime = _MIME.get(path.suffix.lower(), "application/octet-stream")
+    exhausted = {
+        "uri": None,
+        "reason": (
+            f"not inlined: the {_human(MAX_INLINE_BYTES_DOCUMENT)} document inline "
+            "budget is exhausted"
+        ),
+        "size": size,
+        "sha": sha_str,
+    }
+    if encoded_data_uri_len(size, mime) > ctx.inline_budget.remaining:
+        return exhausted
+    try:
         data = path.read_bytes()
     except OSError:
         return {"uri": None, "reason": "image could not be read", "size": None, "sha": sha_str}
+    # Charge what the document actually carries. Re-checked against the bytes we
+    # got rather than the bytes stat promised, so the budget cannot be overrun
+    # by a file that changed underneath us.
     size = len(data)
     if size > _MAX_IMAGE_BYTES:
         return {
@@ -575,15 +614,8 @@ def _prepare_image(path: Path | None, sha: Any, budget: dict[str, int]) -> dict[
             "size": size,
             "sha": sha_str,
         }
-    if size > budget["remaining"]:
-        return {
-            "uri": None,
-            "reason": f"not inlined: the {_human(_MAX_SECTION_BYTES)} screenshot-section budget is exhausted",
-            "size": size,
-            "sha": sha_str,
-        }
-    budget["remaining"] -= size
-    mime = _MIME.get(path.suffix.lower(), "application/octet-stream")
+    if not ctx.inline_budget.charge(encoded_data_uri_len(size, mime)):
+        return {**exhausted, "size": size}
     encoded = base64.b64encode(data).decode("ascii")
     return {"uri": f"data:{mime};base64,{encoded}", "reason": None, "size": size, "sha": sha_str}
 

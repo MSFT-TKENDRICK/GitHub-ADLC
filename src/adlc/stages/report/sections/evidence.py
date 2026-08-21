@@ -25,16 +25,26 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from adlc.runs import read_json
-from adlc.stages.report.context import ReportContext, escape, omission
+from adlc.stages.report.context import (
+    MAX_INLINE_BYTES_DOCUMENT,
+    ReportContext,
+    encoded_data_uri_len,
+    escape,
+    omission,
+)
 from adlc.stages.report.shell import read_asset
 
-#: Per-artifact and whole-report ceilings on inlined image bytes. ``report.html``
-#: is meant to survive being emailed as one file, so an unbounded ``data:`` inline
-#: turns a screenshot-heavy run into a multi-hundred-MiB attachment. Over-budget
-#: images are never dropped silently: the row and a figure survive with the hash,
-#: the size and the reason the image was not inlined.
+#: Per-artifact ceiling on inlined image bytes. ``report.html`` is meant to
+#: survive being emailed as one file, so an unbounded ``data:`` inline turns a
+#: screenshot-heavy run into a multi-hundred-MiB attachment. Over-budget images
+#: are never dropped silently: the row and a figure survive with the hash, the
+#: size and the reason the image was not inlined.
 MAX_INLINE_BYTES_PER_ARTIFACT = 2 * 1024 * 1024  # 2 MiB
-MAX_INLINE_BYTES_TOTAL = 12 * 1024 * 1024  # 12 MiB
+
+#: Retained name for the whole-document ceiling, which now lives in
+#: ``context`` because it is shared with the evidence-diff section rather than
+#: owned by this one.
+MAX_INLINE_BYTES_TOTAL = MAX_INLINE_BYTES_DOCUMENT
 
 #: Raster image types we will inline. SVG is deliberately absent -- see
 #: :func:`_classify_image`.
@@ -88,7 +98,7 @@ def _read_capped(ctx: ReportContext, rel: str, cap: int) -> bytes | None:
 
 
 def _classify_image(
-    ctx: ReportContext, path: str, kind: str, size: int, remaining_total: int
+    ctx: ReportContext, path: str, kind: str, size: int
 ) -> tuple[str | None, str, int]:
     """Decide whether one image is inlined. Returns ``(data_uri, reason, nbytes)``.
 
@@ -113,14 +123,17 @@ def _classify_image(
         return None, "its bytes could not be read from the run directory", 0
     if len(raw) > cap:
         return None, f"it exceeds the {_human_size(cap)} per-image inline budget", 0
-    if len(raw) > remaining_total:
+    # Charge what the document will actually carry (base64, ~4/3 of raw), and
+    # test the budget before paying for the encode.
+    encoded_len = encoded_data_uri_len(len(raw), mime)
+    if not ctx.inline_budget.charge(encoded_len):
         return (
             None,
-            f"the {_human_size(MAX_INLINE_BYTES_TOTAL)} total inline budget was already reached",
+            f"the {_human_size(ctx.inline_budget.total)} document inline budget was already reached",
             0,
         )
     data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-    return data_uri, "", len(raw)
+    return data_uri, "", encoded_len
 
 
 def _load_requirements(ctx: ReportContext) -> list[dict[str, str]]:
@@ -249,8 +262,7 @@ def render(ctx: ReportContext) -> str:
         data_uri: str | None = None
         reason = ""
         if is_img:
-            remaining = MAX_INLINE_BYTES_TOTAL - total_inlined
-            data_uri, reason, nbytes = _classify_image(ctx, path, kind, size, remaining)
+            data_uri, reason, nbytes = _classify_image(ctx, path, kind, size)
             if data_uri is not None:
                 total_inlined += nbytes
                 count_inlined += 1
@@ -282,8 +294,10 @@ def render(ctx: ReportContext) -> str:
         rows.append(_table_row(path, kind, size, sha, is_img, data_uri is not None, reason))
 
     summary = (
-        f'  <p class="annot-budget note">Inlined {count_inlined} image(s) totalling '
-        f"{_human_size(total_inlined)} of the {_human_size(MAX_INLINE_BYTES_TOTAL)} report budget; "
+        f'  <p class="annot-budget note">Inlined {count_inlined} image(s) adding '
+        f"{_human_size(total_inlined)} to the document, against a "
+        f"{_human_size(ctx.inline_budget.total)} inline budget shared with the "
+        f"evidence-diff section; "
         f"{count_skipped} image(s) not inlined and kept below with hash, size and reason.</p>"
     )
     figures_html = (

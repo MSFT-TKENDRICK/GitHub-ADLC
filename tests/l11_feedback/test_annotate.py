@@ -32,7 +32,11 @@ import pytest
 
 from adlc.runs import RunDir, sha256_bytes
 from adlc.schemas import is_valid
-from adlc.stages.report.context import ReportContext
+from adlc.stages.report.context import (
+    InlineBudget,
+    ReportContext,
+    encoded_data_uri_len,
+)
 from adlc.stages.report.sections import evidence
 from adlc.stages.report.shell import read_asset, render_shell
 from tests.l11_feedback.conftest import CANDIDATE_SHA, make_run, png_bytes
@@ -165,10 +169,12 @@ def test_read_path_over_budget_is_degraded(cfg: Any, monkeypatch: pytest.MonkeyP
     assert "data:image/png;base64," not in out
 
 
-def test_total_budget_stops_second_inline(cfg: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_total_budget_stops_second_inline(cfg: Any) -> None:
     a_rgb, b_rgb = (1, 2, 3), (200, 100, 50)
     a_data, b_data = png_bytes(rgb=a_rgb), png_bytes(rgb=b_rgb)
-    monkeypatch.setattr(evidence, "MAX_INLINE_BYTES_TOTAL", len(a_data) + 1)
+    # Sized in *encoded* bytes, because that is what the budget now charges and
+    # what the document actually carries: exactly enough for the first image.
+    budget = InlineBudget(total=encoded_data_uri_len(len(a_data), "image/png"))
     rd = make_run(
         cfg, "2026-08-20-aa04", head_sha=CANDIDATE_SHA,
         screenshots={"a.png": a_rgb, "b.png": b_rgb},
@@ -177,9 +183,9 @@ def test_total_budget_stops_second_inline(cfg: Any, monkeypatch: pytest.MonkeyPa
         _img_artifact("evidence/candidate-a/a.png", a_data),
         _img_artifact("evidence/candidate-a/b.png", b_data),
     ]
-    out = evidence.render(_ctx(cfg, rd=rd, artifacts=arts))
+    out = evidence.render(_ctx(cfg, rd=rd, artifacts=arts, inline_budget=budget))
     assert len(DATA_URI_RE.findall(out)) == 1  # only the first fits
-    assert "total inline budget" in out
+    assert "document inline budget" in out
     assert "Inlined 1 image(s)" in out
     assert "1 image(s) not inlined" in out
 
@@ -192,7 +198,7 @@ def test_totals_line_counts_inlined_and_skipped(cfg: Any) -> None:
                          bytes_=evidence.MAX_INLINE_BYTES_PER_ARTIFACT + 1, sha="b" * 64)
     arts = [_img_artifact("evidence/candidate-a/home.png", data), over]
     out = evidence.render(_ctx(cfg, rd=rd, artifacts=arts))
-    assert "Inlined 1 image(s) totalling" in out
+    assert "Inlined 1 image(s) adding" in out
     assert "1 image(s) not inlined" in out
 
 
