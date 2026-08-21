@@ -133,7 +133,7 @@ class TestEveryWorkflow:
         }
         assert all(
             value == "read" for value in repository.values()
-        ), f"{name} grants a write scope to the agent job: {repository}"
+        ), f"{name} grants a repository write scope to the agent job: {repository}"
 
     def test_copilot_inference_uses_the_ambient_actions_token(self, name: str) -> None:
         """Ambient auth, asserted against the artifact GitHub actually runs.
@@ -143,6 +143,10 @@ class TestEveryWorkflow:
         step that hard-fails every run on any repository without a
         `COPILOT_GITHUB_TOKEN` secret -- before the agent starts, so the failure
         says nothing about the change under review and is easy to misread.
+
+        This requires the permission on *every* workflow rather than only checking
+        it when present: a workflow that silently loses it is exactly the
+        regression worth catching.
         """
         fm = frontmatter(WORKFLOWS / f"{name}.md")
         permissions = fm.get("permissions") or {}

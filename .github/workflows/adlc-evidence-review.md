@@ -33,6 +33,7 @@ network:
 
 engine:
   id: copilot
+model: gpt-5
 
 # ---------------------------------------------------------------------------
 # STRUCTURAL SANDBOX.

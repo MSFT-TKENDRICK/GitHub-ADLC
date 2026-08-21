@@ -33,6 +33,9 @@ network:
 
 engine:
   id: copilot
+# Pinned rather than `auto` for the same reason as the sibling review squads:
+# gh-aw cannot resolve AI-credits pricing through the alias.
+model: gpt-5
 
 # ---------------------------------------------------------------------------
 # STRUCTURAL SANDBOX -- identical in shape to adlc-evidence-review.md, and for
