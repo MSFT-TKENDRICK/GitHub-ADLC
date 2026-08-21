@@ -440,8 +440,33 @@ def find_replay(rd: RunDir, identity: str) -> dict[str, Any] | None:
     return None
 
 
+_CLAIM_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _claim_filename(identity: str) -> str:
+    """Map a pack identity onto a filename every filesystem can actually hold.
+
+    Identities are ``sha256:<hex>``, and that colon is not cosmetic on Windows:
+    ``claims/sha256:<hex>.claim`` is not a file called ``sha256:<hex>.claim``, it
+    is an NTFS *alternate data stream* named ``<hex>.claim`` hanging off a file
+    called ``sha256``. Every identity therefore collides onto that one file, the
+    directory lists a single entry no matter how many claims exist, and
+    ``os.replace`` onto a stream raises ``OSError`` (WinError 123) -- so the
+    stale-claim takeover below would surface a traceback instead of a refusal.
+
+    ``Path.exists`` and ``open("x")`` both succeed against a stream, which is
+    exactly why this survived the test suite: the happy path works and only the
+    takeover and any directory listing are wrong.
+
+    The substitution is total rather than a ``:``-for-``-`` swap because this
+    builds a path out of a string; ``sha256:`` is the only prefix we mint today,
+    but a future one must not be able to reach a separator or a ``..``.
+    """
+    return f"{_CLAIM_UNSAFE.sub('-', identity)}.claim"
+
+
 def _claim_path(rd: RunDir, identity: str) -> Path:
-    return feedback_dir(rd) / "claims" / f"{identity}.claim"
+    return feedback_dir(rd) / "claims" / _claim_filename(identity)
 
 
 # Comfortably longer than any legitimate retrigger (the CI job caps itself at 20
@@ -493,11 +518,15 @@ def claim_identity(rd: RunDir, identity: str) -> bool:
     except FileExistsError:
         if not _claim_is_stale(path):
             return False
-        # Re-take by replacing the orphan. `os.replace` is atomic, so two callers
-        # racing on the same stale claim still serialise: both write a temp file
-        # under their own name, both replace, and the durable `find_replay`
-        # record decides the survivor exactly as it does for any other replay.
-        tmp = path.with_suffix(f".claim.{os.getpid()}.tmp")
+        # Re-take by replacing the orphan. `os.replace` is atomic, so neither
+        # caller ever observes a half-written claim. It does *not* serialise them:
+        # `find_replay` runs before the claim is taken and `record_pack` writes
+        # last, so two callers racing on the same stale claim can both proceed.
+        # That needs a claim orphaned for over an hour plus two byte-identical
+        # concurrent submissions, and the outcome is a duplicated successor run
+        # rather than a bypass -- strictly better than refusing those bytes
+        # forever, which is what this replaced.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         tmp.write_text(utcnow(), encoding="utf-8")
         os.replace(tmp, path)
     return True

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -41,8 +42,11 @@ from adlc.config import Config
 from adlc.runs import RunDir, utcnow
 from adlc.stages.feedback import (
     CLAIM_TTL_SECONDS,
+    _claim_filename,
     _claim_path,
     claim_identity,
+    pack_digest,
+    release_identity,
     render_feedback_markdown,
 )
 from adlc.stages.feedback_targets import _baseline_screenshot
@@ -103,16 +107,72 @@ def test_checkout_pins_an_explicit_ref(apply_steps: list[dict]) -> None:
 
 def test_checkout_ref_never_resolves_to_a_pull_request_head(
     apply_steps: list[dict],
+    gate_script: str,
 ) -> None:
-    """`base.sha` is in the base repo. `head.sha`/`head.ref` are attacker-owned."""
-    for step in _checkout_steps(apply_steps):
+    """`base.sha` is in the base repo. `head.sha`/`head.ref` are attacker-owned.
+
+    The ref is computed in the ``authorize`` job rather than inline, so this
+    follows the indirection instead of asserting on it -- otherwise moving the
+    expression would make the test pass by going vacuous.
+    """
+    for step in apply_steps and _checkout_steps(apply_steps):
         ref = (step.get("with") or {}).get("ref", "")
         assert "head.sha" not in ref and "head.ref" not in ref, (
             f"checkout ref {ref!r} resolves to the PR head; that is fork-controlled"
         )
-        assert "pull_request.base.sha" in ref, (
-            f"checkout ref {ref!r} does not pin the base SHA"
+        if "pull_request.base.sha" in ref:
+            continue
+        # Indirect: it must come from the gate, and the gate must pin base.sha.
+        assert "needs.authorize.outputs.checkout_ref" in ref, (
+            f"checkout ref {ref!r} neither pins the base SHA nor comes from the "
+            "authorize gate; there is no third trustworthy source"
         )
+        assert "base?.sha" in gate_script or "base.sha" in gate_script, (
+            "the authorize gate supplies the checkout ref but never reads "
+            "`pull_request.base.sha`, so what it supplies is unpinned"
+        )
+        assert "head.sha" not in gate_script, (
+            "the authorize gate reads the PR head SHA; that is fork-controlled"
+        )
+
+
+def test_the_gate_refuses_to_run_rather_than_fall_back_to_an_unpinned_ref(
+    gate_script: str,
+) -> None:
+    """The `${{ A && B || C }}` idiom degrades *open*, so it must not be used.
+
+    Any falsy `B` silently yields `C`, and here `C` is `github.ref` -- the merge
+    ref this whole fix exists to avoid. An empty base SHA must stop the run.
+    """
+    assert "setFailed" in gate_script, (
+        "the gate never calls core.setFailed, so it cannot stop a run whose "
+        "checkout ref could not be pinned"
+    )
+    checkout_block = gate_script[gate_script.index("checkoutRef = pr") :]
+    assert "!checkoutRef" in checkout_block, (
+        "the gate does not check that the resolved checkout ref is non-empty"
+    )
+
+
+def test_a_broken_gate_is_loud_and_a_refused_reviewer_is_quiet(
+    gate_script: str,
+) -> None:
+    """A gate that cannot be evaluated must not look like a gate that said no.
+
+    Both refuse -- that part is non-negotiable -- but a 403 from a missing token
+    scope presents identically to a legitimate refusal unless the run fails. The
+    tempting fix for a silently dead feature is to loosen the rule.
+    """
+    catch = gate_script[gate_script.index("catch (err)") :]
+    assert "err.status === 404" in catch, (
+        "the gate treats every API error alike; a 404 (not a collaborator) is an "
+        "answer, anything else means the gate could not be evaluated"
+    )
+    assert "setFailed" in catch, (
+        "a permission lookup that fails for a reason other than 404 must fail the "
+        "run, not warn -- otherwise a broken gate is indistinguishable from a "
+        "correct refusal"
+    )
 
 
 def test_the_install_step_is_the_thing_being_protected(apply_steps: list[dict]) -> None:
@@ -169,9 +229,35 @@ def test_the_gate_fails_closed(gate_script: str) -> None:
 
 
 def test_the_gate_refuses_fork_heads(gate_script: str) -> None:
-    """The guard every other workflow in this repo already carries."""
-    assert "head.repo" in gate_script and "repository" in gate_script, (
+    """The guard every other workflow in this repo already carries.
+
+    Optional chaining is normalised away first, so the test pins the comparison
+    rather than the syntax used to reach it.
+    """
+    normalised = gate_script.replace("?.", ".")
+    assert "head.repo" in normalised and "repository" in normalised, (
         "authorize must compare the PR head repo id to this repository's id"
+    )
+    assert "head.repo.id" in normalised, (
+        "compare the numeric repo id, never a name -- a rename or a typosquat "
+        "org must not be able to satisfy the guard"
+    )
+
+
+def test_the_fork_guard_cannot_throw_on_a_malformed_payload(
+    gate_script: str,
+) -> None:
+    """A PR whose fork was deleted has a null `head.repo`.
+
+    A bare `pr.head.repo.id` throws a TypeError there. That happens to fail
+    closed -- the job errors and `apply` is skipped -- but "refuses" and "crashes"
+    should not be the same code path, or the next edit to the gate inherits a
+    landmine.
+    """
+    guard = gate_script[gate_script.index("const sameRepo") :].split(";")[0]
+    assert "?." in guard, (
+        f"fork guard {guard!r} dereferences the payload without optional "
+        "chaining, so a null head.repo throws instead of refusing"
     )
 
 
@@ -247,6 +333,47 @@ def test_requirement_ids_cannot_smuggle_markdown_into_the_brief(
     assert not line.lstrip().startswith("#")
 
 
+def test_an_empty_requirement_id_does_not_break_the_code_spans_around_others() -> None:
+    """The one input that changes the backtick arithmetic.
+
+    `requirementIds` items are `{"type": "string", "maxLength": 64}` with no
+    `minLength`, so `""` is schema-valid, and it renders as two *adjacent*
+    backticks -- which CommonMark reads as a single backtick string of length 2,
+    changing how every later backtick pairs. Asserting ``f"`{value}`" in line``
+    for `""` would degenerate to a trivially-true substring check, so this pins
+    the property that actually matters: a real payload sharing the list with an
+    empty id is still fenced, and still cannot reach the start of a line.
+    """
+    payload = "# Injected heading"
+    pack = _pack(
+        annotations=[
+            {
+                "id": "an-1",
+                "artifactSha256": "b" * 64,
+                "artifactPath": "shot.png",
+                "shape": "whole",
+                "severity": "blocker",
+                "comment": "text",
+                "requirementIds": ["", payload, ""],
+            }
+        ]
+    )
+    md = render_feedback_markdown(pack, "r1")
+    line = next(ln for ln in md.split("\n") if "requirements:" in ln)
+    assert f"`{payload}`" in line, (
+        f"an empty sibling id unfenced the payload: {line!r}"
+    )
+    # Structural injection needs the payload itself at the start of a line. The
+    # containing line legitimately starts with "- " -- it is a list item -- so
+    # the property is that no line *begins with the payload*.
+    assert not any(ln.lstrip().startswith(payload) for ln in md.split("\n")), (
+        f"the payload reached the start of a line:\n{md}"
+    )
+    # Belt and braces: whatever the backtick pairing resolves to, the `#` is
+    # always preceded on its line by a backtick, so it is inside code.
+    assert line.index(payload) > 0 and line[line.index(payload) - 1] == "`"
+
+
 def test_submitter_identity_is_code_spanned() -> None:
     md = render_feedback_markdown(_pack(submittedBy="# not a heading"), "r1")
     assert "`# not a heading`" in md
@@ -307,6 +434,315 @@ def test_taking_over_a_stale_claim_leaves_no_temp_files(run_dir: RunDir) -> None
     assert claim_identity(run_dir, "abc") is True
     leftovers = [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
+
+
+# ---------------------------------------------------------------------------
+# Behavioural: actually execute the gate against synthetic payloads.
+#
+# Everything above asserts on the *source* of the gate, which cannot tell a
+# working guard from a plausible-looking one. `actions/github-script` runs the
+# `script:` block as the body of an async function with `context`, `github` and
+# `core` injected, so the same block runs under node with those three mocked.
+# ---------------------------------------------------------------------------
+
+
+GATE_HARNESS = """
+const __calls = { outputs: {}, failed: null, info: [] };
+const core = {
+  setOutput: (k, v) => { __calls.outputs[k] = v; },
+  setFailed: (m) => { __calls.failed = String(m); },
+  info: (m) => { __calls.info.push(String(m)); },
+  warning: (m) => { __calls.info.push('WARN ' + String(m)); },
+};
+const __fixture = JSON.parse(process.argv[2]);
+const context = __fixture.context;
+const github = { rest: { repos: { getCollaboratorPermissionLevel: async () => {
+  const r = __fixture.permission;
+  if (r && r.error) { const e = new Error('boom'); e.status = r.error; throw e; }
+  return { data: { permission: r === null ? null : r } };
+} } } };
+(async () => {
+%s
+})().then(
+  () => console.log(JSON.stringify(__calls)),
+  (err) => { __calls.threw = String(err && err.message); console.log(JSON.stringify(__calls)); },
+);
+"""
+
+
+def _run_gate(
+    gate_script: str,
+    tmp_path: Path,
+    *,
+    event: str,
+    payload: dict | None = None,
+    permission: object = "write",
+    ref: str = "refs/heads/main",
+) -> dict:
+    """Execute the real gate block under node and return what it decided."""
+    harness = tmp_path / "gate_harness.js"
+    body = "\n".join("  " + ln for ln in gate_script.splitlines())
+    harness.write_text(GATE_HARNESS % body, encoding="utf-8")
+    fixture = {
+        "context": {
+            "eventName": event,
+            "actor": "dispatcher",
+            "ref": ref,
+            "repo": {"owner": "o", "repo": "r"},
+            "payload": payload or {},
+        },
+        "permission": permission,
+    }
+    proc = subprocess.run(
+        ["node", str(harness), json.dumps(fixture)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, f"gate harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+BASE_SHA = "f" * 40
+
+
+def _review_payload(*, head_repo_id: object = 1, repo_id: int = 1, base_sha=BASE_SHA):
+    head_repo = None if head_repo_id is None else {"id": head_repo_id}
+    return {
+        "repository": {"id": repo_id},
+        "review": {"user": {"login": "reviewer"}},
+        "pull_request": {"head": {"repo": head_repo}, "base": {"sha": base_sha}},
+    }
+
+
+def test_gate_authorizes_a_write_holder_on_a_same_repo_pr(
+    gate_script: str, tmp_path: Path
+) -> None:
+    got = _run_gate(
+        gate_script,
+        tmp_path,
+        event="pull_request_review",
+        payload=_review_payload(),
+        permission="write",
+    )
+    assert got["failed"] is None
+    assert got["outputs"]["authorized"] == "true"
+    assert got["outputs"]["checkout_ref"] == BASE_SHA, (
+        "an authorized review must check out the base SHA, never the merge ref"
+    )
+
+
+@pytest.mark.parametrize("permission", ["read", "none", None])
+def test_gate_refuses_anyone_without_write(
+    gate_script: str, tmp_path: Path, permission: object
+) -> None:
+    """`read` is what an org member with base Read gets -- the medium finding."""
+    got = _run_gate(
+        gate_script,
+        tmp_path,
+        event="pull_request_review",
+        payload=_review_payload(),
+        permission=permission,
+    )
+    assert got["outputs"]["authorized"] == "false", got
+
+
+def test_gate_refuses_a_fork_head(gate_script: str, tmp_path: Path) -> None:
+    got = _run_gate(
+        gate_script,
+        tmp_path,
+        event="pull_request_review",
+        payload=_review_payload(head_repo_id=999, repo_id=1),
+        permission="admin",
+    )
+    assert got["outputs"]["authorized"] == "false", (
+        "a fork PR reviewed by an admin must still be refused: the privileged "
+        "trigger would otherwise run fork-influenced content"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"repository": {"id": 1}, "review": {"user": {"login": "x"}}},
+        {
+            "repository": {"id": 1},
+            "review": {"user": {"login": "x"}},
+            "pull_request": {"base": {"sha": BASE_SHA}},
+        },
+    ],
+    ids=["no_pull_request", "no_head"],
+)
+def test_gate_refuses_a_malformed_payload_without_throwing(
+    gate_script: str, tmp_path: Path, payload: dict
+) -> None:
+    got = _run_gate(
+        gate_script, tmp_path, event="pull_request_review", payload=payload
+    )
+    assert got.get("threw") is None, f"gate threw instead of refusing: {got}"
+    assert got["outputs"]["authorized"] == "false", got
+
+
+def test_gate_refuses_a_pr_whose_fork_was_deleted(
+    gate_script: str, tmp_path: Path
+) -> None:
+    """`head.repo` is null once the fork is gone; a bare deref throws here."""
+    got = _run_gate(
+        gate_script,
+        tmp_path,
+        event="pull_request_review",
+        payload=_review_payload(head_repo_id=None),
+        permission="admin",
+    )
+    assert got.get("threw") is None, f"gate threw instead of refusing: {got}"
+    assert got["outputs"]["authorized"] == "false"
+
+
+def test_gate_is_quiet_for_a_non_collaborator_but_loud_for_a_broken_lookup(
+    gate_script: str, tmp_path: Path
+) -> None:
+    """Both refuse. Only one of them means the gate itself stopped working."""
+    not_a_collaborator = _run_gate(
+        gate_script,
+        tmp_path,
+        event="pull_request_review",
+        payload=_review_payload(),
+        permission={"error": 404},
+    )
+    assert not_a_collaborator["outputs"]["authorized"] == "false"
+    assert not_a_collaborator["failed"] is None, (
+        "a 404 is a legitimate answer (including for a GitHub App reviewer); it "
+        "must not fail the run"
+    )
+
+    broken = _run_gate(
+        gate_script,
+        tmp_path,
+        event="pull_request_review",
+        payload=_review_payload(),
+        permission={"error": 403},
+    )
+    assert broken["failed"], (
+        "a 403 means the token cannot evaluate the gate. Refusing quietly is "
+        "indistinguishable from a correct refusal, so the feature would look "
+        "merely broken and the tempting fix is to loosen the rule."
+    )
+    assert broken["outputs"].get("authorized") != "true"
+
+
+def test_gate_refuses_to_run_when_the_base_sha_is_missing(
+    gate_script: str, tmp_path: Path
+) -> None:
+    """The degradation mode of `${{ A && B || C }}`, made impossible.
+
+    With the inline ternary an empty base SHA fell through to `github.ref` --
+    the merge ref. Here it must stop the run instead.
+    """
+    got = _run_gate(
+        gate_script,
+        tmp_path,
+        event="pull_request_review",
+        payload=_review_payload(base_sha=""),
+        permission="admin",
+    )
+    assert got["failed"], f"expected the run to be failed, got {got}"
+    assert got["outputs"].get("checkout_ref") in (None, ""), (
+        "an unpinned checkout ref must never be emitted"
+    )
+
+
+def test_gate_allows_workflow_dispatch_and_checks_out_the_dispatched_ref(
+    gate_script: str, tmp_path: Path
+) -> None:
+    got = _run_gate(
+        gate_script, tmp_path, event="workflow_dispatch", ref="refs/heads/main"
+    )
+    assert got["outputs"]["authorized"] == "true"
+    assert got["outputs"]["checkout_ref"] == "refs/heads/main", (
+        "dispatch is write-gated by GitHub and its ref is a base-repo ref"
+    )
+
+
+def test_gate_refuses_an_unknown_event(gate_script: str, tmp_path: Path) -> None:
+    got = _run_gate(gate_script, tmp_path, event="issue_comment")
+    assert got["outputs"]["authorized"] == "false"
+
+
+# ---------------------------------------------------------------------------
+# Claims must survive contact with a real identity, which contains a colon.
+#
+# Every test above uses "abc". A real identity is `sha256:<hex>` from
+# `pack_digest`, and on Windows that colon does not make a filename -- it makes
+# an NTFS *alternate data stream*: `claims/sha256:<hex>.claim` is the stream
+# `<hex>.claim` on a file called `sha256`. So every identity collides onto one
+# file, the directory lists a single entry however many claims exist, and
+# `os.replace` onto a stream raises OSError. `Path.exists` and `open("x")` both
+# work against a stream, which is precisely why a placeholder identity hid all
+# of it.
+# ---------------------------------------------------------------------------
+
+
+REAL_IDENTITY = f"sha256:{'a' * 64}"
+OTHER_IDENTITY = f"sha256:{'b' * 64}"
+
+
+def test_a_claim_filename_holds_no_path_or_stream_separators() -> None:
+    name = _claim_filename(REAL_IDENTITY)
+    for bad in (":", "/", "\\", "..", "\0"):
+        assert bad not in name, (
+            f"claim filename {name!r} contains {bad!r}; on Windows a colon makes "
+            "an NTFS alternate data stream rather than a file, and a separator "
+            "would let the identity choose its own directory"
+        )
+    assert name.endswith(".claim")
+
+
+def test_two_real_identities_do_not_collide_on_disk(run_dir: RunDir) -> None:
+    """The bug that mattered: both claims landing on one file named `sha256`."""
+    assert claim_identity(run_dir, REAL_IDENTITY) is True
+    assert claim_identity(run_dir, OTHER_IDENTITY) is True
+    claims = sorted(p.name for p in _claim_path(run_dir, REAL_IDENTITY).parent.iterdir())
+    assert len(claims) == 2, (
+        f"expected one file per identity, found {claims!r} -- distinct packs are "
+        "sharing a claim, so claiming one silently claims the other"
+    )
+    # And the guard still works per-identity, which collision would have broken.
+    assert claim_identity(run_dir, REAL_IDENTITY) is False
+    assert claim_identity(run_dir, OTHER_IDENTITY) is False
+
+
+def test_a_stale_real_identity_can_actually_be_taken_over(run_dir: RunDir) -> None:
+    """`os.replace` onto an NTFS stream raises OSError (WinError 123).
+
+    That surfaces as a traceback out of `claim_identity` instead of a refusal --
+    on the platform this repo is developed on.
+    """
+    assert claim_identity(run_dir, REAL_IDENTITY) is True
+    stale = datetime.now(UTC) - timedelta(seconds=CLAIM_TTL_SECONDS + 60)
+    _claim_path(run_dir, REAL_IDENTITY).write_text(stale.isoformat(), encoding="utf-8")
+    assert claim_identity(run_dir, REAL_IDENTITY) is True
+    leftovers = [
+        p.name
+        for p in _claim_path(run_dir, REAL_IDENTITY).parent.iterdir()
+        if p.name.endswith(".tmp")
+    ]
+    assert leftovers == []
+
+
+def test_a_real_identity_claim_can_be_released(run_dir: RunDir) -> None:
+    assert claim_identity(run_dir, REAL_IDENTITY) is True
+    release_identity(run_dir, REAL_IDENTITY)
+    assert claim_identity(run_dir, REAL_IDENTITY) is True, (
+        "release must actually delete the claim an aborted run left behind"
+    )
+
+
+def test_the_claim_identity_is_the_one_the_pipeline_actually_mints() -> None:
+    """Guard against this suite drifting back to a colon-free placeholder."""
+    identity = pack_digest({"schemaVersion": "1.0.0", "runId": "r1"})
+    assert identity.startswith("sha256:"), identity
+    assert ":" in identity, "identities contain a colon; claim paths must handle it"
 
 
 # ---------------------------------------------------------------------------

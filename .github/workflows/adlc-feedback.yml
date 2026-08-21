@@ -72,6 +72,7 @@ jobs:
     outputs:
       authorized: ${{ steps.gate.outputs.authorized }}
       actor: ${{ steps.gate.outputs.actor }}
+      checkout_ref: ${{ steps.gate.outputs.checkout_ref }}
     steps:
       - name: Decide whether the submitter may drive the loop
         id: gate
@@ -81,9 +82,13 @@ jobs:
             const event = context.eventName;
             let authorized = false;
             let actor = context.actor;
+            // Which tree may we execute? Decided here, next to who may act,
+            // because they are the same question asked twice. See guard 3.
+            let checkoutRef = context.ref;
             if (event === 'workflow_dispatch') {
               // GitHub only allows users with write access to trigger a
-              // workflow_dispatch, so the actor is privileged by construction.
+              // workflow_dispatch, so the actor is privileged by construction,
+              // and the ref they chose is a base-repo ref by construction too.
               authorized = true;
             } else if (event === 'pull_request_review') {
               const pr = context.payload.pull_request;
@@ -94,11 +99,14 @@ jobs:
               // touches the head -- code, artifacts, the run directory -- is
               // attacker-influenced. Every other workflow here carries this
               // guard; see the trust-model note at the top of the file.
-              const sameRepo =
-                !!pr && !!pr.head.repo && pr.head.repo.id === context.payload.repository.id;
+              // Optional chaining, not `&&`: a PR whose fork was deleted has a
+              // null `head.repo`, and a malformed payload may have no `head` at
+              // all. Both must refuse, not throw.
+              const sameRepo = pr?.head?.repo?.id === context.payload.repository?.id
+                && pr?.head?.repo?.id !== undefined;
 
               // Guard 2: a real write-access check. `author_association` is NOT
-              // one -- see the trust-model note. Fails closed on any API error.
+              // one -- see the trust-model note.
               let permission = null;
               if (sameRepo) {
                 try {
@@ -109,12 +117,48 @@ jobs:
                   });
                   permission = res.data.permission;
                 } catch (err) {
-                  core.warning(
-                    `permission lookup for ${actor} failed (${err.status}); refusing`
-                  );
+                  // A 404 is an answer: the reviewer is not a collaborator (a
+                  // GitHub App reviewer lands here too). Refuse quietly.
+                  //
+                  // Anything else -- 403 because the token lacks the scope, 5xx,
+                  // a network fault -- means the gate could not be evaluated. We
+                  // still refuse, but we must NOT do it quietly: a silent refusal
+                  // is indistinguishable from a correct one, so a gate broken by
+                  // a future permissions change would present as "the feature
+                  // stopped working" with no cause, and the tempting fix is to
+                  // loosen the rule. Fail the job so the cause is the error.
+                  if (err.status === 404) {
+                    core.info(`${actor} is not a collaborator; refusing`);
+                  } else {
+                    core.setFailed(
+                      `Authorization gate could not be evaluated: the permission ` +
+                        `lookup for ${actor} failed with ${err.status}. Refusing. ` +
+                        `Fix the token's scope -- never the rule.`
+                    );
+                    return;
+                  }
                 }
               }
               authorized = permission === 'admin' || permission === 'write';
+
+              // Guard 3: never execute the head tree. `pull_request_review` is a
+              // privileged trigger, so GITHUB_REF points at the PR merge ref --
+              // the submitter's code -- and `pip install .` downstream would run
+              // its build backend with a live token. Pin to the base commit.
+              //
+              // Computed here rather than as a `${{ A && B || C }}` in the
+              // checkout step because that idiom degrades silently: any falsy B
+              // falls through to C, and C is exactly the merge ref we are
+              // excluding. Here an empty value can stop the run instead.
+              checkoutRef = pr?.base?.sha;
+              if (authorized && !checkoutRef) {
+                core.setFailed(
+                  'Refusing to run: no base SHA on the pull request, so the only ' +
+                    'tree available to check out is the submitter\'s.'
+                );
+                return;
+              }
+
               core.info(
                 `review by ${actor}: sameRepo=${sameRepo} permission=${permission} ` +
                   `-> authorized=${authorized}`
@@ -122,6 +166,7 @@ jobs:
             }
             core.setOutput('authorized', authorized ? 'true' : 'false');
             core.setOutput('actor', actor);
+            core.setOutput('checkout_ref', checkoutRef || '');
 
   apply:
     name: Apply the feedback pack
@@ -230,11 +275,17 @@ jobs:
       # with GH_TOKEN in scope. Checking out the base SHA means the framework we
       # install is always the framework this repo already trusts, and no tree
       # content from a PR head is ever executed. See the trust-model note above.
+      #
+      # The value comes from the `authorize` job (guard 3) rather than an inline
+      # `${{ A && B || C }}`, because that idiom degrades open: any falsy B falls
+      # through to C == the merge ref we are excluding. `authorize` fails the run
+      # on an empty value instead, so the failure mode is a stopped run rather
+      # than a silently unpinned checkout.
       - name: Check out the ADLC framework
         if: steps.extract.outputs.has_pack == 'true'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request_review' && github.event.pull_request.base.sha || github.ref }}
+          ref: ${{ needs.authorize.outputs.checkout_ref }}
           fetch-depth: 1
 
       - name: Set up Python
