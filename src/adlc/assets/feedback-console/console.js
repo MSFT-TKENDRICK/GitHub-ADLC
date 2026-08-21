@@ -85,6 +85,36 @@
     return sel;
   }
 
+  /* Geometry as words. An annotation's position is meaningful data -- it is the
+   * difference between "the logo is wrong" and "the logo is wrong HERE -- and a
+   * reviewer who cannot see the SVG still has to be able to read it back, check
+   * it, and correct it. Percentages, because that is what the form takes, so
+   * what you hear is what you can retype. */
+  function describeGeometry(annotation) {
+    var geometry = annotation.geometry;
+    if (!geometry || !geometry.points || !geometry.points.length) {
+      return "whole artifact";
+    }
+    var pct = function (point) {
+      return Math.round(point[0] * 100) + "%, " + Math.round(point[1] * 100) + "%";
+    };
+    var points = geometry.points;
+    if (points.length === 1) return "point at " + pct(points[0]);
+    if (points.length === 2) return "region from " + pct(points[0]) + " to " + pct(points[1]);
+    /* Never read out hundreds of coordinate pairs; summarise the extent. */
+    var xs = points.map(function (p) { return p[0]; });
+    var ys = points.map(function (p) { return p[1]; });
+    return (
+      geometry.shape +
+      ", " +
+      points.length +
+      " points, spanning " +
+      pct([Math.min.apply(null, xs), Math.min.apply(null, ys)]) +
+      " to " +
+      pct([Math.max.apply(null, xs), Math.max.apply(null, ys)])
+    );
+  }
+
   // -- artifacts + annotation ----------------------------------------------
 
   function renderArtifact(artifact, index) {
@@ -200,6 +230,124 @@
       }
     });
     card.appendChild(form);
+
+    /* The annotation list. Without it this console can only CREATE annotations:
+     * the marks exist solely as SVG inside a role="presentation" overlay, so a
+     * reviewer who is not looking at the picture cannot list what they have
+     * annotated, read back where it landed, correct a mistake, or delete one.
+     * A mis-placed mark would be permanent in the pack, with reloading and
+     * losing everything as the only escape. */
+    var listHeadingId = slug + "-list-h";
+    var list = el("ul", { class: "annotations", "aria-labelledby": listHeadingId });
+    var listHeading = el("h4", { id: listHeadingId, text: "Annotations on this artifact" });
+    var empty = el("p", { class: "muted", text: "No annotations on this artifact yet." });
+    card.appendChild(listHeading);
+    card.appendChild(empty);
+    card.appendChild(list);
+
+    function loadForEditing(annotation) {
+      shape.value = annotation.shape;
+      syncGeometry();
+      sev.value = annotation.severity;
+      comment.value = annotation.comment || "";
+      var points = (annotation.geometry || {}).points;
+      if (points && points.length) {
+        var xs = points.map(function (p) { return p[0]; });
+        var ys = points.map(function (p) { return p[1]; });
+        var left = Math.min.apply(null, xs);
+        var top = Math.min.apply(null, ys);
+        form.elements.left.value = (left * 100).toFixed(1);
+        form.elements.top.value = (top * 100).toFixed(1);
+        form.elements.width.value = ((Math.max.apply(null, xs) - left) * 100).toFixed(1);
+        form.elements.height.value = ((Math.max.apply(null, ys) - top) * 100).toFixed(1);
+      }
+      var picked = annotation.requirementIds || [];
+      Array.prototype.slice.call(form.querySelectorAll(".reqs input")).forEach(function (box) {
+        box.checked = picked.indexOf(box.value) !== -1;
+      });
+    }
+
+    function renderList(state) {
+      while (list.firstChild) list.removeChild(list.firstChild);
+      var mine = state.annotations.filter(function (a) {
+        return a.artifactSha256 === artifact.sha256;
+      });
+      empty.hidden = mine.length > 0;
+      list.hidden = mine.length === 0;
+
+      mine.forEach(function (annotation, position) {
+        var where = describeGeometry(annotation);
+        /* Ordinal first: "annotation 2 of 5" is how you keep your place in a
+         * list you are hearing rather than seeing. */
+        var label =
+          "Annotation " +
+          (position + 1) +
+          " of " +
+          mine.length +
+          " on " +
+          artifact.path +
+          ": " +
+          annotation.severity +
+          ", " +
+          where;
+
+        var item = el("li", { class: "annotation sev-" + annotation.severity });
+        item.appendChild(el("p", { class: "what", text: label }));
+        if (annotation.comment) {
+          item.appendChild(el("p", { class: "said", text: annotation.comment }));
+        }
+        if ((annotation.requirementIds || []).length) {
+          item.appendChild(
+            el("p", {
+              class: "muted",
+              text: "Requirements: " + annotation.requirementIds.join(", ")
+            })
+          );
+        }
+
+        var editBtn = el("button", {
+          type: "button",
+          text: "Edit",
+          "aria-label": "Edit " + label
+        });
+        editBtn.addEventListener("click", function () {
+          loadForEditing(annotation);
+          /* Editing pulls the annotation back into the form it came from, so
+           * there is one authoring surface rather than two that can disagree.
+           * Say plainly that it has left the pack -- a silent removal here
+           * would be a data-loss trap. */
+          session.removeAnnotation(annotation.id);
+          announce(
+            "Editing annotation " +
+              (position + 1) +
+              " on " +
+              artifact.path +
+              ". It has been removed from the pack; choose Add annotation to put it back."
+          );
+          comment.focus();
+        });
+
+        var delBtn = el("button", {
+          type: "button",
+          text: "Delete",
+          "aria-label": "Delete " + label
+        });
+        delBtn.addEventListener("click", function () {
+          session.removeAnnotation(annotation.id);
+          announce("Deleted annotation " + (position + 1) + " on " + artifact.path + ".");
+          /* Focus would otherwise fall to <body> when this button is removed.
+           * Send it somewhere deliberate and near. */
+          (list.querySelector("button") || shape).focus();
+        });
+
+        item.appendChild(editBtn);
+        item.appendChild(delBtn);
+        list.appendChild(item);
+      });
+    }
+
+    session.subscribe(renderList);
+    renderList(session.state());
 
     if (overlay) wireOverlay(card, overlay, artifact);
     return card;
@@ -385,8 +533,20 @@
     });
     var state = el("span", { class: "decision", "aria-live": "off", text: "undecided" });
     form.appendChild(note);
+    var buttons = [];
     (session.enums.diffDecision || []).forEach(function (decision) {
-      var button = el("button", { type: "button", text: decision });
+      /* Without these two attributes the buttons list reads "accept, reject,
+       * accept, reject..." for every row in the diff, with nothing to say which
+       * row you are on or what it is currently set to. `aria-pressed` is the
+       * right role here because these are toggles over one mutually exclusive
+       * choice, which is exactly how report.html models the same control. */
+      var button = el("button", {
+        type: "button",
+        text: decision,
+        "aria-pressed": "false",
+        "aria-label": decision + " change to " + row.targetKind + " " + row.targetId
+      });
+      buttons.push(button);
       button.addEventListener("click", function () {
         try {
           session.decide({
@@ -397,6 +557,9 @@
           });
           state.textContent = decision;
           card.setAttribute("data-decision", decision);
+          buttons.forEach(function (other) {
+            other.setAttribute("aria-pressed", other === button ? "true" : "false");
+          });
           announce(row.targetId + " marked " + decision + ".");
         } catch (err) {
           say(err);
@@ -411,6 +574,8 @@
 
   // -- submission -----------------------------------------------------------
 
+  var lastConflictText = null;
+
   function refreshCounts() {
     var state = session.state();
     $("#count-annotations").textContent = state.annotations.length;
@@ -420,8 +585,7 @@
 
     var conflicts = session.blockingConflicts();
     var warn = $("#conflicts");
-    warn.hidden = conflicts.length === 0;
-    warn.textContent = conflicts.length
+    var text = conflicts.length
       ? "Verdict '" +
         state.verdict +
         "' contradicts " +
@@ -429,6 +593,17 @@
         " blocking item(s): " +
         conflicts.join(", ")
       : "";
+    /* `#conflicts` is role="alert", and `refreshCounts` runs on every session
+     * change -- which includes every keystroke in the Summary field, because
+     * setSummary notifies. Assigning textContent unconditionally would fire an
+     * assertive live-region mutation per character, interrupting the user's own
+     * typing echo and making the summary impossible to compose. Only speak when
+     * the message actually changes. */
+    if (text !== lastConflictText) {
+      warn.textContent = text;
+      warn.hidden = conflicts.length === 0;
+      lastConflictText = text;
+    }
   }
 
   function mount() {
@@ -565,14 +740,29 @@
 
     var submitButton = $("#submit");
     if (!targets.submission.endpoint) {
-      submitButton.disabled = true;
+      /* aria-disabled, not disabled. A disabled button is unfocusable, so the
+       * reason it is unavailable -- which is the one thing the reviewer needs,
+       * because it tells them to use the download path instead -- can never be
+       * reached or announced. */
+      submitButton.setAttribute("aria-disabled", "true");
       $("#submit-note").textContent =
         "This manifest carries no endpoint, which is the normal case for a file:// " +
         "page. Download or copy the pack and run `adlc feedback apply --pack <file>`.";
+      submitButton.addEventListener("click", function () {
+        announce($("#submit-note").textContent);
+      });
     } else {
       $("#submit-note").textContent = "Submitting posts to " + targets.submission.endpoint + ".";
+      var submitting = false;
       submitButton.addEventListener("click", function () {
-        submitButton.disabled = true;
+        /* Never disable the focused element. Disabling blurs it to <body>, and
+         * this page is long, so the reviewer is thrown to the top of the
+         * document at the exact moment they complete their task -- with no way
+         * back but Tab. `aria-busy` plus a guard flag says "working" without
+         * destroying the focus point. */
+        if (submitting) return;
+        submitting = true;
+        submitButton.setAttribute("aria-busy", "true");
         announce("Submitting\u2026");
         session
           .submit()
@@ -583,9 +773,10 @@
                 ". The outer loop has been retriggered."
             );
           })
-          .catch(function (err) {
-            submitButton.disabled = false;
-            say(err);
+          .catch(say)
+          .then(function () {
+            submitting = false;
+            submitButton.removeAttribute("aria-busy");
           });
       });
     }

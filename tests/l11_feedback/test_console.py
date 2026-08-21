@@ -262,3 +262,226 @@ def test_no_control_is_pointer_only() -> None:
     assert not pointer_only.intersection(handlers), sorted(set(handlers))
     # Pointer events are allowed, but only as a shortcut that fills the form.
     assert "form.elements.comment.focus()" in js
+
+
+# ---------------------------------------------------------------------------
+# Annotations must be reviewable, not merely drawable
+# ---------------------------------------------------------------------------
+#
+# An `accessibility-adversary` pass found this console could only CREATE
+# annotations. The marks existed solely as SVG inside a `role="presentation"`
+# overlay, so a reviewer not looking at the picture could not list what they had
+# annotated, read back where a mark landed, correct it, or delete it -- a
+# mis-placed mark was permanent in the pack, with "reload and lose everything"
+# as the only escape. That made the second reference GUI, whose entire job is to
+# prove the contract is GUI-agnostic, evidence only that the contract is
+# pointer-and-sight-agnostic up to the moment of creation.
+
+
+def _extract_function(js: str, name: str) -> str:
+    """Pull one top-level function out of the console IIFE by brace matching.
+
+    The console has no module boundary by design -- it is one file that runs in a
+    browser -- so a behavioural test has to lift the function out to call it.
+    Brace matching rather than a regex, because the body contains braces.
+    """
+    start = js.index(f"function {name}(")
+    depth = 0
+    for i in range(js.index("{", start), len(js)):
+        if js[i] == "{":
+            depth += 1
+        elif js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start : i + 1]
+    raise AssertionError(f"unbalanced braces extracting {name}")
+
+
+def test_annotations_are_listed_and_not_only_drawn() -> None:
+    js = console_asset("console.js")
+    assert 'el("ul", { class: "annotations"' in js, "no annotation list is built"
+    assert "a.artifactSha256 === artifact.sha256" in js, (
+        "the list must be scoped to the artifact whose card it sits in"
+    )
+
+
+def test_every_listed_annotation_can_be_edited_and_deleted() -> None:
+    js = console_asset("console.js")
+    assert 'text: "Edit"' in js and 'text: "Delete"' in js
+    assert "session.removeAnnotation(annotation.id)" in js
+    # A bare "Delete" in a list of forty reads as forty identical buttons.
+    assert '"aria-label": "Delete " + label' in js
+    assert '"aria-label": "Edit " + label' in js
+
+
+def test_deleting_an_annotation_does_not_strand_focus() -> None:
+    """Removing the focused button sends focus to <body> unless told otherwise."""
+    js = console_asset("console.js")
+    assert '(list.querySelector("button") || shape).focus()' in js
+
+
+def test_the_annotation_label_carries_severity_and_position() -> None:
+    js = console_asset("console.js")
+    assert "describeGeometry(annotation)" in js
+    for part in ('"Annotation "', '" of "', "annotation.severity"):
+        assert part in js, f"the accessible label omits {part}"
+
+
+@needs_node
+def test_geometry_is_described_in_words(tmp_path: Path) -> None:
+    """Position is data. A reviewer who cannot see the overlay still needs it."""
+    src = _extract_function(console_asset("console.js"), "describeGeometry")
+    runner = tmp_path / "geom.js"
+    runner.write_text(
+        src + "\n"
+        "const out = [\n"
+        "  describeGeometry({}),\n"
+        "  describeGeometry({geometry: {shape: 'point', points: [[0.5, 0.25]]}}),\n"
+        "  describeGeometry({geometry: {shape: 'rect',"
+        " points: [[0.1, 0.2], [0.35, 0.45]]}}),\n"
+        "];\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [NODE or "node", str(runner)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    whole, point, rect = json.loads(proc.stdout)
+    assert whole == "whole artifact"
+    assert point == "point at 50%, 25%"
+    assert rect == "region from 10%, 20% to 35%, 45%"
+
+
+@needs_node
+def test_a_freehand_annotation_is_summarised_not_enumerated(tmp_path: Path) -> None:
+    """400 coordinate pairs read aloud is a denial of service, not a description."""
+    src = _extract_function(console_asset("console.js"), "describeGeometry")
+    runner = tmp_path / "geom.js"
+    runner.write_text(
+        src + "\n"
+        "const points = [];\n"
+        "for (let i = 0; i < 400; i++) points.push([0.12 + i / 4000, 0.64 + i / 8000]);\n"
+        "console.log(describeGeometry({geometry: {shape: 'freehand', points}}));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [NODE or "node", str(runner)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    described = proc.stdout.strip()
+    assert "400 points" in described
+    assert "spanning" in described
+    # The extent, not the path: a bounded sentence rather than 400 pairs.
+    assert len(described) < 120, described
+
+
+@needs_node
+def test_the_sdk_really_removes_what_the_console_asks_it_to(
+    targets: dict, tmp_path: Path
+) -> None:
+    """The delete button is only real if the call behind it is."""
+    (tmp_path / "sdk.js").write_text(sdk_source(), encoding="utf-8")
+    runner = tmp_path / "run.js"
+    runner.write_text(
+        "const SDK = require('./sdk.js');\n"
+        "const targets = require('./targets.json');\n"
+        "const s = SDK.createSession(targets);\n"
+        "const sha = targets.artifacts[0].sha256;\n"
+        "const a = s.addAnnotation({artifactSha256: sha, shape: 'whole',"
+        " severity: 'minor', comment: 'first'});\n"
+        "s.addAnnotation({artifactSha256: sha, shape: 'whole',"
+        " severity: 'minor', comment: 'second'});\n"
+        "const before = s.state().annotations.length;\n"
+        "s.removeAnnotation(a.id);\n"
+        "const after = s.state().annotations;\n"
+        "console.log(JSON.stringify({before, after: after.length,"
+        " left: after.map(x => x.comment)}));\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "targets.json").write_text(json.dumps(targets), encoding="utf-8")
+    proc = subprocess.run(
+        [NODE or "node", str(runner)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["before"] == 2
+    assert out["after"] == 1
+    assert out["left"] == ["second"]
+
+
+# ---------------------------------------------------------------------------
+# Focus, state and status must survive the moment the task completes
+# ---------------------------------------------------------------------------
+
+
+def test_submitting_never_disables_the_focused_button() -> None:
+    """Disabling the focused element blurs it to <body>, at the worst moment."""
+    js = console_asset("console.js")
+    assert "submitButton.disabled" not in js, (
+        "disabling the button the user just activated throws focus to the top of "
+        "a long document with no way back but Tab"
+    )
+    assert 'submitButton.setAttribute("aria-busy", "true")' in js
+    assert 'submitButton.removeAttribute("aria-busy")' in js
+
+
+def test_an_unavailable_submit_still_explains_itself() -> None:
+    """A `disabled` button is unfocusable, so its reason can never be reached."""
+    js = console_asset("console.js")
+    assert 'submitButton.setAttribute("aria-disabled", "true")' in js
+    assert 'announce($("#submit-note").textContent)' in js
+
+
+def test_diff_decision_buttons_carry_state_and_row_identity() -> None:
+    js = console_asset("console.js")
+    assert '"aria-pressed": "false"' in js
+    assert 'decision + " change to " + row.targetKind + " " + row.targetId' in js
+    assert 'other.setAttribute("aria-pressed", other === button ? "true" : "false")' in js
+
+
+def test_the_conflict_warning_is_announced(targets: dict) -> None:
+    html = build_console(targets)
+    assert '<p id="conflicts" role="alert" hidden>' in html, (
+        "a silent contradiction is discovered only when submission fails"
+    )
+
+
+def test_the_conflict_alert_is_not_rewritten_on_every_keystroke() -> None:
+    """`refreshCounts` runs on every session change, and setSummary notifies.
+
+    Reassigning an assertive live region per character interrupts the user's own
+    typing echo, making the summary impossible to compose.
+    """
+    js = console_asset("console.js")
+    assert "lastConflictText" in js
+    assert "if (text !== lastConflictText)" in js
+
+
+def test_focus_is_not_parked_under_the_sticky_header() -> None:
+    css = console_asset("console.css")
+    assert "scroll-margin-top" in css, (
+        "the sticky header paints over whatever the browser scrolls into focus"
+    )
+
+
+def test_severity_is_never_carried_by_colour_alone() -> None:
+    """The list item states its severity in words as well as in a border."""
+    js = console_asset("console.js")
+    assert "annotation.severity" in js
+    css = console_asset("console.css")
+    assert "li.annotation.sev-blocker" in css
+

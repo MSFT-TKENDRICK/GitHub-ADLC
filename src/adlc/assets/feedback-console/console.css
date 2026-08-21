@@ -44,6 +44,22 @@ header {
 h1 { font-size: 1.25rem; margin: 0; }
 h2 { font-size: 1.05rem; margin: 2rem 0 0.5rem; }
 h3 { font-size: 0.95rem; margin: 0 0 0.25rem; word-break: break-word; }
+h4 { font-size: 0.85rem; margin: 0.75rem 0 0.25rem; }
+
+/* The header is sticky and opaque at z-index 5, and nothing else reserves space
+ * for it. Tabbing scrolls each newly focused control to the top edge of the
+ * viewport -- directly underneath it -- so the focus ring, and often the field
+ * itself, is painted over. At 200% zoom the header can swallow several
+ * subsequent controls, leaving you typing into something you cannot see. */
+.card,
+button,
+input,
+select,
+textarea,
+summary,
+a {
+  scroll-margin-top: 8rem;
+}
 
 .muted { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
 
@@ -160,7 +176,35 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .decide { grid-template-columns: 1fr auto auto auto; align-items: center; }
 .decision { font-size: 0.8rem; color: var(--muted); }
 
-.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; }
+/* The annotation list is the non-visual equivalent of the SVG overlay, so it
+ * carries severity in a left border AND in the text of every item -- colour is
+ * never the only signal. */
+ul.annotations {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+li.annotation {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+}
+
+li.annotation.sev-major   { border-left-color: var(--accent); }
+li.annotation.sev-blocker { border-left-color: var(--bad); }
+
+li.annotation .what { margin: 0; font-size: 0.85rem; font-weight: 600; }
+li.annotation .said { margin: 0.25rem 0; font-size: 0.9rem; white-space: pre-wrap; }
+li.annotation button { margin-right: 0.4rem; }
+
+/* aria-disabled leaves the control focusable so its reason can be announced;
+ * it therefore has to look unavailable without being unavailable. */
+[aria-disabled="true"] { opacity: 0.55; }
+[aria-busy="true"] { font-style: italic; }.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; }
 .pair img { max-width: 100%; height: auto; border: 1px solid var(--line); }
 figcaption { font-size: 0.8rem; color: var(--muted); }
 

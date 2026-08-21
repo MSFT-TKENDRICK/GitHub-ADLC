@@ -232,6 +232,60 @@ just rebuilding.
 
 History is never rewritten. Feedback always moves forward.
 
+## Dry-run it first
+
+`adlc feedback apply` is a one-way door. Before you spend an hour annotating,
+or before your GUI POSTs something it built, ask what would happen:
+
+```bash
+adlc feedback validate --pack pack.json --run 2026-08-20-c0de
+```
+
+This reports `wouldApply`, the refusal reason if any, the verdict and route, and
+— most usefully — **which annotations would be discarded as uncited**, which is
+the failure a reviewer otherwise discovers only by noticing their work is not in
+the successor brief. It writes nothing and takes no claim.
+
+There is exactly one implementation of the refusal rules (`plan_feedback`), and
+both the dry run and the real apply call it, so the prediction cannot drift from
+the decision.
+
+## Accessibility is part of the contract, not a polish pass
+
+Both reference GUIs shipped the same class of defect independently, which is how
+you know it is a property of the *problem* rather than of one implementation. An
+adversarial review found, in both: annotations that could be created but never
+listed, read back, edited or deleted; `disabled` applied to the button the user
+had just activated, blurring focus to `<body>` at the exact moment the task
+completed; live regions styled `:empty { display:none }`, which removes them from
+the accessibility tree so nothing they ever say is announced; and a changed
+screenshot whose only disclosure was a CSS blend mode — asking a reviewer to make
+a loop-retriggering judgement about a difference they cannot perceive.
+
+Treat these as requirements:
+
+- **A visual mark is not a record.** Every annotation must also exist in a list
+  that states its severity, its position in words (`region from 10%, 20% to
+  35%, 45%`), and its comment. Geometry is data; if it exists only as SVG inside
+  a `role="presentation"` overlay, it does not exist.
+- **Creation is a third of the job.** Edit and delete must be reachable too, or a
+  mis-clicked mark is permanent in the pack.
+- **Never disable the focused element.** Use `aria-disabled` plus an early return
+  that announces the blocking reason, and `aria-busy` for in-flight work. A
+  `disabled` button is unfocusable, so the `aria-describedby` explaining why it
+  is unavailable can never be reached.
+- **Hide live regions with the clip recipe**, never `display:none`, `hidden`, or
+  `:empty`.
+- **Summarise, do not enumerate.** A freehand annotation has up to 400 points;
+  announce its extent, not its path.
+- **Every difference needs a non-visual form.** Render the hashes and byte deltas
+  you already hold as text.
+- **Reserve space for sticky headers** with `scroll-margin-top`, or the browser
+  scrolls each newly focused control underneath one.
+- **Do not rewrite an assertive live region on every keystroke.** Guard the
+  assignment on the text actually changing, or the alert interrupts the user's
+  own typing echo and the field becomes impossible to compose.
+
 ## A checklist for a new GUI
 
 - [ ] Reads `feedback-targets.json`; imports nothing from `adlc.stages.report`.
@@ -241,10 +295,14 @@ History is never rewritten. Feedback always moves forward.
 - [ ] Stores geometry as `0..1` fractions of natural size.
 - [ ] Shows `sourceDigest` reasoning text verbatim — the digest pins what the human read.
 - [ ] Every action reachable by keyboard alone; state changes announced via `aria-live`.
+- [ ] Annotations are listed, described in words, editable and deletable — not just drawn.
+- [ ] No control is ever `disabled` while focused; `aria-disabled`/`aria-busy` instead.
+- [ ] Live regions are clipped, never `display:none`, and are not rewritten per keystroke.
 - [ ] Severity and regression conveyed by more than colour.
 - [ ] Never uses `innerHTML` on manifest values; escapes `<` in any JSON island.
 - [ ] Surfaces `blockingConflicts()` before submit rather than after rejection.
 - [ ] Falls back to download/copy when there is no endpoint.
+- [ ] Checked against `adlc feedback validate --run` before trusting its output.
 
 Run `adlc feedback console --out console.html` and read
 `src/adlc/assets/feedback-console/console.js` for a complete worked example in
