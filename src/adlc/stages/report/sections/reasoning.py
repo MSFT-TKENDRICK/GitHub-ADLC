@@ -83,7 +83,14 @@ _SEVERITY_CLASS = {
 }
 _STATUS_CLASS = {"accepted": "pill ok", "rejected": "pill bad", "proposed": "pill warn"}
 
-_PERSONA_HEADING = re.compile(r"^##\s+\d+\.\s+(?P<title>.+?)\s*$", re.MULTILINE)
+#: ``enrich_personas`` renders ``## <n>. <name> - <role>``, so the numbered heading
+#: is the real data contract. The number is optional because a hand-written or
+#: agent-authored ``personas.md`` using plain ``##`` headings should still be
+#: critique-able rather than silently yielding nothing to argue with. ``###``
+#: subheadings are structure within a persona, not a persona, and stay excluded.
+#: :mod:`adlc.stages.feedback_targets` compiles the identical pattern; parity
+#: between them is pinned by ``tests/l11_feedback/test_report_manifest_parity.py``.
+_PERSONA_HEADING = re.compile(r"^##\s+(?:\d+\.\s+)?(?P<title>.+?)\s*$", re.MULTILINE)
 _ADR_OUTCOME = re.compile(
     r"^##\s+Decision Outcome\s*\n(?P<body>.*?)(?=^##\s+|\Z)",
     re.MULTILINE | re.DOTALL,

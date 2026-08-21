@@ -68,7 +68,27 @@ DEFAULT_TOTAL_BYTES = 12 * 1024 * 1024
 _ANNOTATABLE_MEDIA = ("image/", "video/")
 
 _REASONING_TEXT_CAP = 20_000
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+
+#: ``enrich_personas`` renders ``## <n>. <name> - <role>`` from ``personas.md.j2``,
+#: so the numbered heading is the real data contract. The number is optional here
+#: because a hand-written or agent-authored ``personas.md`` that uses plain ``##``
+#: headings should still be critique-able -- yielding *zero* persona targets is a
+#: silent loss of exactly the feedback this layer exists to collect. ``###``
+#: subheadings (``Goals``, ``Pain points``) are excluded: they are structure within
+#: a persona, not a separate persona.
+#:
+#: The report compiles the identical pattern. The two must agree or the same
+#: persona carries a different ``targetRef`` in each GUI, and a critique written in
+#: one is unmatchable in the other.
+_PERSONA_HEADING = re.compile(r"^##\s+(?:\d+\.\s+)?(?P<title>.+?)\s*$", re.MULTILINE)
+
+#: MADR's rationale section, and the frontmatter that is metadata rather than
+#: reasoning. Both mirror the report so the two agree on what a critique argues with.
+_ADR_OUTCOME = re.compile(
+    r"^##\s+Decision Outcome\s*\n(?P<body>.*?)(?=^##\s+|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_ADR_FRONTMATTER = re.compile(r"\A\ufeff?---.*?\n---\s*\n", re.DOTALL)
 
 #: Change kinds whose baseline image is worth inlining. ``unchanged`` is excluded
 #: because its baseline is byte-identical to the candidate, which is already
@@ -268,6 +288,47 @@ def _artifacts(rd: RunDir, run: dict[str, Any], budget: _Budget) -> list[dict[st
     return out
 
 
+def _requirements(rd: RunDir) -> list[dict[str, str]]:
+    """Requirements offered for annotation linkage, read from the reduced pack.
+
+    The report's annotation form reads ``review-pack.json``; this manifest used to
+    re-run :func:`extract_requirements` over ``spec.md`` and the feature file. Both
+    happen to agree today only because :mod:`adlc.stages.evidence` builds the pack
+    from that same function -- a coincidence that nothing holds in place. Filter or
+    augment the pack once and the report would offer a reviewer a requirement the
+    manifest never mentions, so the same annotation would be linkable in one GUI and
+    not in another. Read the reduced artifact, the way the report does, and the two
+    cannot drift.
+
+    The derivation survives only as a fallback for a run that was never reduced,
+    where returning nothing would be strictly worse than returning something.
+    """
+    try:
+        pack = read_json(rd.review_pack)
+    except (OSError, ValueError):
+        pack = None
+
+    if isinstance(pack, dict) and isinstance(pack.get("requirements"), list):
+        out: list[dict[str, str]] = []
+        for entry in pack["requirements"]:
+            if isinstance(entry, dict) and entry.get("id"):
+                out.append({
+                    "id": str(entry["id"])[:128],
+                    "text": str(entry.get("text") or "")[:4000],
+                    "source": str(entry.get("source") or ""),
+                })
+        return out
+
+    return [
+        {
+            "id": str(r.get("id") or ""),
+            "text": str(r.get("text") or "")[:4000],
+            "source": str(r.get("source") or ""),
+        }
+        for r in extract_requirements(rd)
+    ]
+
+
 def _png_size(path: Path) -> tuple[int | None, int | None]:
     """Natural size from the PNG IHDR chunk, so geometry can be normalised.
 
@@ -349,12 +410,19 @@ def _squad_findings(rd: RunDir, out: list[dict[str, Any]]) -> None:
             continue
         rel = rd.rel(path)
         for index, finding in enumerate(review.findings, start=1):
+            # Digest the title with the body. The report does, and matching it is
+            # not cosmetic: ``sourceDigest`` is how a critique proves the reasoning
+            # it argued with has not changed underneath it. Digesting the body
+            # alone leaves a retitled finding looking untouched, and -- because the
+            # report and this manifest would then publish different digests for the
+            # same ``targetRef`` -- a critique authored against one would be
+            # rejected as drifted by the other while nothing had drifted at all.
             _reason_entry(
                 out,
                 kind="squad_finding",
                 ref=f"{rel}#finding-{index}",
                 title=finding.title,
-                text=finding.body,
+                text=f"{finding.title}\n\n{finding.body}".strip(),
                 author=review.member or review.squad,
                 severity=finding.severity or None,
                 confidence=getattr(finding, "confidence", "") or None,
@@ -363,6 +431,14 @@ def _squad_findings(rd: RunDir, out: list[dict[str, Any]]) -> None:
 
 
 def _personas(rd: RunDir, out: list[dict[str, Any]]) -> None:
+    """Persona targets, sectioned exactly the way the report sections them.
+
+    ``personas.md`` is written by ``enrich_personas`` as ``## <n>. <name> - <role>``,
+    so the numbered heading -- not generic markdown structure -- is the real data
+    contract, and ``#persona-<n>`` is the ref a critique carries. Deriving it any
+    other way produces targets that name the same reasoning by a different id, and
+    a critique written in one GUI is then unmatchable in another.
+    """
     path = rd.enrichment_dir / "personas.md"
     if not path.is_file():
         return
@@ -371,41 +447,24 @@ def _personas(rd: RunDir, out: list[dict[str, Any]]) -> None:
     except OSError:
         return
     rel = rd.rel(path)
-    for slug, title, body in _split_sections(text):
+    matches = list(_PERSONA_HEADING.finditer(text))
+    if not matches:
+        return
+    for index, match in enumerate(matches, start=1):
+        start = match.end()
+        end = matches[index].start() if index < len(matches) else len(text)
+        # The generator separates personas with a horizontal rule; it belongs to
+        # neither neighbour and would otherwise perturb the digest.
+        body = re.sub(r"\s*-{3,}\s*\Z", "", text[start:end]).strip()
         _reason_entry(
             out,
             kind="persona",
-            ref=f"{rel}#{slug}",
-            title=title,
+            ref=f"{rel}#persona-{index}",
+            title=match.group("title").strip(),
             text=body,
             author="enrich_personas",
         )
 
-
-def _split_sections(text: str) -> list[tuple[str, str, str]]:
-    """Split markdown on its deepest-but-one heading level into (slug, title, body).
-
-    Sectioning is what makes a critique locatable: ``targetRef`` has to name a
-    span of reasoning, not a whole file, or a reviewer's disagreement lands on
-    1,000 lines at once.
-    """
-    lines = text.splitlines()
-    heads = [(i, m) for i, line in enumerate(lines) if (m := _HEADING_RE.match(line))]
-    if not heads:
-        return []
-    level = min(len(m.group(1)) for _, m in heads)
-    picked = [(i, m) for i, m in heads if len(m.group(1)) == level]
-    out: list[tuple[str, str, str]] = []
-    for pos, (start, match) in enumerate(picked):
-        end = picked[pos + 1][0] if pos + 1 < len(picked) else len(lines)
-        title = match.group(2).strip()
-        body = "\n".join(lines[start + 1 : end]).strip()
-        out.append((_slug(title) or f"section-{pos + 1}", title, body))
-    return out
-
-
-def _slug(title: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:64]
 
 
 def _rubric_rationales(rd: RunDir, out: list[dict[str, Any]]) -> None:
@@ -445,28 +504,42 @@ def _adr_justifications(cfg: Config, out: list[dict[str, Any]]) -> None:
             text = adr.path.read_text(encoding="utf-8")
         except OSError:
             continue
+        body, anchor = _adr_reasoning(text)
+        try:
+            ref_path = adr.path.relative_to(cfg.root).as_posix()
+        except (OSError, ValueError):
+            ref_path = f"docs/decisions/{adr.path.name}"
         _reason_entry(
             out,
             kind="adr",
-            ref=f"{adr.number}",
-            title=adr.title,
-            text=_adr_justification(text),
+            ref=f"{ref_path}#{anchor}",
+            title=f"{adr.number} - {adr.title}",
+            text=body,
             author="adr",
             confidence=adr.status or None,
         )
 
 
-def _adr_justification(text: str) -> str:
-    """The justification section if the ADR has one, else the whole document.
+def _adr_reasoning(text: str) -> tuple[str, str]:
+    """The decision rationale and the anchor naming where it came from.
 
-    Falling back to the whole document is deliberate: an ADR whose headings do
-    not match our expectation is still a decision a human may want to argue
-    with, and dropping it would silently narrow what can be critiqued.
+    Deliberately identical to the report's extraction. The previous version
+    differed on both halves of a critique's identity: it referenced an ADR by bare
+    number (``0001``) where the report references ``docs/decisions/0001-x.md#body``,
+    and it digested the YAML frontmatter along with the prose. A human arguing with
+    a decision in the report therefore produced a critique that a manifest-driven
+    GUI could match to nothing -- not flagged, just absent -- and vice versa.
+
+    ``## Decision Outcome`` is the MADR section carrying the actual reasoning. When
+    an ADR does not follow the template the whole document (less frontmatter) is
+    still a decision worth arguing with, so it degrades rather than disappearing.
     """
-    for slug, _title, body in _split_sections(text):
-        if body and ("justification" in slug or "rationale" in slug or "decision" in slug):
-            return body
-    return text
+    match = _ADR_OUTCOME.search(text)
+    if match:
+        body = match.group("body").strip()
+        if body:
+            return body, "decision-outcome"
+    return _ADR_FRONTMATTER.sub("", text, count=1).strip(), "body"
 
 
 # ---------------------------------------------------------------------------
@@ -690,14 +763,7 @@ def compute_targets(
             "title": run.get("title"),
             "passed": run.get("passed"),
         },
-        "requirements": [
-            {
-                "id": str(r.get("id") or ""),
-                "text": str(r.get("text") or "")[:4000],
-                "source": str(r.get("source") or ""),
-            }
-            for r in extract_requirements(rd)
-        ],
+        "requirements": _requirements(rd),
         "artifacts": artifacts,
         "reasoning": _reasoning(cfg, rd),
         "diff": diff,
