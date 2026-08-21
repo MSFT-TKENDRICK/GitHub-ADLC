@@ -30,8 +30,10 @@ machine. In CI the pack must arrive on a native PR review or a
 from __future__ import annotations
 
 import json
+import os
 import re
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -282,8 +284,12 @@ def render_feedback_markdown(
         ),
         "",
         f"- Verdict: **{verdict}** (route: {clean_inline(pack.get('route', 'outer'), limit=16)})",
-        f"- Submitted: {clean_inline(pack.get('submittedAt', 'unknown'), limit=64)}"
-        + (f" by {clean_inline(pack['submittedBy'], limit=128)}" if pack.get("submittedBy") else ""),
+        f"- Submitted: `{clean_inline(pack.get('submittedAt', 'unknown'), limit=64)}`"
+        + (
+            f" by `{clean_inline(pack['submittedBy'], limit=128)}`"
+            if pack.get("submittedBy")
+            else ""
+        ),
         f"- Candidate: `{clean_inline(pack.get('candidateSha', ''))[:12] or 'unknown'}`",
     ]
 
@@ -299,8 +305,14 @@ def render_feedback_markdown(
             )
             shape = clean_inline(item.get("shape", "whole"), limit=32)
             severity = clean_inline(item.get("severity", "info"), limit=32)
+            # Every inline value on this line is rendered inside a code span.
+            # `clean_inline` maps a backtick to an apostrophe, so a crafted id
+            # cannot close the span -- which is what stops `requirementIds`
+            # (schema-typed as a free string with no pattern) smuggling raw
+            # markdown into a brief that the next agent reads.
             reqs = ", ".join(
-                clean_inline(r, limit=64) for r in (item.get("requirementIds") or [])[:40]
+                f"`{clean_inline(r, limit=64)}`"
+                for r in (item.get("requirementIds") or [])[:40]
             ) or "none cited"
             parts.append(f"- `{where}` ({shape}, {severity}; requirements: {reqs})")
             parts.append(_quote(clean_text(item.get("comment", ""))))
@@ -432,6 +444,27 @@ def _claim_path(rd: RunDir, identity: str) -> Path:
     return feedback_dir(rd) / "claims" / f"{identity}.claim"
 
 
+# Comfortably longer than any legitimate retrigger (the CI job caps itself at 20
+# minutes), so a claim held by live work is never stolen, while a claim orphaned
+# by a SIGKILL, an OOM-kill or a runner eviction heals itself within the hour
+# instead of refusing those exact pack bytes forever.
+CLAIM_TTL_SECONDS = 3600
+
+
+def _claim_is_stale(path: Path) -> bool:
+    try:
+        held = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        # A claim we cannot read is a claim we cannot honour. Treating it as
+        # stale is the safe direction: the claim only closes a seconds-wide
+        # race, whereas `find_replay` -- which is durable -- is what actually
+        # keeps a replay from forking the lineage.
+        return True
+    if held.tzinfo is None:
+        held = held.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - held).total_seconds() > CLAIM_TTL_SECONDS
+
+
 def claim_identity(rd: RunDir, identity: str) -> bool:
     """Atomically claim the right to apply a pack with this exact content.
 
@@ -444,6 +477,11 @@ def claim_identity(rd: RunDir, identity: str) -> bool:
 
     The claim is taken before any of that work and is atomic at the filesystem
     level, so exactly one caller can proceed and the loser is told so.
+
+    A claim also carries the time it was taken, because the process holding one
+    can die in a way no ``except`` clause can observe. Past ``CLAIM_TTL_SECONDS``
+    the claim is assumed orphaned and is taken over -- otherwise a single OOM-kill
+    would permanently refuse that exact pack with no way to clear it.
     """
     if not identity:
         return True
@@ -453,7 +491,15 @@ def claim_identity(rd: RunDir, identity: str) -> bool:
         with path.open("x", encoding="utf-8") as handle:
             handle.write(utcnow())
     except FileExistsError:
-        return False
+        if not _claim_is_stale(path):
+            return False
+        # Re-take by replacing the orphan. `os.replace` is atomic, so two callers
+        # racing on the same stale claim still serialise: both write a temp file
+        # under their own name, both replace, and the durable `find_replay`
+        # record decides the survivor exactly as it does for any other replay.
+        tmp = path.with_suffix(f".claim.{os.getpid()}.tmp")
+        tmp.write_text(utcnow(), encoding="utf-8")
+        os.replace(tmp, path)
     return True
 
 

@@ -9,15 +9,37 @@
 #                             reviewer's author_association; or
 #   * workflow_dispatch     -- which GitHub only lets users with write access run.
 #
-# Trust model (mirrors docs/PLAN.md 4.8):
-#   * The `authorize` job decides whether the submitter may drive the loop. A
-#     fork PR author, who has no write access, is refused here.
-#   * The `apply` job holds no write permission on the repository. It records
-#     feedback and re-runs the design loop into the run directory, then uploads
-#     that directory as an artifact. It never pushes to the repo.
-#   * Untrusted, actor-controlled text (the pack, the review body) is only ever
-#     passed through `env:` and parsed from a file or the environment. It is
-#     never interpolated into a `run:` block, which would be shell injection.
+# Trust model (mirrors docs/PLAN.md 4.8). There are three separate questions and
+# this workflow has to answer all of them; answering only the first is the classic
+# way to build a pwn-request:
+#
+#   1. MAY THIS PERSON drive the loop? The `authorize` job asks the permissions
+#      API directly. It does NOT trust `author_association`: `MEMBER` only means
+#      "in the owning org" and `COLLABORATOR` includes read- and triage-only
+#      collaborators, so in an org whose base permission is Read, every member
+#      would pass a naive association check without having write access. The
+#      lookup fails CLOSED -- if the API call errors we refuse, never fall back.
+#
+#   2. WHOSE CODE ARE WE ABOUT TO RUN? `pull_request_review` is a privileged
+#      trigger: it runs in the BASE repo context with secrets available, and an
+#      unpinned `actions/checkout` resolves `github.ref` to `refs/pull/N/merge`
+#      -- the FORK's tree. `pip install .` then executes the build backend
+#      declared in the fork's own `pyproject.toml` (this repo uses hatchling, so
+#      a committed `hatch_build.py` alone is arbitrary code execution) with
+#      `GITHUB_TOKEN` live in the environment. So the checkout below is pinned to
+#      the base SHA and this workflow NEVER executes tree content from a PR head.
+#      Additionally, `authorize` refuses cross-repo (fork) heads outright, the
+#      same guard every other workflow in .github/workflows already carries. A
+#      maintainer who does want to apply a pack captured on a fork PR uses the
+#      `workflow_dispatch` path, which is authoritative by construction.
+#
+#   3. CAN UNTRUSTED TEXT REACH A SHELL? The pack and the review body are only
+#      ever passed through `env:` and parsed from a file or `os.environ` inside a
+#      quoted heredoc. They are never interpolated into a `run:` block.
+#
+# The `apply` job additionally holds no write permission on the repository. It
+# records feedback and re-runs the design loop into the run directory, then
+# uploads that directory as an artifact. It never pushes to the repo.
 
 name: ADLC feedback
 
@@ -43,9 +65,10 @@ jobs:
   authorize:
     name: Authorize the submitter
     runs-on: ubuntu-latest
-    # This job reads only the event payload and makes no API calls, so it needs
-    # no permissions at all.
-    permissions: {}
+    # `contents: read` is the documented minimum for the collaborator-permission
+    # endpoint used below. It grants no write of any kind.
+    permissions:
+      contents: read
     outputs:
       authorized: ${{ steps.gate.outputs.authorized }}
       actor: ${{ steps.gate.outputs.actor }}
@@ -63,14 +86,39 @@ jobs:
               // workflow_dispatch, so the actor is privileged by construction.
               authorized = true;
             } else if (event === 'pull_request_review') {
-              // A pack on a native review inherits the reviewer's real identity.
-              // Only OWNER / MEMBER / COLLABORATOR have write access; CONTRIBUTOR,
-              // FIRST_TIME_CONTRIBUTOR and NONE (a fork author) do not -- so a
-              // fork PR cannot drive the loop.
-              const assoc = context.payload.review.author_association;
+              const pr = context.payload.pull_request;
               actor = context.payload.review.user.login;
-              authorized = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(assoc);
-              core.info(`review author_association=${assoc} -> authorized=${authorized}`);
+
+              // Guard 1: refuse cross-repo (fork) heads. `pull_request_review`
+              // runs privileged in the base repo, so anything downstream that
+              // touches the head -- code, artifacts, the run directory -- is
+              // attacker-influenced. Every other workflow here carries this
+              // guard; see the trust-model note at the top of the file.
+              const sameRepo =
+                !!pr && !!pr.head.repo && pr.head.repo.id === context.payload.repository.id;
+
+              // Guard 2: a real write-access check. `author_association` is NOT
+              // one -- see the trust-model note. Fails closed on any API error.
+              let permission = null;
+              if (sameRepo) {
+                try {
+                  const res = await github.rest.repos.getCollaboratorPermissionLevel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    username: actor,
+                  });
+                  permission = res.data.permission;
+                } catch (err) {
+                  core.warning(
+                    `permission lookup for ${actor} failed (${err.status}); refusing`
+                  );
+                }
+              }
+              authorized = permission === 'admin' || permission === 'write';
+              core.info(
+                `review by ${actor}: sameRepo=${sameRepo} permission=${permission} ` +
+                  `-> authorized=${authorized}`
+              );
             }
             core.setOutput('authorized', authorized ? 'true' : 'false');
             core.setOutput('actor', actor);
@@ -175,10 +223,18 @@ jobs:
           print(f"bound pack for run {run_id}")
           PY
 
+      # PINNED, DELIBERATELY. Without an explicit `ref:` this resolves
+      # `github.ref`, which for `pull_request_review` is `refs/pull/N/merge` --
+      # the PR head's tree. The very next step runs `pip install .`, which
+      # executes the build backend declared in the checked-out `pyproject.toml`
+      # with GH_TOKEN in scope. Checking out the base SHA means the framework we
+      # install is always the framework this repo already trusts, and no tree
+      # content from a PR head is ever executed. See the trust-model note above.
       - name: Check out the ADLC framework
         if: steps.extract.outputs.has_pack == 'true'
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request_review' && github.event.pull_request.base.sha || github.ref }}
           fetch-depth: 1
 
       - name: Set up Python

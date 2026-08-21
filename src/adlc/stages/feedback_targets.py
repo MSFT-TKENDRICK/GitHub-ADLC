@@ -571,17 +571,29 @@ def _baseline_screenshot(rd: RunDir, baseline_run_id: str, rel: str) -> Path | N
 
     ``rel`` is variant-relative by design -- that is what makes the diff stable
     across a variant rename -- so it has to be re-anchored rather than joined.
+
+    Both ``baseline_run_id`` and ``rel`` are read out of a diff document, and the
+    result is base64-inlined into the manifest. Neither is attacker-controlled
+    today (``.adlc/**`` is protected and the document is produced by the
+    ``evidence_diff`` stage), but a join that escapes its root would turn any
+    future write path into an arbitrary-file read, so both are confined here.
     """
-    base_dir = rd.path.parent / baseline_run_id / "evidence"
-    if not base_dir.is_dir():
+    runs_root = rd.path.parent.resolve()
+    base_dir = (runs_root / baseline_run_id / "evidence").resolve()
+    if not base_dir.is_relative_to(runs_root) or not base_dir.is_dir():
         return None
-    direct = base_dir / rel
-    if direct.is_file():
-        return direct
+
+    def _confined(candidate: Path) -> Path | None:
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(base_dir) or not resolved.is_file():
+            return None
+        return resolved
+
+    if found := _confined(base_dir / rel):
+        return found
     for variant in sorted(p for p in base_dir.iterdir() if p.is_dir()):
-        candidate = variant / rel
-        if candidate.is_file():
-            return candidate
+        if found := _confined(variant / rel):
+            return found
     return None
 
 
