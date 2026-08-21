@@ -28,6 +28,7 @@ engine:
   id: copilot
   env:
     COPILOT_GITHUB_TOKEN: ${{ github.token }}
+model: gpt-5
 
 tools:
   github:
