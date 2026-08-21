@@ -1,34 +1,52 @@
 # ADLC — Agentic Development Lifecycle
 
-A reusable framework that runs a **governed, evidence-producing agentic SDLC** in
-any GitHub repository. Assembled entirely from existing GitHub, Microsoft, Azure
-and CNCF products — nothing invented.
+ADLC is a reusable Python framework for running a governed, evidence-producing
+agentic software development lifecycle in a GitHub repository. It turns a
+brief into a specified, decomposed, tested, measured, and reviewable change:
 
-A brief goes in. A specced, decomposed, agent-built, evidence-backed, gated
-change comes out, with every decision recorded as an auditable ADR.
-
-```
-brief → qualify → spec → enrich → task graph → parallel build → evidence
-      → evals → gates → interactive report → native PR review → ADR → merge
+```text
+brief -> qualify -> spec -> enrich -> graph -> build -> evidence
+      -> eval -> gates -> report -> PR review -> ADR
 ```
 
-## Why this exists
+The framework is deliberately small and composable. It has credential-free
+defaults for local development and optional adapters for GitHub, Copilot,
+Azure, governance, evaluation, feature flags, and richer evidence collection.
 
-Most "AI in the SDLC" tooling produces changes. The hard part is producing
-changes you can *trust*: knowing what was promised, what was built, what was
-measured, what was checked, who decided, and being able to replay all of it six
-months later. ADLC is a thin layer that makes that the default.
+## Start here
 
-## Install
+| Goal | Read |
+| --- | --- |
+| Install ADLC in another repository | [Installation](#installation) |
+| Run the complete local pipeline | [Quick start](#quick-start) |
+| Understand the architecture and invariants | [`docs/PLAN.md`](docs/PLAN.md) |
+| Configure adapters and gates | [Configuration](#configuration) and [`docs/`](docs/) |
+| Add an adapter or stage | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| Operate incidents and hotfixes | [`docs/day2-operations.md`](docs/day2-operations.md) |
 
-Three ways, all supported.
+## Requirements
 
-**1. Reusable workflow** — the normal path. One pinned caller in your repo:
+- Python 3.11 or newer
+- Git
+- A Git repository for `adlc init` and pipeline runs
+- `pytest` and `ruff` for development (install with `.[dev]`)
+
+Optional integrations are detected by `adlc doctor`; missing optional tools do
+not prevent the credential-free path from running.
+
+## Installation
+
+### Reusable GitHub Actions workflow
+
+This is the normal cross-repository integration. Add a thin caller workflow
+that pins ADLC to a tag or commit:
 
 ```yaml
-# .github/workflows/adlc.yml
 name: ADLC
-on: [pull_request]
+
+on:
+  pull_request:
+
 jobs:
   adlc:
     uses: MSFT-TKENDRICK/GitHub-ADLC/.github/workflows/adlc.yml@v0
@@ -36,148 +54,200 @@ jobs:
       profile: minimal
 ```
 
-**2. CLI** — vendors that caller plus namespaced config, and nothing else:
+Use a commit SHA instead of `v0` when your repository requires immutable
+third-party references. The reusable workflow checks out the caller repository,
+installs ADLC, runs the pipeline, and uploads the run directory as an artifact.
+
+### CLI
+
+Install from the repository with `uv` or `pip`:
 
 ```bash
 uv tool install git+https://github.com/MSFT-TKENDRICK/GitHub-ADLC@v0
+# or:
+python -m pip install "git+https://github.com/MSFT-TKENDRICK/GitHub-ADLC@v0"
+
 adlc init
 ```
 
-**3. Side-load** (dotfiles / Codespaces) — installs the CLI and runs `adlc init`
-against the repo it finds itself in:
+`adlc init` writes only the ADLC caller workflow, `.adlc/config.yaml`,
+`.adlc/policy.yaml`, `.adlc/squads.yaml`, and the `.adlc/runs/` gitignore entry.
+It does not copy the framework or overwrite existing files unless `--force` is
+provided.
+
+### Side-load for Codespaces or dotfiles
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MSFT-TKENDRICK/GitHub-ADLC/v0/bootstrap.sh | bash
 ```
 
-`adlc init` never copies the framework into your repo and never touches your
-existing CI. Upgrading is changing one pinned ref.
+The script installs the CLI and runs `adlc init` in the current repository. Set
+`ADLC_REF`, `ADLC_REPO`, `ADLC_TARGET`, or `ADLC_PROFILE` to customize it.
 
-## Use
+## Quick start
+
+From a repository containing a brief such as
+[`examples/briefs/dark-mode.md`](examples/briefs/dark-mode.md):
 
 ```bash
-adlc doctor                              # what is available here, and why not
-adlc run new --brief docs/idea.md        # or --issue 42
-adlc qualify latest                      # deterministic readiness score
-adlc spec latest                         # GitHub Spec Kit, or built-in templates
-adlc enrich latest                       # gherkin, rubric, benchmarks, diagrams
-adlc graph latest                        # tasks.md → parallel DAG with context
-adlc build latest --max-parallel 4       # isolated worktrees, patch barriers
+adlc doctor
+adlc run new --brief examples/briefs/dark-mode.md
+adlc qualify latest
+adlc spec latest
+adlc enrich latest
+adlc graph latest
+adlc build latest --runner fake --max-parallel 4
 adlc evidence latest --variant candidate-a
-adlc eval latest                         # rubric score
-adlc gate latest                         # fail-closed aggregate
-adlc report latest --open                # self-contained interactive HTML
+adlc eval latest
+adlc gate latest
+adlc report latest --open
+adlc validate latest
 ```
 
-Everything above runs **offline, free, with no credentials**. Real agents, real
-security scanning and real cloud services are opt-in adapters.
+Every command accepts a run id; `latest` resolves to the newest run. Commands
+that emit structured output also support `--json`. A failed required gate
+returns a non-zero exit code.
 
-## Design
-
-Four decisions carry the weight.
-
-### 1. Immutable stage results, one reducer
-
-Every stage writes a *new* `runs/<run>/stages/<stage>.<attempt>.json`. Only
-`adlc reduce` folds them into `run.json`. Nothing else ever writes it.
-
-This is not fastidiousness — GitHub Actions jobs share no filesystem and run
-concurrently, so any design that appends to one canonical document loses writes.
-Re-runs append `attempt: n+1`, so history is append-only and auditable.
-
-### 2. Fail closed
-
-A gate the profile marks `required` that returns `fail` **or** `not_run` fails
-the build. "We could not check" never renders as "it is fine". A single
-`ADLC / required` check is the branch-protection target.
-
-### 3. Bounded context capsules
-
-Each task node carries the context its agent needs — but capped at 64 KiB total,
-8 KiB per file, 12 files, with blob SHAs and line ranges rather than whole-file
-dumps. Capsules are regenerated at every level barrier, and a stale blob SHA
-fails the node instead of letting an agent edit against content that has since
-changed. Inlining is a cache, never the source of truth.
-
-### 4. The reviewing agent never sees raw evidence
-
-Traces, HAR files, console logs and replay scripts leak source code and are
-attacker-controlled — a perfect prompt-injection vector. The evidence-review
-agent receives only `evidence-review-pack.json`: requirement ids, normalised
-measurements, coverage claims and artifact hashes. The **blocking** check is
-deterministic (every requirement backed by a hash-verified artifact); the LLM
-verdict is advisory and must cite artifact hashes or it is discarded.
-
-## Task isolation
-
-Nodes at the same topological level run concurrently, each in its own git
-worktree at an exact base SHA, and each emits a patch anchored to that SHA.
-
-* Overlapping write-sets at the same level are a **compile-time graph error**,
-  caught before any agent runs rather than discovered at merge time.
-* At each level barrier patches are applied in id order, tests run, a commit is
-  made, and `baseSha` advances.
-* Patches touching `.github/**`, `.adlc/**`, `schemas/**` or `docs/decisions/**`
-  are rejected — agent-authored code cannot rewrite its own gates.
-
-## Decisions
-
-Human decisions are native GitHub PR reviews. There is no bespoke command
-protocol to learn or to abuse.
-
-| Review | Effect |
-|---|---|
-| Approve | `ship`; ADR accepted, bound to the review's commit SHA |
-| Request changes | ADR rejected; a **new** run is created with `referencesRun` |
-| Comment | Annotations carried into the successor run's brief |
-
-A review of a stale commit is refused. Revisions never mutate a prior run, so
-the audit trail only ever grows.
-
-## Adapters
-
-Every seam has a built-in credential-free default. Everything else is a pure
-addition discovered through entry points, and reported honestly by `adlc doctor`.
-
-| Seam | Default (always works) | Opt-in |
-|---|---|---|
-| Agent runner | `fake` (deterministic) | Copilot SDK, Agent Tasks API, gh-aw, MAF |
-| Task store | SQLite | GitHub Issues + sub-issues + Projects |
-| Evals | deterministic rubric | ASSERT, promptfoo, Azure AI Evaluation |
-| Evidence | `local` | Playwright, Lighthouse CI, k6, axe |
-| Flags | flagd file provider | LaunchDarkly via OpenFeature |
-| Telemetry | OTel JSONL | Application Insights |
-| Gates | tests, secrets, deps, evidence | CodeQL, Code Quality, governance, squads |
-
-`agents` and `taskstore` **never** auto-escalate: they spend money and write to
-live repositories, so switching them is always a deliberate choice in
-`.adlc/config.yaml`. On a GitHub Actions runner an ambient `GITHUB_TOKEN` would
-otherwise silently opt you in.
-
-## Standards
-
-- **[GitHub Spec Kit](https://github.com/github/spec-kit)** — specification and task decomposition
-- **[GitHub Agentic Workflows](https://github.com/github/gh-aw)** — event-driven agents with least-privilege safe outputs
-- **[Microsoft Agent Framework](https://github.com/microsoft/agent-framework)** — governed agent invocation
-- **[Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)** — deterministic tool-call policy
-- **[ASSERT](https://github.com/responsibleai/ASSERT)** — specification-driven evaluation
-- **[OpenFeature](https://openfeature.dev) / [flagd](https://flagd.dev)** — vendor-neutral feature flags
-- **[Open Experiment Specification](https://www.openexperiment.org/)** — experiment export format
-- **[MADR v4](https://adr.github.io/madr/)** — architecture decision records
-- **[OpenTelemetry](https://opentelemetry.io/)** — GenAI and feature-flag semantic conventions
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). The architecture and its rationale,
-including the adversarial critique that reshaped it, are in
-[docs/PLAN.md](docs/PLAN.md).
+For automation, capture the run id without parsing human output:
 
 ```bash
-PYTHONPATH=src python -m pytest tests/conformance -q
+RUN_ID=$(adlc run new --brief examples/briefs/dark-mode.md --json \
+  | python -c "import json,sys; print(json.load(sys.stdin)['runId'])")
+adlc qualify "$RUN_ID" && adlc spec "$RUN_ID" && adlc enrich "$RUN_ID"
+adlc graph "$RUN_ID" && adlc build "$RUN_ID" --runner fake
+adlc evidence "$RUN_ID" --variant candidate-a
+adlc eval "$RUN_ID" && adlc gate "$RUN_ID"
+adlc report "$RUN_ID" && adlc validate "$RUN_ID"
 ```
 
-The conformance suite runs with no credentials and no optional tooling. It
-covers the happy path and — more importantly — the refusals: a required gate
-that did not run fails the build, write-set conflicts are rejected at graph
-time, stale capsules fail their node, protected paths cannot be written, and the
-review pack leaks no raw evidence.
+## CLI reference
+
+| Command | Purpose |
+| --- | --- |
+| `adlc init` | Install the thin workflow and repository configuration |
+| `adlc doctor` | Detect available adapters and record `capabilities.json` |
+| `adlc run new --brief FILE` | Create a run from Markdown |
+| `adlc run new --issue NUMBER` | Create a run from a GitHub issue |
+| `adlc run list` | List local runs and their gate status |
+| `adlc qualify`, `spec`, `enrich`, `graph` | Prepare the run and compile its task graph |
+| `adlc build` | Execute graph levels with isolated worktrees and patch barriers |
+| `adlc evidence` | Collect variant evidence and create the sanitized review pack |
+| `adlc eval` | Score the candidate against its rubric |
+| `adlc gate` | Run selected gates and enforce fail-closed aggregation |
+| `adlc reduce` | Fold immutable stage results into canonical `run.json` |
+| `adlc report` | Render a standalone HTML report |
+| `adlc validate` | Validate run artifacts against JSON Schemas |
+| `adlc adr new/list/set-status` | Create and manage MADR decision records |
+| `adlc review apply` | Apply a native GitHub pull-request review event |
+| `adlc export oes` | Export genuinely comparative runs to OES |
+| `adlc autoresearch` | Propose the next brief from repository history |
+| `adlc hotfix --incident FILE` | Run the day-2 incident-to-hotfix path |
+
+Run `adlc --help` or `adlc COMMAND --help` for the complete option list.
+
+## Configuration
+
+`adlc` searches upward for the repository root and loads `.adlc/config.yaml`.
+The checked-in example at [`.adlc/config.yaml`](.adlc/config.yaml) is also the
+configuration used to dogfood this repository.
+
+```yaml
+version: 1
+profile: minimal
+commands:
+  test: "python -m pytest tests/conformance -q"
+  lint: "ruff check src/"
+limits:
+  maxParallel: 4
+  maxInnerIterations: 2
+  maxOuterIterations: 1
+  maxTurns: 200
+  maxAiCredits: 500
+gates:
+  required: null
+  depsMaxSeverity: high
+qualify:
+  minScore: 50
+eval:
+  threshold: 0.7
+```
+
+`minimal` requires local tests, secrets, dependency, and evidence-completeness
+gates. `full` additionally requires the optional security, quality, evaluation,
+governance, and reviewer-squad gates. Required gates that are unavailable return
+`not_run` and fail the aggregate; ADLC never treats an unverified check as
+green.
+
+Select an optional adapter explicitly:
+
+```yaml
+adapters:
+  agents: copilot-sdk
+  evals: assert-ai
+  taskstore: github
+```
+
+Agent runners and task stores are intentionally explicit-only because they can
+spend money or write to live GitHub resources. See the adapter guides in
+[`docs/`](docs/) for prerequisites and failure semantics.
+
+## Architecture and safety model
+
+- **Immutable stages:** stages write
+  `.adlc/runs/<run>/stages/<stage>.<attempt>.json`; `adlc reduce` is the only
+  writer of canonical `run.json`.
+- **Isolated builds:** graph nodes run in worktrees at an exact base SHA and
+  produce patches restricted to their declared write sets.
+- **Bounded context:** task capsules use file limits, line ranges, and blob
+  SHAs so agents do not receive unbounded or stale source.
+- **Fail-closed gates:** `required + not_run` is a failure, and one aggregate
+  check can be used for branch protection.
+- **Sanitized evidence review:** the evidence reviewer receives hashes,
+  measurements, and coverage claims, not raw traces, HAR files, or console
+  logs.
+- **Native decisions:** GitHub pull-request reviews become the human decision;
+  revisions create new runs instead of mutating history.
+
+The canonical artifact and permission contracts are documented in
+[`docs/PLAN.md`](docs/PLAN.md). The run directory is intentionally local and
+should not be committed; CI uploads it as an artifact.
+
+## Repository layout
+
+```text
+src/adlc/          Python package: CLI, stages, adapters, ports, schemas
+tests/             conformance, integration, and adapter tests
+docs/              architecture and adapter guides
+schemas/           versioned JSON Schemas for run artifacts
+templates/         files used by adlc init
+examples/          briefs and optional Azure integration examples
+.github/workflows/ reusable workflow and gh-aw sources/locks
+.adlc/             this repository's dogfooding configuration
+```
+
+## Development
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest tests/conformance -q
+ruff check src/
+```
+
+The conformance suite is credentialless. Optional adapter tests should describe
+their unavailable path and skip or degrade with a specific reason when the
+external service is not configured.
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing ports, schemas,
+entry-point registrations, or protected paths.
+
+## Documentation
+
+[`docs/README.md`](docs/README.md) is the documentation index. Start with the
+architecture plan, then use the focused adapter guides for the integration you
+are enabling. Documentation changes should keep commands, paths, profiles,
+and claims aligned with the implementation and should label preview or
+example-only integrations clearly.
+
+## License
+
+MIT. See the project metadata in [`pyproject.toml`](pyproject.toml).
