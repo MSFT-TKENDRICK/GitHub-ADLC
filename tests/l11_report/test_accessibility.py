@@ -5,7 +5,7 @@ that changes state silently, or a comparison whose entire meaning is carried by
 a visual blend, quietly excludes part of that audience -- and an evidence
 artifact that only *some* reviewers can audit is not evidence, it is a picture.
 
-Two rules are pinned here because both were shipped wrong once:
+Three rules are pinned here because all three were shipped wrong once:
 
 * **Navigation announces itself.** Moving between comparisons rewrites the slide
   label and the pairing rule in place. Without a live region a screen-reader user
@@ -13,13 +13,17 @@ Two rules are pinned here because both were shipped wrong once:
 * **A composite is described as one thing.** The difference blend means nothing
   as two separately-announced images; it is exposed as a single labelled image
   that admits the view is visual-only and names the routes that are not.
+* **A control survives its own activation.** The dot strip was rebuilt from
+  scratch on every render, so pressing a dot destroyed the element that had
+  focus. Focus fell to ``<body>`` and a keyboard user was returned to the top of
+  the document every time they stepped through the comparisons.
 """
 
 from __future__ import annotations
 
 import re
 
-from adlc.report.assets import JS
+from adlc.report.assets import CSS, JS
 from adlc.report.html import _SHELL
 
 
@@ -86,3 +90,36 @@ class TestDifferenceBlendIsDescribed:
     def test_the_side_by_side_figures_still_describe_their_own_images(self) -> None:
         """Only the blend is decorative; ordinary captures keep real alt text."""
         assert "img.alt = caption + ': ' + item.caption;" in JS
+
+
+class TestTheDotStripKeepsFocus:
+    """Activating a dot must not destroy the button that was activated.
+
+    ``renderSlide`` runs on every navigation. Clearing and rebuilding the strip
+    there removed the focused element mid-interaction, and the browser has
+    nowhere to put focus but ``<body>``: the keyboard user is silently ejected
+    to the top of the document on every single step through the comparisons.
+    """
+
+    def test_the_strip_is_only_rebuilt_when_the_comparison_count_changes(self) -> None:
+        guard = JS.find("dots.childElementCount !== pairs.length")
+        assert guard != -1, (
+            "the dot strip is rebuilt unconditionally; every activation will "
+            "destroy the focused button"
+        )
+        cleared = JS.find("dots.innerHTML = ''")
+        assert cleared != -1 and guard < cleared, (
+            "the innerHTML reset must sit inside the count guard, not before it"
+        )
+
+    def test_the_selected_dot_is_marked_without_rebuilding(self) -> None:
+        """State moves onto the surviving buttons instead of new ones."""
+        assert "dots.children[d].setAttribute('aria-current'" in JS
+
+    def test_the_dots_are_still_individually_labelled(self) -> None:
+        assert "'Go to comparison '" in JS
+
+    def test_selection_is_still_conveyed_to_assistive_tech(self) -> None:
+        """The CSS highlight is keyed off the same attribute, so both must hold."""
+        assert 'aria-current' in JS
+        assert '.slide-dots button[aria-current="true"]' in CSS

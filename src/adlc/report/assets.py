@@ -270,7 +270,9 @@ ol.timeline p { margin:4px 0 0; color:var(--muted); font-size:13px }
   overflow:hidden; margin:6px 0 4px }
 .meter-fill { height:100% } .meter-fill.ok { background:var(--ok) } .meter-fill.bad { background:var(--bad) }
 .meter-mark { position:absolute; top:-3px; width:2px; height:16px; background:var(--fg); opacity:.6 }
-.mermaid { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:14px }
+.mermaid { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:14px;
+  white-space:pre; overflow-x:auto; font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  font-size:.86em; color:var(--muted) }
 
 @media (prefers-reduced-motion:reduce) {
   html { scroll-behavior:auto }
@@ -667,14 +669,21 @@ JS = r"""
 
     var dots = $('#slide-dots');
     if (dots) {
-      dots.innerHTML = '';
-      pairs.forEach(function (_, i) {
-        var b = el('button');
-        b.setAttribute('aria-label', 'Go to comparison ' + (i + 1));
-        b.setAttribute('aria-current', String(i === slide));
-        b.addEventListener('click', function () { slide = i; renderSlide(); });
-        dots.appendChild(b);
-      });
+      // Build once, then only update state. Rebuilding the strip on every render
+      // destroyed the very button the user had just activated, so keyboard focus
+      // fell back to <body> and their place in the strip was lost on every step.
+      if (dots.childElementCount !== pairs.length) {
+        dots.innerHTML = '';
+        pairs.forEach(function (_, i) {
+          var b = el('button');
+          b.setAttribute('aria-label', 'Go to comparison ' + (i + 1));
+          b.addEventListener('click', function () { slide = i; renderSlide(); });
+          dots.appendChild(b);
+        });
+      }
+      for (var d = 0; d < dots.children.length; d++) {
+        dots.children[d].setAttribute('aria-current', String(d === slide));
+      }
     }
   }
 
@@ -912,14 +921,5 @@ JS = r"""
   renderDiff('');
   if ((M.adrs || []).length) selectAdr(M.adrs[0].number);
   showTab((location.hash || '#overview').slice(1) || 'overview', false);
-
-  // Mermaid is progressive enhancement only. The SVG gitgraph above is the
-  // real navigation, so the report is complete with no network at all.
-  if (window.mermaid) {
-    try {
-      mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
-      mermaid.run({ querySelector: '.mermaid' });
-    } catch (e) { /* leave the source text visible */ }
-  }
 })();
 """

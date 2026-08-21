@@ -20,6 +20,21 @@ choose to follow.
 `tests/conformance` asserts this directly: the file starts with `<!doctype html>`
 and the strings `src="./` and `href="./` do not appear anywhere in it.
 
+That check looks for *relative* references, which is why it did not notice the
+report shipping for one release with `<script src="https://cdn.jsdelivr.net/npm/
+mermaid@11/...">` in the shell — an absolute URL walked straight past it. The
+tag existed only to pretty-print the collapsed *Diagram source* disclosure, and
+it cost three things worth more than that: the report stopped working offline,
+an archived artifact became mutable (`@11` resolves to whatever it means on the
+day you open the file, not the day it was reviewed), and unpinned third-party
+code with no SRI ran inside a document holding the run's diffs and captures.
+
+The diagram is now shown as source text for the reader to copy, and the shell
+carries a `Content-Security-Policy` of `default-src 'none'` with `data:` allowed
+for media and `'unsafe-inline'` for the inline CSS and JS. The policy is the
+durable half of the fix: it denies the fetch even if someone re-adds a tag.
+`tests/l11_report/test_self_contained.py` pins both halves.
+
 The second-order consequence is the more interesting one. With no build step
 there is also no client-side pipeline: **every number, summary, diff hunk and
 layout coordinate is computed in Python at render time** and shipped as one JSON
@@ -245,17 +260,21 @@ reader should not confuse the two.
 - Every table exists in the static HTML, so gate results, requirements and
   artifacts are readable with JavaScript disabled. The interactive panes (graph,
   slideshow, diff viewer) are the enhancement.
-- Mermaid is embedded as `escape(source)` inside a div and read back via
-  `el.textContent` — a round-trip `tests/l9_enrich/test_diagrams.py` asserts. Do
-  not "simplify" it into an attribute; the escaping is what stops a diagram
-  source from becoming markup.
+- Mermaid is embedded as `escape(source)` inside a div and displayed as literal
+  source text — a round-trip `tests/l9_enrich/test_diagrams.py` asserts. Do not
+  "simplify" it into an attribute; the escaping is what stops a diagram source
+  from becoming markup. It is deliberately not rendered in the browser, because
+  rendering it means loading a script from outside the file (see §1).
+- The slideshow's dot strip is built once and then only has `aria-current`
+  updated. Rebuilding it inside `renderSlide` destroyed the button the user had
+  just pressed, dropping keyboard focus to `<body>` on every step.
 
 ---
 
 ## 11. Tests
 
 ```bash
-PYTHONPATH=src python -m pytest tests/l11_report -q     # 154 passed
+PYTHONPATH=src python -m pytest tests/l11_report -q     # 179 passed
 ```
 
 | File | Covers |
@@ -264,7 +283,9 @@ PYTHONPATH=src python -m pytest tests/l11_report -q     # 154 passed
 | `test_diff.py` | line classification, gutters, word-level segments, file status, malformed input tolerance, all three bounds |
 | `test_decisions.py` | citation classification and dedupe, MADR section parsing, `adlc-tasks` shape tolerance, all five linkage cases |
 | `test_media.py` | hero selection, inline vs linked-with-reason, all three pairing rules and their confidence, budget accounting, linear pairing cost, self-pairing guard |
-| `test_accessibility.py` | slideshow live regions; the difference blend exposed as one described image with decorative layers |
+| `test_accessibility.py` | slideshow live regions; the difference blend exposed as one described image with decorative layers; the dot strip surviving its own activation |
+| `test_self_contained.py` | no external URL, script `src` or `<link>` in the shell; no `url()`/`@import` in the CSS; the CSP directives |
+| `test_model_scaling.py` | artifact paths case-folded once per render rather than once per node, at both the helper and the `build_model` call site |
 
 `tests/conformance/test_pipeline.py::test_report_is_self_contained` owns the
 one-file guarantee.

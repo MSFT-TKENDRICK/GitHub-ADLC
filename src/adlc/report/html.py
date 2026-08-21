@@ -335,6 +335,12 @@ _SHELL = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
+<!-- The "no network" promise in this module's docstring, made enforceable. Every
+     image and video already travels as a data: URI, the CSS and JS are inline, and
+     nothing is fetched at view time, so the report can afford the strictest policy
+     there is. This is what stops a future asset reference from quietly turning an
+     archived evidence artifact into a live third-party code execution surface. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>ADLC run {{RUN_ID}}</title>
 <style>{{CSS}}</style>
 </head>
@@ -421,6 +427,8 @@ _SHELL = """<!doctype html>
       </div>
       <details style="margin-top:12px">
         <summary>Diagram source (Mermaid)</summary>
+        <p class="note">Copy this into any Mermaid renderer. It is deliberately not
+          rendered here: doing so would mean loading a script from outside this file.</p>
         <div class="mermaid">{{GRAPH_MERMAID}}</div>
       </details>
     </div>
@@ -519,7 +527,6 @@ _SHELL = """<!doctype html>
 </div>
 
 <script id="adlc-model" type="application/json">{{MODEL_JSON}}</script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>{{JS}}</script>
 </body>
 </html>

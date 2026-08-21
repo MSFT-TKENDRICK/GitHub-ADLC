@@ -133,12 +133,23 @@ def graph_mermaid(graph: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def _node_artifacts(node: dict[str, Any], artifacts: list[dict[str, Any]]) -> list[str]:
+def _artifact_paths(artifacts: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Case-fold every artifact path once per render, not once per node.
+
+    ``_node_artifacts`` runs for every node, so folding the case inside it
+    re-lowercased the entire artifact list once per node: the same
+    once-per-pair rework ``media._pair_shots`` was rewritten to avoid, one file
+    over. Hoisting it makes the string work proportional to the artifacts alone.
+    """
+    return [(a["sha256"], str(a.get("path", "")).lower()) for a in artifacts]
+
+
+def _node_artifacts(node: dict[str, Any], paths: list[tuple[str, str]]) -> list[str]:
     """Artifacts whose path mentions this node's id. Cheap, and precise enough."""
-    return [
-        a["sha256"] for a in artifacts
-        if node.get("id") and node["id"].lower() in str(a.get("path", "")).lower()
-    ]
+    node_id = str(node.get("id") or "").lower()
+    if not node_id:
+        return []
+    return [sha for sha, path in paths if node_id in path]
 
 
 def _requirements(pack: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -214,6 +225,7 @@ def build_model(cfg: Config, rd: RunDir) -> dict[str, Any]:
             adrs_by_task.setdefault(linked.get("id", ""), []).append(adr["number"])
 
     nodes: list[dict[str, Any]] = []
+    artifact_paths = _artifact_paths(artifacts)
     for node in placed:
         diff = diff_by_task.get(node.get("id", ""), {})
         refs = [re.sub(r"\D", "", str(r)).zfill(4) for r in (node.get("adrRefs") or [])]
@@ -233,7 +245,7 @@ def build_model(cfg: Config, rd: RunDir) -> dict[str, Any]:
             "writeSet": list(node.get("writeSet") or []),
             "acceptance": list(node.get("acceptance") or []),
             "adrRefs": list(dict.fromkeys(r for r in refs if r in adr_by_number)),
-            "artifactSha256": _node_artifacts(node, artifacts),
+            "artifactSha256": _node_artifacts(node, artifact_paths),
             "stats": diff.get("stats") or {"files": 0, "additions": 0, "deletions": 0},
             "hasDiff": bool(diff.get("files")),
         })
