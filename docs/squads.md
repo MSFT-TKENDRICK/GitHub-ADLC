@@ -447,6 +447,42 @@ surfaced in `report.html`. The squad's own PR comment shows the
 `cited / filed` ratio, so a member that habitually files uncited noise is
 visible.
 
+### 7.1 Screening survives the handoff to the next run
+
+Screening happens on the gate's **in-memory** `Review` objects and leaves no mark
+on the verdict files. So anything that re-reads those files later must re-apply
+the rule, or the discard is undone the moment the gate returns.
+
+`feature_completeness` has exactly one such reader:
+`adlc.stages.complete._feedback_digest`, which copies findings into the successor
+run's brief when a failure routes outward (§8.3). It re-screens for that reason.
+Without it, a finding citing a fabricated digest — ruled inadmissible for the
+vote precisely *because* an invented hash looks checkable — would be copied into
+the next run's brief as an amendment to the request, and would shape the redesign
+having never been admissible. The influence the screening denies it would simply
+arrive one run later, through a side door, with more authority than before.
+
+Two consequences fall out of that:
+
+* **The prose is scrubbed, not just the citation field.** Reviewers write the
+  digest into the sentence as well, and the sentence is quoted into the brief
+  verbatim. A fabricated digest that survives in prose is exactly as
+  fake-checkable as one in a citation, so unverifiable 64-hex tokens in a
+  finding's title or body are replaced with `[unverifiable digest removed]` —
+  conspicuously, because a silent deletion leaves a sentence that still reads as
+  though it cited something.
+* **An empty result says why it is empty.** If nothing survives screening the
+  brief says so explicitly rather than falling back to a bare "no findings
+  recorded". A redesign prompted by "no reason given" deserves very different
+  handling from one prompted by a cited finding, and the next run can only tell
+  the difference if it is told.
+
+When the pack cannot be read, nothing can be checked. The findings are still
+carried — dropping them would tell the successor the gate blocked for no stated
+reason — but under an explicit `Citations unverified` warning, and
+`packVerified: false` is recorded on the stage. A labelled unverified claim is
+honest; an unlabelled one is not.
+
 ---
 
 ## 8. The gates
@@ -562,6 +598,40 @@ verdict files, no pack, unparseable pack, no `runId`. No gate ever returns
 "We could not check whether we built the right thing" is not "we built the right
 thing".
 
+### 8.5 Acting on the verdict — `iterate_on_feedback`
+
+A gate that blocks but changes nothing is a warning label. `adlc complete` calls
+`adlc.stages.complete.iterate_on_feedback`, which turns a `fail` into the next
+run:
+
+| Recorded verdict | What happens |
+|---|---|
+| gate never evaluated | nothing created; stage `ok`, message says the gate has not run |
+| `pass`, `skipped`, or `not_run` | nothing created; stage `ok` |
+| `fail` | a **new run** is created, and this run's stage is recorded `fail` |
+| `fail` with `--no-iterate` | no run created; stage still `fail`, feedback still returned |
+
+The verdict is read from `gates/feature_completeness.json`, falling back to the
+`gates[]` array of a reduced `run.json` — a run that has been reduced and tidied
+must still be routable. Only *this* gate routes outward: a failing security gate
+is an inner-loop problem and must never silently re-spec the feature.
+
+Three properties are load-bearing, and each is pinned by
+`tests/l8_squads/test_outer_loop.py`:
+
+* **It routes outward.** The inner loop patches code against a fixed plan. If the
+  evidence does not demonstrate the request, the plan is what was wrong, and
+  patching would produce more evidence for the same wrong thing.
+* **It appends, never edits.** The predecessor is left byte-for-byte as it was;
+  the successor carries `referencesRun` and the original brief, so a redesign is
+  a new node in the audit trail rather than an overwrite of the record that
+  prompted it.
+* **The failure stays visible on the run that failed.** The stage is recorded
+  `fail` even though a successor now exists. Were it `ok`, a blocked run would
+  reduce to a passing one that merely happens to have a sibling.
+
+Only findings that survive screening reach the successor brief (§7.1).
+
 ---
 
 ## 9. Tests
@@ -580,7 +650,7 @@ Verify in an isolated environment that no sibling can clobber:
 python -m venv --system-site-packages .venv-l8
 .venv-l8/bin/python -m pip install -e . --no-deps
 .venv-l8/bin/python -m pytest tests/conformance -q   # 41 passed
-.venv-l8/bin/python -m pytest tests/l8_squads  -q    # 227 passed
+.venv-l8/bin/python -m pytest tests/l8_squads  -q    # 296 passed
 ruff check src/adlc/adapters/gate/adversarial_review.py \
            src/adlc/adapters/gate/evidence_review.py \
            src/adlc/adapters/gate/feature_completeness.py \
@@ -609,3 +679,4 @@ workstream at once.
 | `test_workflows.py` | frontmatter of all five workflows; cost caps; read-only permissions; **the evidence sandbox asserted against the compiled `.lock.yml`**; the leak-marker screen kept in lockstep with the spine's conformance test; agent profiles; `squads.yaml` |
 | `test_completeness_pack.py` | that no code, diff, transcript, chain of thought or replay script reaches `completeness-pack.json`; every `LEAK_MARKERS` entry enforced; the refusal-to-write path; the `excluded[]` declaration; brief truncation and count consistency |
 | `test_feature_completeness_gate.py` | the blocking gate: every fail-closed path; pack identity; quorum on cited findings and the outer-loop routing in the message; uncited and fabricated citations discarded; unreachable quorum reported as `not_run` rather than `pass` |
+| `test_outer_loop.py` | `iterate_on_feedback`: that only a `fail` creates a successor; that the route is always `outer`; the append-only trail (`referencesRun`, untouched predecessor, original brief carried forward); that the failure stays visible on the run that failed; that uncited **and fabricated** findings never reach the successor brief, in the citation field *or* in reviewer prose; `--no-iterate`; verdict fallback to a reduced `run.json`; that another gate's failure never triggers a redesign |

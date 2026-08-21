@@ -347,6 +347,34 @@ def run_complete(cfg: Config, rd: RunDir, variant: str = "candidate-a") -> dict[
 #: The gate whose verdict routes this run back into redesign.
 GATE_ID = "feature_completeness"
 
+#: What the successor brief says when the gate blocked but nothing survived
+#: screening. Naming *why* the section is empty matters: a redesign prompted by
+#: "no reason given" should be treated very differently from one prompted by a
+#: cited finding, and the next run can only make that distinction if it is told.
+_NO_ADMISSIBLE_FINDINGS = (
+    "(The gate blocked, but no finding survived citation screening -- every claim "
+    "was either uncited or cited a digest absent from the evidence pack. Re-examine "
+    "the gate verdict below before redesigning: there may be nothing here to act on.)"
+)
+
+#: Any 64-hex token in reviewer prose. Screening removes a fabricated digest from
+#: a finding's parsed ``citations``, but the reviewer usually also wrote it into
+#: the surrounding sentence, and that copy is quoted verbatim into the successor
+#: brief. An invented hash is dangerous because it *looks* checkable, and it looks
+#: exactly as checkable in prose as in a citation field -- so both are scrubbed.
+_DIGEST_IN_PROSE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+
+#: Kept deliberately conspicuous. A silent deletion would leave a sentence that
+#: reads as though it cited something, with the citation quietly missing.
+_REDACTED = "[unverifiable digest removed]"
+
+
+def _redact_unverifiable(text: str, pack_hashes: set[str]) -> str:
+    """Replace every 64-hex token in ``text`` that is not a digest in the pack."""
+    return _DIGEST_IN_PROSE.sub(
+        lambda m: m.group(0) if m.group(0).lower() in pack_hashes else _REDACTED, text
+    )
+
 
 def _gate_result(rd: RunDir) -> dict[str, Any] | None:
     """The recorded ``feature_completeness`` verdict, freshest first."""
@@ -368,18 +396,61 @@ def _gate_result(rd: RunDir) -> dict[str, Any] | None:
     return None
 
 
-def _feedback_digest(rd: RunDir) -> tuple[str, list[str]]:
-    """Readable feedback for the successor brief, plus the members who filed it.
+def _feedback_digest(rd: RunDir) -> tuple[str, list[str], dict[str, Any]]:
+    """Readable feedback for the successor brief, the members who filed it, and
+    a record of what was screened out.
 
-    Only *cited* findings survive into the brief. An uncited claim was discarded
-    before the vote, so carrying it into a redesign would let it influence the
-    next run after it had already been ruled inadmissible in this one.
+    Only findings the gate itself found admissible reach the brief, and
+    admissibility is decided by re-applying the same two rules the gate applied:
+
+    * An uncited claim was discarded before the vote.
+    * A claim citing a digest that is absent from the pack was discarded as
+      *fabricated* -- an invented hash is worse than none, because it looks
+      checkable.
+
+    Re-applying the second rule here is load-bearing. The gate screens its own
+    in-memory ``Review`` objects and that mutation leaves no trace on disk, so
+    this function -- which re-reads the reviews from disk -- would otherwise copy
+    a fabricated finding straight into the next run's brief. It would then shape
+    the redesign as an amendment to the request, having already been ruled
+    inadmissible for the vote. That is exactly the influence the screening exists
+    to deny it, arriving one run later through a side door.
+
+    A pack that cannot be read means no citation can be checked. The findings are
+    still carried, because dropping them silently would tell the successor "the
+    gate blocked for no stated reason", but they are carried under an explicit
+    warning: a labelled unverified claim is honest, an unlabelled one is not.
     """
     from adlc.adapters.gate.adversarial_review import iter_reviews
+    from adlc.adapters.gate.evidence_review import _pack_hashes, _screen_citations
+
+    reviews = iter_reviews(rd.reviews_dir, GATE_ID, citation="artifact-sha256")
+
+    pack: Any = None
+    try:
+        pack = json.loads((rd.path / "completeness-pack.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pack = None
+
+    screening: dict[str, Any] = {"packVerified": isinstance(pack, dict), "fabricatedCitations": []}
+    pack_hashes: set[str] = set()
+    if isinstance(pack, dict):
+        pack_hashes = _pack_hashes(pack)
+        screening["fabricatedCitations"] = _screen_citations(
+            reviews, pack_hashes
+        )["fabricatedCitations"]
 
     lines: list[str] = []
     members: list[str] = []
-    for review in iter_reviews(rd.reviews_dir, GATE_ID, citation="artifact-sha256"):
+    if not screening["packVerified"]:
+        lines.append(
+            "> **Citations unverified.** The completeness pack could not be read, so "
+            "the digests below were not checked against it. Treat them as claims, not "
+            "as confirmed references."
+        )
+        lines.append("")
+
+    for review in reviews:
         cited = review.cited_findings
         if not cited:
             continue
@@ -387,13 +458,22 @@ def _feedback_digest(rd: RunDir) -> tuple[str, list[str]]:
         members.append(member)
         lines.append(f"### {member} (verdict: {review.verdict})")
         for finding in cited:
-            body = " ".join(finding.body.split())[:600]
-            lines.append(f"- **[{finding.severity}] {finding.title}**")
+            # Only scrub when the pack was readable. With no pack every digest is
+            # equally uncheckable, so redacting them all would destroy the
+            # findings rather than qualify them -- the warning above does that.
+            title = finding.title
+            body = " ".join(finding.body.split())
+            if screening["packVerified"]:
+                title = _redact_unverifiable(title, pack_hashes)
+                body = _redact_unverifiable(body, pack_hashes)
+            lines.append(f"- **[{finding.severity}] {title}**")
             lines.append(f"  - evidence cited: {', '.join(finding.citations[:4])}")
             if body:
-                lines.append(f"  - {body}")
+                lines.append(f"  - {body[:600]}")
         lines.append("")
-    return "\n".join(lines).strip(), members
+
+    text = "\n".join(lines).strip()
+    return ("" if not members else text), members, screening
 
 
 def iterate_on_feedback(
@@ -429,7 +509,7 @@ def iterate_on_feedback(
         )
         return {"iterated": False, "successorRun": None, "gateStatus": status}
 
-    feedback, members = _feedback_digest(rd)
+    feedback, members, screening = _feedback_digest(rd)
     if not iterate:
         rd.write_stage(
             "complete", status="fail", outputs=[],
@@ -438,11 +518,11 @@ def iterate_on_feedback(
                 "redesign pass before it can pass completeness review"
             ),
             data={"gateStatus": status, "successorRun": None, "iterated": False,
-                  "members": members},
+                  "members": members, **screening},
             started_at=started,
         )
         return {"iterated": False, "successorRun": None, "gateStatus": status,
-                "feedback": feedback}
+                "feedback": feedback, **screening}
 
     brief = rd.brief.read_text(encoding="utf-8") if rd.brief.is_file() else ""
     successor_id = new_run_id()
@@ -456,7 +536,7 @@ def iterate_on_feedback(
             "run collected and concluded the evidence does not demonstrate the request. "
             "Treat the findings below as amendments to the brief, not as bugs to patch: "
             "the previous run's plan is what failed.\n\n"
-            f"{feedback or '(the gate blocked but no cited findings were recorded)'}\n\n"
+            f"{feedback or _NO_ADMISSIBLE_FINDINGS}\n\n"
             f"> Gate verdict: {gate.get('message', '')}\n"
         ),
         references_run=rd.run_id,
@@ -471,11 +551,11 @@ def iterate_on_feedback(
         ),
         data={
             "gateStatus": status, "successorRun": successor_id, "iterated": True,
-            "route": "outer", "members": members,
+            "route": "outer", "members": members, **screening,
         },
         started_at=started,
     )
     return {
         "iterated": True, "successorRun": successor_id, "gateStatus": status,
-        "route": "outer", "feedback": feedback, "members": members,
+        "route": "outer", "feedback": feedback, "members": members, **screening,
     }
