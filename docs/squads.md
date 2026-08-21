@@ -41,6 +41,10 @@ gh aw compile                         # .md -> .lock.yml
 **Both the `.md` source and the generated `.lock.yml` are committed.** The lock
 file is what GitHub actually runs; the Markdown is what humans review.
 
+These workflows run a model, so they need a model credential —
+`COPILOT_GITHUB_TOKEN` — and they fail loudly rather than quietly when it is
+absent. If every squad check on every pull request is red, read §8.6 first.
+
 Verified against **gh-aw v0.86.2** and the frontmatter schema at
 <https://github.github.com/gh-aw/>. Corrections to older guidance you may find
 elsewhere, all confirmed against `pkg/parser/schemas/main_workflow_schema.json`
@@ -631,6 +635,63 @@ Three properties are load-bearing, and each is pinned by
   reduce to a passing one that merely happens to have a sibling.
 
 Only findings that survive screening reach the successor brief (§7.1).
+
+### 8.6 The squads need a credential, and say so loudly when they lack one
+
+The squad workflows are agentic: `gh aw` compiles them into jobs that run the
+GitHub Copilot CLI, and that CLI needs a credential. gh-aw validates it in a
+preflight step that runs before any agent starts:
+
+```yaml
+- name: Validate COPILOT_GITHUB_TOKEN secret
+  run: bash "${RUNNER_TEMP}/gh-aw/actions/validate_multi_secret.sh" COPILOT_GITHUB_TOKEN 'GitHub Copilot CLI' ...
+```
+
+`COPILOT_GITHUB_TOKEN` is the **only** name that step accepts under
+`engine: copilot`. It does not fall back to the workflow's built-in
+`GITHUB_TOKEN`, because that token authenticates the GitHub API, not the model.
+Changing `engine.id` does not avoid the requirement either — every engine gh-aw
+supports wants some provider credential.
+
+With no such secret configured, every pull request gets this shape:
+
+| Job | Result |
+|---|---|
+| `pre_activation` | pass |
+| `activation` | **fail** — `None of the following secrets are set: COPILOT_GITHUB_TOKEN` |
+| `agent`, `detection`, `safe_outputs` | skipped |
+| `conclusion` | pass |
+
+That shape is itself the diagnosis. The failure is in preflight, *before* any
+checkout and before any agent, so no repository code ran and the red tick says
+nothing whatsoever about the change under review. Confirm it by looking at one
+unrelated branch: if the same squad is red there, it is the credential, not the
+pull request.
+
+**This deliberately does not degrade to a green or `skipped` check.** A squad
+that never ran has not approved anything, and `.github/workflows/adlc.yml` states
+the rule this repository enforces everywhere:
+
+> A required gate that did not run counts as a failure.
+
+That is §8.4's rule expressed in CI instead of in Python. Marking the check
+`skipped` so the mergebox goes clean would purchase a green tick by asserting
+something nobody verified — the exact failure mode that citation-or-discard (§7)
+and the completeness gate (§8.3) exist to prevent. The cost is real and is
+accepted knowingly: until the secret exists, these checks hold the mergebox at
+`UNSTABLE`, so pull requests will not auto-merge and a human has to merge them
+deliberately.
+
+To provision it, a repository admin creates the secret with a token that carries
+Copilot access:
+
+```bash
+gh secret set COPILOT_GITHUB_TOKEN --repo <owner>/<repo>
+```
+
+Organisation secrets are invisible to a token without organisation scope, so
+`gh secret list` coming back empty does **not** prove none exists. Check at the
+organisation level and grant the repository access before minting a new token.
 
 ---
 
