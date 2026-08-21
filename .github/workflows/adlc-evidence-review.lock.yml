@@ -208,9 +208,15 @@ jobs:
             setupGlobals(core, github, context, exec, io, getOctokit);
             const { main } = require('${{ runner.temp }}/gh-aw/actions/add_reaction.cjs');
             await main();
-      - name: Validate COPILOT_GITHUB_TOKEN secret
+      - name: Validate Copilot token availability
         id: validate-secret
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/validate_multi_secret.sh" COPILOT_GITHUB_TOKEN 'GitHub Copilot CLI' https://github.github.com/gh-aw/reference/engines/#github-copilot-default
+        run: |
+          if [ -z "${COPILOT_GITHUB_TOKEN:-}" ]; then
+            echo "::error::Copilot authentication token is empty"
+            echo "verification_result=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "verification_result=passed" >> "$GITHUB_OUTPUT"
         env:
           COPILOT_GITHUB_TOKEN: ${{ github.token }}
       - name: Check for OAuth tokens
