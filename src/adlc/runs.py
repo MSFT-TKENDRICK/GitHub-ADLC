@@ -181,7 +181,6 @@ class RunDir:
             self.evidence_dir, self.evals_dir, self.gates_dir, self.reviews_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
-        self.brief.write_text(brief_text, encoding="utf-8")
 
         seed: Run = {
             "schemaVersion": RUN_SCHEMA_VERSION,
@@ -203,7 +202,16 @@ class RunDir:
             "decision": None,
             "experimentRef": None,
         }
+        # Encode the brief up front, then write seed.json *before* it. A run
+        # directory with no seed.json cannot be loaded -- load_run raises
+        # FileNotFoundError -- so if the brief write were first and failed, the
+        # crash would leave an orphaned, unloadable run. The brief is regenerable
+        # from the seed; the seed is not, so it is the one that must land first,
+        # and encoding both payloads before any write means a bad byte in either
+        # aborts before the directory is half-populated.
+        brief_bytes = brief_text.encode("utf-8")
         write_json(self.path / "seed.json", seed)
+        self.brief.write_bytes(brief_bytes)
         return seed
 
     def exists(self) -> bool:

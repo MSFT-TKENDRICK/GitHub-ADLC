@@ -677,3 +677,140 @@ def test_every_successor_route_validates_against_the_run_schema(
 
     ok, errors = is_valid("adlc-run", read_json(successor.run_json))
     assert ok, errors
+
+
+# ---------------------------------------------------------------------------
+# Lone surrogates (defect 1): the JS SDK strips them; Python ingestion must too
+# ---------------------------------------------------------------------------
+
+
+def test_clean_text_strips_lone_surrogates() -> None:
+    """A lone surrogate cannot be encoded to UTF-8, so clean_text/clean_inline
+    must drop it exactly as the SDK's cleanText does -- while leaving a real
+    astral character (a single non-surrogate code point) untouched."""
+    assert fb.clean_text("a\ud800b\udfffc") == "abc"
+    assert fb.clean_inline("a\ud83db\ude00c") == "abc"
+    assert fb.clean_text("keep \U0001f600 me") == "keep \U0001f600 me"
+
+
+def test_lone_surrogate_pack_is_refused_and_dry_run_agrees(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """The core defect: a lone surrogate made the dry run report success while
+    apply crashed and truncated the run's ADR to zero bytes. Now both refuse, in
+    agreement, and no ADR is written at all."""
+    doc = copy.deepcopy(pack)
+    doc["summary"] = "looks broken \ud83d here"  # lone high surrogate
+    doc.pop("packDigest", None)  # no declared digest -> the unguarded path
+
+    plan = fb.plan_feedback(doc, load_run(run), run.run_id)
+    assert plan["refusal"] is not None, "the dry run must refuse, not report success"
+    assert "cannot be canonically encoded" in plan["refusal"]["reason"]
+
+    result = fb.apply_feedback(cfg, run, doc)
+    assert result["applied"] is False, "apply must agree with the dry run"
+    assert "cannot be canonically encoded" in result["reason"]
+    assert _stage(run)["status"] == "fail"
+
+    adrs = list(cfg.decisions_dir.glob("*.md")) if cfg.decisions_dir.is_dir() else []
+    assert adrs == [], "a refused pack must leave no ADR, let alone a zero-byte one"
+
+
+def test_create_adr_never_leaves_a_zero_byte_record_on_bad_unicode(cfg: Config) -> None:
+    """Defect 1c, independently: encoding must precede truncation, or an
+    unencodable field leaves the git-tracked permanent record at zero bytes."""
+    from adlc.stages.adr import create_adr
+
+    with pytest.raises(UnicodeEncodeError):
+        create_adr(cfg, "Bad", justification="lone \ud800 surrogate")
+
+    leftovers = list(cfg.decisions_dir.glob("*.md")) if cfg.decisions_dir.is_dir() else []
+    assert all(p.stat().st_size > 0 for p in leftovers), "no zero-byte ADR may be left"
+
+
+def test_set_status_does_not_destroy_the_adr_on_bad_unicode(cfg: Config) -> None:
+    """The other writer in adr.py must fail the same way: raise without first
+    truncating the existing record."""
+    from adlc.stages.adr import create_adr, set_status
+
+    adr = create_adr(cfg, "Good", justification="fine", status="proposed")
+    before = adr.path.read_bytes()
+
+    with pytest.raises(UnicodeEncodeError):
+        set_status(cfg, adr.number, "accepted", review_sha="bad\ud800sha")
+
+    assert adr.path.read_bytes() == before, "a failed status write must not truncate the record"
+
+
+# ---------------------------------------------------------------------------
+# A crash mid-create must not orphan an unloadable run (defect 2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_brief_write_still_leaves_a_loadable_run(cfg: Config) -> None:
+    """seed.json is written before brief.md, so a crash writing the brief cannot
+    leave a run directory that load_run refuses with FileNotFoundError."""
+    rd = RunDir(cfg, "2026-08-20-dead")
+    rd.path.mkdir(parents=True)
+    (rd.path / "brief.md").mkdir()  # a directory here forces the brief write to fail
+
+    with pytest.raises(OSError):
+        rd.create(profile="minimal", brief_text="# Brief\n\nA change.\n")
+
+    assert (rd.path / "seed.json").is_file(), "seed.json must land before the brief"
+    load_run(rd)  # must not raise: the run is still loadable
+
+
+# ---------------------------------------------------------------------------
+# Fabricated and self-contradictory packs (defect 4)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_annotation_ids_are_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    doc = copy.deepcopy(pack)
+    doc["annotations"].append(dict(doc["annotations"][0]))  # repeats id "an-1"
+
+    result = fb.apply_feedback(cfg, run, doc)
+    assert result["applied"] is False
+    assert "repeats ids" in result["reason"]
+    assert result["duplicateIds"] == {"annotations": ["an-1"]}
+
+
+def test_duplicate_diff_decision_ids_are_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    doc = copy.deepcopy(pack)
+    doc["diffDecisions"].append(dict(doc["diffDecisions"][0]))  # repeats id "dd-1"
+
+    result = fb.apply_feedback(cfg, run, doc)
+    assert result["applied"] is False
+    assert result["duplicateIds"] == {"diffDecisions": ["dd-1"]}
+
+
+def test_contradictory_decisions_for_one_target_are_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """accept and reject for the same delta leaves the applied outcome up to
+    iteration order, so the pack is refused rather than resolved by a coin toss."""
+    doc = copy.deepcopy(pack)
+    doc["diffDecisions"].append(dict(doc["diffDecisions"][0], id="dd-2", decision="accept"))
+
+    result = fb.apply_feedback(cfg, run, doc)
+    assert result["applied"] is False
+    assert "opposed accept/reject" in result["reason"]
+    assert result["conflictingTargets"] == ["measurement:lcp"]
+
+
+def test_agreeing_duplicate_decisions_are_deduplicated_not_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """A regression guard for the dedup half of the rule: two *identical*
+    decisions for one target are a reviewer clicking twice, not a conflict, so
+    they must be accepted rather than refused."""
+    doc = copy.deepcopy(pack)
+    doc["diffDecisions"].append(dict(doc["diffDecisions"][0], id="dd-2"))  # same target + decision
+
+    result = fb.apply_feedback(cfg, run, doc)
+    assert result["applied"] is True

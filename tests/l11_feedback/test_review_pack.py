@@ -208,3 +208,49 @@ def test_approved_review_with_a_pack_creates_no_successor(
     assert result["reviewApplied"] is True
     assert result["successorRun"] is None
     assert result["review"]["successorRun"] is None
+
+
+# ---------------------------------------------------------------------------
+# One decision, not two: the pack verdict and the review state must agree
+# ---------------------------------------------------------------------------
+
+
+def test_approve_review_with_a_revise_pack_is_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """approved maps to ship, revise to iterate. Applying both would move the ADR
+    to accepted yet spawn an adopted successor -- two opposed decisions as one
+    act -- so the pack is refused before anything is written."""
+    pack["verdict"] = "revise"
+    before = {p.name for p in run.path.parent.iterdir()}
+
+    result = apply_pack_with_review(cfg, run, _event(state="approved"), pack, retrigger=False)
+
+    assert result["applied"] is False
+    assert "revise" in result["reason"] and "approved" in result["reason"]
+    assert run.latest_stage("review") is None
+    assert run.latest_stage("feedback")["status"] == "fail"
+    assert {p.name for p in run.path.parent.iterdir()} == before, "no successor may be created"
+
+
+def test_changes_requested_review_with_an_accept_pack_is_refused(
+    cfg: Config, run: RunDir, pack: dict[str, Any]
+) -> None:
+    """The mirror image: changes_requested maps to iterate, accept to ship. The
+    accept must not be applied first and defeat the blocking-conflict check, nor
+    may a second successor be created by the review half."""
+    pack["verdict"] = "accept"
+    pack["annotations"][0]["severity"] = "minor"
+    pack["diffDecisions"][0]["decision"] = "accept"
+
+    result = apply_pack_with_review(
+        cfg, run, _event(state="changes_requested"), pack, retrigger=False
+    )
+
+    assert result["applied"] is False
+    assert "accept" in result["reason"] and "changes_requested" in result["reason"]
+    assert run.latest_stage("review") is None
+
+    from adlc.stages.adr import list_adrs
+
+    assert list_adrs(cfg) == [], "no ADR may be written for a refused composite decision"

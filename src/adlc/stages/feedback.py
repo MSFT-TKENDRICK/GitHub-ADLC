@@ -97,6 +97,16 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]")
 #: reviewer skimming the brief sees something other than what an agent parses.
 _SPOOF_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
 
+#: Unpaired UTF-16 surrogates. A lone surrogate cannot be encoded to UTF-8, so
+#: :func:`canonical_bytes` raises on it and, left in the text, it reaches
+#: ``create_adr`` and truncates the permanent record to zero bytes. A *paired*
+#: surrogate cannot occur in a Python ``str`` -- ``json.loads`` folds a real
+#: ``\ud83d\ude00`` into one astral code point outside this range -- so every code
+#: point in it is a lone surrogate and strippable. Mirrors ``cleanText`` in the
+#: JS SDK (``adlc-feedback.js``), which drops the same characters at the source
+#: rather than let a pasted fragment turn a submission into a server traceback.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
 _BLOCKING = "blocker"
 
 
@@ -127,7 +137,7 @@ def pack_digest(pack: dict[str, Any]) -> str:
 def clean_text(value: Any, *, limit: int = FEEDBACK_MAX_TEXT) -> str:
     """Strip control characters and truncate, stating the truncation."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
-    text = _SPOOF_RE.sub("", _CONTROL_RE.sub("", text)).strip()
+    text = _SURROGATE_RE.sub("", _SPOOF_RE.sub("", _CONTROL_RE.sub("", text))).strip()
     if len(text) > limit:
         text = text[:limit].rstrip() + f" [truncated at {limit} characters]"
     return text
@@ -145,7 +155,7 @@ def clean_inline(value: Any, *, limit: int = 512) -> str:
     and neutralising backticks closes that escape.
     """
     text = _CONTROL_RE.sub("", str(value or "").replace("\r", "\n"))
-    text = _SPOOF_RE.sub("", text)
+    text = _SURROGATE_RE.sub("", _SPOOF_RE.sub("", text))
     text = " ".join(text.split()).replace("`", "'")
     if len(text) > limit:
         text = text[:limit].rstrip() + f" [truncated at {limit} characters]"
@@ -249,6 +259,52 @@ def blocking_conflicts(pack: HumanFeedbackPack) -> list[str]:
         if item.get("decision") == "reject"
     ]
     return sorted(ids)
+
+
+def duplicate_ids(pack: HumanFeedbackPack) -> dict[str, list[str]]:
+    """Ids repeated within a single collection, keyed by collection.
+
+    An id is the pack's internal handle: a diffDecision cites ``annotationIds``,
+    the feedback record is keyed by id, and the brief renders one line per id. Two
+    items sharing an id cannot be told apart afterwards, so a repeat is a
+    fabricated or corrupted pack rather than a survivable ambiguity -- the schema
+    constrains an id's *shape* but not its uniqueness, so the check lives here.
+    """
+    found: dict[str, list[str]] = {}
+    for collection in ("annotations", "critiques", "diffDecisions"):
+        seen: set[str] = set()
+        repeated: list[str] = []
+        for item in pack.get(collection) or []:
+            ident = str(item.get("id", ""))
+            if ident in seen and ident not in repeated:
+                repeated.append(ident)
+            seen.add(ident)
+        if repeated:
+            found[collection] = sorted(repeated)
+    return found
+
+
+def contradictory_decisions(pack: HumanFeedbackPack) -> list[str]:
+    """Decision targets carrying opposed accept/reject verdicts.
+
+    A diffDecision is a verdict on one evidence delta, identified by its
+    ``targetKind`` and ``targetId``. Two decisions for the same target that
+    *agree* are a harmless duplicate -- a reviewer clicked twice -- so they are
+    deduplicated by construction here: a set of decisions collapses equal values,
+    and only a target whose set holds more than one distinct verdict is reported.
+    Two that *disagree* would leave the applied outcome dependent on iteration
+    order, so the reviewer's intent is genuinely unknown and the pack is refused
+    rather than resolved by a coin toss.
+    """
+    by_target: dict[tuple[str, str], set[str]] = {}
+    for item in pack.get("diffDecisions") or []:
+        key = (str(item.get("targetKind", "")), str(item.get("targetId", "")))
+        by_target.setdefault(key, set()).add(str(item.get("decision", "")))
+    return sorted(
+        f"{kind}:{target}"
+        for (kind, target), decisions in by_target.items()
+        if len(decisions) > 1
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +678,21 @@ def plan_feedback(
 
     pack = sanitise_pack(raw)
 
+    if repeated := duplicate_ids(pack):
+        detail = "; ".join(f"{coll}: {', '.join(ids)}" for coll, ids in sorted(repeated.items()))
+        return refused(
+            f"feedback pack repeats ids within a collection ({detail}) - a pack keyed "
+            "by duplicate ids cannot be recorded or cited unambiguously",
+            {"duplicateIds": repeated},
+        )
+
+    if conflicting := contradictory_decisions(pack):
+        return refused(
+            "feedback carries opposed accept/reject decisions for the same target: "
+            + ", ".join(conflicting),
+            {"conflictingTargets": conflicting},
+        )
+
     pack_sha = str(pack.get("candidateSha") or "")
     recorded_sha = str(run.get("headSha") or "")
     if recorded_sha and not pack_sha:
@@ -666,8 +737,23 @@ def plan_feedback(
 
     try:
         identity = pack_digest(dict(raw)) if isinstance(raw, dict) else ""
-    except (TypeError, ValueError, UnicodeEncodeError):
-        identity = ""
+    except (TypeError, ValueError):
+        # No canonical bytes means no replay identity and no safe rendering: the
+        # same unencodable text flows on to create_adr, which truncates the
+        # permanent ADR to zero bytes before it fails. The digest guard above
+        # refuses this when a packDigest is declared; a pack that omits one must
+        # not be admitted on the strength of that omission, so refuse identically.
+        #
+        # Caught broadly rather than as UnicodeEncodeError alone (its parent is
+        # ValueError). A pack reaching here is normally json.loads output, whose
+        # values canonical_bytes can always encode, so the other cases should be
+        # unreachable -- but this runs behind ``adlc report serve`` on a payload
+        # the process did not author, and there the difference between an
+        # unreachable branch and an unhandled one is a refusal versus a 500.
+        return refused(
+            "feedback pack contains text that cannot be canonically encoded",
+            {"declaredDigest": declared},
+        )
 
     return {
         "refusal": None,
@@ -998,6 +1084,27 @@ def apply_pack_with_review(
             f"pack describes {clean_inline(candidate, limit=64)[:8] or '(nothing)'} but the "
             f"review authorised {review_sha[:8]} - refusing to borrow that permission",
             {**binding, "candidateSha": candidate},
+        )
+
+    # A pack and a review applied together are one composite decision, so they
+    # must decide the same thing. apply_feedback commits first and fully -- ADR,
+    # successor, retrigger, immutable record, all stamped with the reviewer's
+    # login -- and apply_review then overwrites the ADR status from its own state.
+    # If the two disagreed, both would be applied, the ADR would reflect only the
+    # second, and the reviewer would be recorded as deciding something they did
+    # not. Refuse before anything is written, exactly as the SHA mismatch above
+    # does. Mapped through FEEDBACK_OUTCOME and _STATE_MAP so the comparison
+    # tracks those tables rather than a hardcoded list of state/verdict pairs.
+    review_outcome = _STATE_MAP[state][0]
+    pack_outcome = FEEDBACK_OUTCOME.get(str(raw.get("verdict") or ""))
+    if pack_outcome is not None and pack_outcome != review_outcome:
+        verdict = clean_inline(str(raw.get("verdict")), limit=32)
+        return _refuse(
+            rd, started,
+            f"pack verdict '{verdict}' ({pack_outcome}) contradicts the review state "
+            f"'{state}' ({review_outcome}) - refusing to apply two opposed decisions as one act",
+            {**binding, "verdict": raw.get("verdict"),
+             "packOutcome": pack_outcome, "reviewOutcome": review_outcome},
         )
 
     result = apply_feedback(cfg, rd, raw, actor=reviewer, retrigger=retrigger)
