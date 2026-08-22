@@ -348,6 +348,74 @@ def gate(
 
 
 @app.command()
+def personas(
+    run_id: str = typer.Argument("latest"),
+    variant: str = typer.Option("candidate-a", "--variant"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Walk each spec persona through the evidence and record their experience."""
+    from adlc.stages.persona_feedback import run_persona_feedback
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    result = run_persona_feedback(cfg, rd, variant)
+    reduce_run(cfg, rd)
+    latest = rd.latest_stage("persona_feedback")
+    _emit(result, as_json, f"personas: {(latest or {}).get('message', '')}")
+    if latest and latest.get("status") == "fail":
+        raise typer.Exit(1)
+
+
+@app.command()
+def complete(
+    run_id: str = typer.Argument("latest"),
+    variant: str = typer.Option("candidate-a", "--variant"),
+    iterate: bool = typer.Option(
+        True, "--iterate/--no-iterate",
+        help="On a failed review, open a successor run in the outer loop.",
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Build the code-blind completeness pack and act on the review verdict.
+
+    Two phases, deliberately in one command because they are two halves of one
+    question. First the pack is built and sanitised -- the only thing the
+    feature-completeness squad is ever allowed to see. Then, if the gate has
+    already returned a verdict and that verdict is `fail`, the run is routed back
+    into the **outer** loop: a successor run is opened carrying the original
+    brief plus the reviewers' cited findings. Not the inner loop, because if the
+    evidence does not demonstrate the request then the plan was wrong, and
+    patching code against a wrong plan just produces more of the wrong evidence.
+    """
+    from adlc.stages.complete import iterate_on_feedback, run_complete
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    built = run_complete(cfg, rd, variant)
+    routed = iterate_on_feedback(cfg, rd, iterate=iterate)
+    reduce_run(cfg, rd)
+
+    payload = {
+        "sanitised": built["sanitised"],
+        "packValid": built["valid"],
+        "message": built["message"],
+        **{k: v for k, v in routed.items() if k != "feedback"},
+    }
+    human = f"complete: {built['message']}"
+    if routed.get("successorRun"):
+        human += (
+            f"\n  completeness review FAILED -> successor run {routed['successorRun']} "
+            "created in the outer loop (redesign, not patch)"
+        )
+    elif routed.get("gateStatus") == "fail":
+        human += "\n  completeness review FAILED; iteration disabled (--no-iterate)"
+    _emit(payload, as_json, human)
+
+    if not built["sanitised"] or routed.get("gateStatus") == "fail":
+        raise typer.Exit(1)
+
+
+@app.command()
 def reduce(
     run_id: str = typer.Argument("latest"),
     as_json: bool = typer.Option(False, "--json"),

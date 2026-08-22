@@ -20,6 +20,11 @@
       "properties": {
         "id": { "type": "string", "pattern": "^T[0-9]{3,}$" },
         "title": { "type": "string", "minLength": 1 },
+        "tldr": {
+          "type": "string",
+          "maxLength": 150,
+          "description": "Plain-language summary for the report's navigable graph. Bounded so a node card can hold it without layout collapse."
+        },
         "kind": { "enum": ["implement", "test", "doc", "infra"] },
         "dependsOn": { "type": "array", "items": { "type": "string" } },
         "level": { "type": "integer", "minimum": 0 },

@@ -226,20 +226,28 @@ class _Budget:
                 f"not inlined: {size} bytes exceeds the {self.per_artifact}-byte "
                 "per-artifact budget; hash and size above still identify it"
             )
-        if self.spent + size > self.total:
-            self.omitted += 1
-            return None, (
-                f"not inlined: the {self.total}-byte document budget is exhausted; "
-                "hash and size above still identify it"
-            )
         try:
             raw = path.read_bytes()
         except OSError as exc:
             self.omitted += 1
             return None, f"not inlined: unreadable ({exc.__class__.__name__})"
-        self.spent += size
+        if len(raw) > self.per_artifact:
+            self.omitted += 1
+            return None, (
+                f"not inlined: {len(raw)} bytes exceeds the {self.per_artifact}-byte "
+                "per-artifact budget; hash and size above still identify it"
+            )
         self.inlined += 1
         encoded = base64.b64encode(raw).decode("ascii")
+        encoded_len = len(f"data:{media_type};base64,{encoded}")
+        if self.spent + encoded_len > self.total:
+            self.inlined -= 1
+            self.omitted += 1
+            return None, (
+                f"not inlined: the {self.total}-byte document budget is exhausted; "
+                "hash and size above still identify it"
+            )
+        self.spent += encoded_len
         return f"data:{media_type};base64,{encoded}", None
 
 

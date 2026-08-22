@@ -16,9 +16,13 @@ on:
 # Only run for briefs. Everything else is somebody else's issue.
 if: contains(github.event.issue.labels.*.name, 'adlc:brief')
 
+# `copilot-requests: write` is not a repository scope — it authorises Copilot
+# inference on the built-in Actions token (see docs/squads.md §8.6). Repository
+# access stays read-only; every write leaves through safe-outputs.
 permissions:
   contents: read
   issues: read
+  copilot-requests: write
 
 network:
   allowed: [defaults]

@@ -353,6 +353,8 @@ collectors at.
 
 ## Artifact kinds
 
+The collectors in this document name their own kinds:
+
 | `kind` | File |
 |---|---|
 | `lighthouse` | `lighthouse.json`, `lighthouse-N.json` |
@@ -362,6 +364,35 @@ collectors at.
 | `axe` | `axe.json`, `axe-N.json` |
 | `axe_script` / `axe_config` | `axe-scan.cjs` / `axe-scan.config.json` |
 | `evidence_measurements` | `<collector>-measurements.json`, `<collector>-unmeasured.json` |
+
+`RunDir.scan_artifacts` assigns the rest from the file suffix, so anything a
+collector drops in the evidence directory is hashed and classified without the
+collector having to declare it:
+
+| `kind` | Matched by |
+|---|---|
+| `playwright_trace` | `.zip` |
+| `har` | `.har` |
+| `video` | `.webm` |
+| `screenshot` | `.png` |
+| `jsonl` | `.jsonl` |
+| `replay_script` | `.ts` |
+| `json` | `.json` |
+| `html_report` | `.html`, plus the run's own `report.html` |
+| `file` | anything else |
+
+Two kinds are decided by **location**, not suffix:
+
+| `kind` | Matched by |
+|---|---|
+| `persona_feedback` | `.json` directly under `evidence/personas/` |
+
+A persona walkthrough is evidence about the *experience* rather than another
+anonymous JSON blob, and both the report and the completeness pack need to treat
+it as its own class — the report renders it as a reasoning trace, and the pack
+counts it separately from measured evidence. Naming the kind at scan time is what
+lets them do that without re-opening every JSON file to guess what it is. See
+`docs/PLAN.md` §4.6b.
 
 Every entry carries a verified `sha256` and a `path` relative to the run
 directory, e.g. `evidence/candidate-a/lighthouse.json`. Note that

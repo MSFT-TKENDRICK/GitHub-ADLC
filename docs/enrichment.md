@@ -78,8 +78,8 @@ Three reasons, in order of weight:
 
 1. **It renders where the artifacts are read.** GitHub renders ```` ```mermaid ````
    fences natively in Markdown files, issues, PR descriptions and PR comments,
-   and the spine's `report.html` renders them with mermaid.js. A PNG has to be
-   uploaded, hosted and linked before anyone sees it.
+   and the spine's `report.html` carries the source verbatim for copying into any
+   renderer. A PNG has to be uploaded, hosted and linked before anyone sees it.
 2. **It diffs.** `architecture.mmd` is text under `runs/<run-id>/`, so a
    re-run's change to the model shows up as a readable line diff in review. A
    re-rendered binary image diffs as "binary files differ", which tells a
@@ -145,9 +145,11 @@ it by hand if you change the validator or the diagram builders.
 ### Surviving `report.py`
 
 `src/adlc/stages/report.py` embeds Mermaid as `escape(source)` inside
-`<div class="mermaid">`, then either lets mermaid.js read `el.textContent` or —
-when the CDN is unreachable — copies that same `textContent` into a `<pre>`.
-Both paths HTML-unescape, so the round-trip must be lossless. It is, and
+`<div class="mermaid">`, which the report displays as literal source text for the
+reader to copy into a renderer. The report deliberately loads no script from
+outside itself (see `docs/report.md`), so that text *is* the artifact: the
+`html.escape` round-trip has to be lossless or the reader copies out something
+that no longer parses. It is, and
 `test_diagrams_survive_the_report_html_escape_roundtrip` holds that line.
 
 This is why `sanitize_label()` has the allowlist it does. Everything it strips

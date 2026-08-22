@@ -301,6 +301,12 @@ class RunDir:
             for item in sorted(root.rglob("*")):
                 if item.is_file():
                     kind, mime = kinds.get(item.suffix, ("file", "application/octet-stream"))
+                    # Persona walkthroughs are evidence about the *experience*,
+                    # not another anonymous JSON blob. Naming the kind here is
+                    # what lets the report and the review pack treat them as a
+                    # distinct class without re-reading every file to guess.
+                    if item.suffix == ".json" and item.parent.name == "personas":
+                        kind = "persona_feedback"
                     refs.append(self.artifact_ref(item, kind, mime))
         if self.report.is_file():
             refs.append(self.artifact_ref(self.report, "html_report", "text/html"))

@@ -15,17 +15,22 @@ on:
   reaction: eyes
   status-comment: true
 
-# Read-only. The agent cannot write to GitHub; only safe-outputs can.
+# Read-only against repository data: the agent cannot write to GitHub, and only
+# safe-outputs can. `copilot-requests: write` is not a repository scope — it
+# authorises Copilot inference on the built-in Actions token (see docs/squads.md
+# §8.6), which is why this workflow needs no PAT secret.
 permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: write
 
 network:
   allowed: [defaults]
 
 engine:
   id: copilot
+model: gpt-5
 
 tools:
   github:

@@ -4,6 +4,12 @@ ADRs are the auditable, permanent record of *why*. They live in
 ``docs/decisions/`` (git-tracked, never inside a run directory) and are bound to
 the commit SHA of the review that decided them, so a decision cannot silently
 drift from the code it was made about.
+
+A record also names the tasks it governs (``adlc-tasks``). The linkage has to
+live on this side: the task graph is planned before the decision is taken, so
+the graph cannot know which ADR will end up governing a node, whereas the ADR is
+authored with the graph already in front of it. That field is what lets the
+report answer "where was this decided?" instead of listing decisions as trivia.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ consulted: {consulted}
 informed: {informed}
 adlc-run: {run_id}
 adlc-review-sha: {review_sha}
+adlc-tasks: {tasks}
 ---
 
 # {title}
@@ -100,6 +107,7 @@ def create_adr(
     run_id: str = "",
     review_sha: str = "",
     decision_makers: str = "",
+    tasks: list[str] | None = None,
 ) -> Adr:
     directory = cfg.decisions_dir
     directory.mkdir(parents=True, exist_ok=True)
@@ -117,6 +125,7 @@ def create_adr(
         informed="repository maintainers",
         run_id=run_id or "n/a",
         review_sha=review_sha or "n/a",
+        tasks=", ".join(tasks) if tasks else "n/a",
         title=title,
         context=context or "_To be completed._",
         drivers=bullets(drivers, "* _To be completed._"),
