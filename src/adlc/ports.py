@@ -27,8 +27,8 @@ AdapterKind = Literal[
 
 StageName = Literal[
     "intake", "qualify", "spec", "enrich", "graph", "build",
-    "evidence", "persona_feedback", "eval", "gate", "complete",
-    "report", "review", "export",
+    "evidence", "evidence_diff", "persona_feedback", "eval", "gate",
+    "complete", "report", "review", "feedback", "export",
 ]
 
 RunStatus = Literal[
@@ -199,6 +199,152 @@ class FlagResult(TypedDict, total=False):
     reason: str
 
 
+# ---------------------------------------------------------------------------
+# Human feedback  (mirrored by ``schemas/human-feedback-pack.schema.json``)
+# ---------------------------------------------------------------------------
+
+AnnotationShape = Literal["rect", "arrow", "highlight", "freehand", "point", "whole"]
+CritiqueTargetKind = Literal["squad_finding", "persona", "rubric_criterion", "adr"]
+CritiqueStance = Literal["agree", "disagree", "needs_evidence", "out_of_scope"]
+DiffTargetKind = Literal["measurement", "screenshot", "coverage"]
+FeedbackVerdict = Literal["accept", "reject", "revise"]
+FeedbackRoute = Literal["outer", "inner"]
+FeedbackSeverity = Literal["info", "minor", "major", "blocker"]
+
+#: Hard caps applied when a pack is ingested. The pack is authored in a browser
+#: and its rendered form is read by an agent in the successor run, so every free
+#: text field is truncated rather than trusted.
+FEEDBACK_MAX_TEXT = 4_000
+FEEDBACK_MAX_ITEMS = 500
+
+#: ``verdict`` -> the ``Decision.outcome`` it produces.
+FEEDBACK_OUTCOME: dict[str, DecisionOutcome] = {
+    "accept": "ship",
+    "reject": "do_not_ship",
+    "revise": "iterate",
+}
+
+
+class AnnotationGeometry(TypedDict, total=False):
+    #: Normalised to the artifact's NATURAL size. Storing rendered pixels would
+    #: make an annotation mean something different at a different viewport width.
+    points: list[list[float]]
+
+
+class Annotation(TypedDict, total=False):
+    """Visual markup anchored to one evidence artifact by its SHA-256."""
+
+    id: str
+    artifactSha256: str
+    artifactPath: str
+    artifactKind: str
+    shape: AnnotationShape
+    geometry: AnnotationGeometry
+    timestampMs: float | None
+    severity: FeedbackSeverity
+    comment: str
+    requirementIds: list[str]
+
+
+class Critique(TypedDict, total=False):
+    """A judgement on agent-authored reasoning."""
+
+    id: str
+    targetKind: CritiqueTargetKind
+    targetRef: str
+    targetTitle: str
+    #: ``sha256:`` of the exact reasoning text critiqued, so drift is detectable.
+    sourceDigest: str
+    stance: CritiqueStance
+    severity: FeedbackSeverity
+    comment: str
+
+
+class DiffDecision(TypedDict, total=False):
+    """Accept or reject one evidence-vs-baseline delta."""
+
+    id: str
+    targetKind: DiffTargetKind
+    targetId: str
+    decision: Literal["accept", "reject"]
+    comment: str
+    annotationIds: list[str]
+
+
+class HumanFeedbackPack(TypedDict, total=False):
+    """The ``adlc-human-feedback/v1`` document.
+
+    Untrusted. Possession confers **no** authority: in CI a pack must arrive via
+    a native PR review or ``workflow_dispatch``, both of which already require
+    write permission.
+    """
+
+    schemaVersion: str
+    runId: str
+    candidateSha: str
+    reportDigest: str
+    packDigest: str
+    submittedAt: str
+    submittedBy: str
+    verdict: FeedbackVerdict
+    route: FeedbackRoute
+    summary: str
+    annotations: list[Annotation]
+    critiques: list[Critique]
+    diffDecisions: list[DiffDecision]
+
+
+# ---------------------------------------------------------------------------
+# Evidence diff  (mirrored by ``schemas/evidence-diff.schema.json``)
+# ---------------------------------------------------------------------------
+
+
+class MeasurementDelta(TypedDict, total=False):
+    metricId: str
+    change: Literal["added", "removed", "changed", "unchanged"]
+    value: float | None
+    baselineValue: float | None
+    delta: float | None
+    budget: float | None
+    passed: bool | None
+    baselinePassed: bool | None
+    budgetCrossed: Literal["entered_breach", "left_breach", "none"]
+    collector: str
+    artifactSha256: str
+
+
+class CoverageDelta(TypedDict, total=False):
+    requirementId: str
+    change: Literal["added", "removed", "gained", "lost", "unchanged"]
+    present: bool | None
+    baselinePresent: bool | None
+    evidenceKinds: list[str]
+    baselineEvidenceKinds: list[str]
+
+
+class ScreenshotDelta(TypedDict, total=False):
+    #: Relative to ``evidence/<variant>/`` so a variant rename does not read as a
+    #: wholesale replacement of every screenshot.
+    path: str
+    change: Literal["added", "removed", "changed", "unchanged"]
+    sha256: str | None
+    baselineSha256: str | None
+    bytes: int | None
+    baselineBytes: int | None
+
+
+class EvidenceDiff(TypedDict, total=False):
+    schemaVersion: str
+    runId: str
+    baselineRunId: str | None
+    reason: str
+    generatedAt: str
+    measurements: list[MeasurementDelta]
+    coverage: list[CoverageDelta]
+    screenshots: list[ScreenshotDelta]
+    summary: dict[str, int]
+
+
 class Run(TypedDict, total=False):
     """The canonical ``adlc-run/v1`` document.
 
@@ -210,6 +356,11 @@ class Run(TypedDict, total=False):
     runId: str
     createdAt: str
     referencesRun: str | None
+    #: Which loop a successor run re-enters. ``outer`` re-specs from the brief;
+    #: ``inner`` rebuilds against the existing spec. ``None`` for an original run.
+    #: This is read by :func:`adlc.stages.feedback.retrigger_loop`, so it is a
+    #: control value, not a label.
+    route: str | None
     repo: str
     baseSha: str
     headSha: str

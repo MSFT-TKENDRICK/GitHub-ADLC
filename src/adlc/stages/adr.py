@@ -117,32 +117,34 @@ def create_adr(
     def bullets(items: list[str] | None, empty: str) -> str:
         return "\n".join(f"* {item}" for item in items) if items else empty
 
-    path.write_text(
-        MADR_TEMPLATE.format(
-            status=status,
-            date=datetime.now(UTC).strftime("%Y-%m-%d"),
-            decision_makers=decision_makers or "ADLC",
-            consulted="adversarial review squad, evidence review squad",
-            informed="repository maintainers",
-            run_id=run_id or "n/a",
-            review_sha=review_sha or "n/a",
-            tasks=", ".join(tasks) if tasks else "n/a",
-            title=title,
-            context=context or "_To be completed._",
-            drivers=bullets(drivers, "* _To be completed._"),
-            options=bullets(options, "* _To be completed._"),
-            chosen=chosen or title,
-            justification=justification or "_to be completed_.",
-            consequences=bullets(consequences, "* _To be completed._"),
-            confirmation=confirmation or "Confirmed by the ADLC gate results recorded in `run.json`.",
-            more_info=(
-                f"Produced by ADLC run `{run_id}`. Evidence and gate results are in "
-                f"`.adlc/runs/{run_id}/` and summarised in `report.html`."
-                if run_id else "_None._"
-            ),
+    body = MADR_TEMPLATE.format(
+        status=status,
+        date=datetime.now(UTC).strftime("%Y-%m-%d"),
+        decision_makers=decision_makers or "ADLC",
+        consulted="adversarial review squad, evidence review squad",
+        informed="repository maintainers",
+        run_id=run_id or "n/a",
+        review_sha=review_sha or "n/a",
+        tasks=", ".join(tasks) if tasks else "n/a",
+        title=title,
+        context=context or "_To be completed._",
+        drivers=bullets(drivers, "* _To be completed._"),
+        options=bullets(options, "* _To be completed._"),
+        chosen=chosen or title,
+        justification=justification or "_to be completed_.",
+        consequences=bullets(consequences, "* _To be completed._"),
+        confirmation=confirmation or "Confirmed by the ADLC gate results recorded in `run.json`.",
+        more_info=(
+            f"Produced by ADLC run `{run_id}`. Evidence and gate results are in "
+            f"`.adlc/runs/{run_id}/` and summarised in `report.html`."
+            if run_id else "_None._"
         ),
-        encoding="utf-8",
     )
+    # Encode before the write. ``write_text`` opens (and truncates) the path
+    # first and only then encodes, so any UnicodeEncodeError -- a lone surrogate
+    # smuggled through a free-text field -- would leave this git-tracked, permanent
+    # record at zero bytes. Encoding up front raises before the file is touched.
+    path.write_bytes(body.encode("utf-8"))
     return Adr(number=number, path=path, title=title, status=status)
 
 
@@ -181,6 +183,8 @@ def set_status(cfg: Config, number: str, status: str, *, review_sha: str = "") -
             )
         else:
             text = text.replace("---\n\n#", f"adlc-review-sha: {review_sha}\n---\n\n#", 1)
-    adr.path.write_text(text, encoding="utf-8")
+    # Same reason as create_adr: encode before the write so a codec failure can
+    # never truncate an existing ADR to zero bytes on its way to raising.
+    adr.path.write_bytes(text.encode("utf-8"))
     adr.status = status
     return adr

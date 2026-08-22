@@ -28,10 +28,12 @@ app = typer.Typer(
 run_app = typer.Typer(no_args_is_help=True, help="Create and inspect runs.")
 adr_app = typer.Typer(no_args_is_help=True, help="Architecture decision records.")
 review_app = typer.Typer(no_args_is_help=True, help="Apply native PR review decisions.")
+feedback_app = typer.Typer(no_args_is_help=True, help="Apply human feedback from the evidence page.")
 export_app = typer.Typer(no_args_is_help=True, help="Export a run to another format.")
 app.add_typer(run_app, name="run")
 app.add_typer(adr_app, name="adr")
 app.add_typer(review_app, name="review")
+app.add_typer(feedback_app, name="feedback")
 app.add_typer(export_app, name="export")
 
 
@@ -51,6 +53,25 @@ def _rd(cfg: Config, run_id: str | None) -> RunDir:
         return resolve_run(cfg, run_id)
     except FileNotFoundError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+
+def _read_json_arg(path: Path, label: str) -> Any:
+    """Read a JSON file argument, exiting cleanly instead of raising a traceback.
+
+    Every one of these paths is supplied by a human or a CI step, so a missing or
+    truncated file is ordinary input, not a bug worth a stack trace.
+    """
+    if not path.is_file():
+        typer.secho(f"no such {label}: {path}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        typer.secho(f"{label} {path} is not valid JSON: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        typer.secho(f"cannot read {label} {path}: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2) from exc
 
 
@@ -408,6 +429,28 @@ def reduce(
           f"{len(run['gates'])} gate(s), {len(run['artifacts'])} artifact(s)")
 
 
+@app.command("evidence-diff")
+def evidence_diff(
+    run_id: str = typer.Argument("latest"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Diff this run's evidence against its `referencesRun` baseline.
+
+    Measurement deltas, coverage changes and screenshot classification. With no
+    baseline the absence is stated in the artifact rather than left implicit.
+    """
+    from adlc.stages.evidence_diff import run_evidence_diff
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    result = run_evidence_diff(cfg, rd)
+    reduce_run(cfg, rd)
+    latest = rd.latest_stage("evidence_diff") or {}
+    _emit(result, as_json, f"evidence-diff: {latest.get('message', '')}")
+    if latest.get("status") == "fail":
+        raise typer.Exit(1)
+
+
 @app.command()
 def report(
     run_id: str = typer.Argument("latest"),
@@ -427,6 +470,254 @@ def report(
 
         webbrowser.open(rd.report.as_uri())
     _emit(result, as_json, f"report: {result['path']}")
+
+
+@app.command("report-serve")
+def report_serve(
+    run_id: str = typer.Argument("latest"),
+    port: int = typer.Option(0, "--port", help="0 asks the OS for a free port."),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Serve report.html on loopback so the page can submit feedback directly.
+
+    Purely a convenience: exporting a pack file and running `adlc feedback apply`
+    does exactly the same thing with no server at all.
+    """
+    from adlc.serve import serve_report
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    if not rd.report.is_file():
+        typer.secho(f"no report.html in {rd.run_id} - run `adlc report` first",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+    handle = serve_report(cfg, rd, port=port)
+    typer.echo(f"serving {rd.run_id} at {handle.url}")
+    typer.echo("bound to 127.0.0.1 only; the nonce above authorises submissions. Ctrl-C to stop.")
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(handle.url)
+    try:
+        handle.thread.join()
+    except KeyboardInterrupt:
+        typer.echo("stopping")
+    finally:
+        handle.stop()
+
+
+@feedback_app.command("apply")
+def feedback_apply(
+    pack: Path = typer.Argument(..., help="Path to an adlc-human-feedback/v1 JSON pack."),
+    run_id: str = typer.Argument("latest"),
+    route: str = typer.Option("", "--route", help="Override the pack's route (outer|inner)."),
+    actor: str = typer.Option("", "--actor", help="Who is applying it."),
+    retrigger: bool = typer.Option(
+        True, "--retrigger/--no-retrigger",
+        help="Re-run the design loop on the successor run (default: on).",
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Apply a feedback pack: record it, decide, and retrigger the loop.
+
+    A `revise` verdict creates a successor run carrying `referencesRun`, the
+    resolved `route`, and the quoted feedback, then re-runs the design stages on
+    it. Nothing about the reviewed run is ever edited.
+    """
+    from adlc.stages.feedback import VALID_ROUTES, apply_feedback
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    if route and route not in VALID_ROUTES:
+        typer.secho(
+            f"--route must be one of {', '.join(VALID_ROUTES)}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(2)
+    payload = _read_json_arg(pack, "pack")
+
+    result = apply_feedback(
+        cfg, rd, payload,
+        route=route or None, actor=actor or None, retrigger=retrigger,
+    )
+    if not result.get("applied"):
+        _emit(result, as_json, f"refused: {result.get('reason', 'unknown')}")
+        raise typer.Exit(1)
+
+    reduce_run(cfg, rd)
+    successor = result.get("successorRun")
+    ran = (result.get("retriggered") or {}).get("ran") or []
+    _emit(
+        result, as_json,
+        f"{rd.run_id}: {result['verdict']} -> {result['outcome']}"
+        + (f"; created run {successor} (route={result['route']})" if successor else "")
+        + (f"; re-ran {', '.join(str(s['stage']) for s in ran)}" if ran else ""),
+    )
+
+
+@feedback_app.command("validate")
+def feedback_validate(
+    pack: Path = typer.Argument(..., help="Path to an adlc-human-feedback/v1 JSON pack."),
+    run_id: str = typer.Option(
+        "", "--run", "-r",
+        help="Dry-run against this run: report everything ingestion would refuse "
+             "or silently discard, without applying anything.",
+    ),
+    route: str = typer.Option("", "--route", help="Route to plan for (default: the pack's)."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Check a pack without applying it.
+
+    Schema validation alone is not the contract. A pack can be perfectly valid
+    and still be refused for a stale ``candidateSha``, or applied with half its
+    annotations silently discarded for citing an artifact the run does not have.
+    Pass ``--run`` to see that verdict up front: it renders the very plan
+    ``adlc feedback apply`` would execute, so a GUI author finds out here rather
+    than after a reviewer has filled in the form.
+    """
+    raw = _read_json_arg(pack, "pack")
+    ok, errors = is_valid("human-feedback-pack", raw)
+
+    if not run_id:
+        _emit({"valid": ok, "errors": errors}, as_json,
+              "valid" if ok else "INVALID\n  " + "\n  ".join(errors[:10]))
+        if not ok:
+            raise typer.Exit(1)
+        return
+
+    from adlc.stages.feedback import plan_feedback
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    plan = plan_feedback(raw, load_run(rd), rd.run_id, route=route or None)
+    refusal = plan["refusal"]
+    discarded = plan.get("discarded") or []
+
+    payload = {
+        "valid": ok,
+        "errors": errors,
+        "run": rd.run_id,
+        "wouldApply": refusal is None,
+        "refusal": refusal,
+        "discardedAnnotations": discarded,
+        "citationCheck": plan.get("citationCheck"),
+        "verdict": plan.get("verdict"),
+        "outcome": plan.get("outcome"),
+        "route": plan.get("route"),
+        "packIdentity": plan.get("identity"),
+    }
+    if refusal:
+        text = f"WOULD REFUSE ({rd.run_id}): {refusal['reason']}"
+    else:
+        text = (
+            f"would apply to {rd.run_id}: {plan['verdict']} -> {plan['outcome']} "
+            f"(route={plan['route']})"
+        )
+        if discarded:
+            # Not a refusal, which is exactly why it needs saying loudly: the
+            # pack applies and the reviewer's work is thrown away anyway.
+            text += f"\n  WARNING: {len(discarded)} annotation(s) would be DISCARDED as uncited"
+            for item in discarded[:10]:
+                text += f"\n    - {item}"
+        if plan.get("citationCheck") != "verified":
+            text += "\n  note: citation check skipped (run records no artifacts)"
+    _emit(payload, as_json, text)
+    if refusal or not ok:
+        raise typer.Exit(1)
+
+
+@feedback_app.command("targets")
+def feedback_targets_cmd(
+    run_id: str = typer.Argument("latest"),
+    out: Path = typer.Option(None, "--out", help="Write here instead of the run directory."),
+    endpoint: str = typer.Option("", "--endpoint", help="Loopback submission URL, if any."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Build feedback-targets.json: everything in a run a human can respond to.
+
+    This is the GUI-agnostic half of the loop. Any review surface that reads this
+    document and emits an adlc-human-feedback/v1 pack is a first-class ADLC
+    review GUI -- no Python, no run-directory access, no ADLC internals.
+    """
+    from adlc.stages.feedback_targets import compute_targets, run_feedback_targets, targets_path
+
+    cfg = _cfg()
+    rd = _rd(cfg, run_id)
+    if out is not None:
+        targets = compute_targets(cfg, rd, endpoint=endpoint or None)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(targets, indent=2) + "\n", encoding="utf-8")
+        written = out
+    else:
+        targets = run_feedback_targets(cfg, rd, endpoint=endpoint or None)
+        reduce_run(cfg, rd)
+        written = targets_path(rd)
+
+    diff = targets.get("diff") or {}
+    _emit(
+        targets if as_json else {"path": str(written)},
+        as_json,
+        f"{written}: {len(targets['artifacts'])} artifact(s), "
+        f"{len(targets['reasoning'])} reasoning target(s), "
+        f"{sum(len(diff.get(k) or []) for k in ('measurements', 'coverage', 'screenshots'))} "
+        f"diff row(s); {targets['budgets']['inlinedBytes']} byte(s) inlined, "
+        f"{targets['budgets']['omittedCount']} omitted",
+    )
+
+
+@feedback_app.command("sdk")
+def feedback_sdk_cmd(
+    out: Path = typer.Option(..., "--out", help="Directory to write the SDK into."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Export the portable feedback SDK for use by any GUI.
+
+    Writes adlc-feedback.js (classic script / CommonJS) and adlc-feedback.mjs
+    (ES module). Both are the same source, so no two consumers can disagree
+    about the canonical pack digest.
+    """
+    from adlc.stages.feedback_sdk import write_sdk
+
+    written = write_sdk(out)
+    _emit(
+        {"written": [str(p) for p in written]},
+        as_json,
+        "wrote " + ", ".join(str(p) for p in written),
+    )
+
+
+@feedback_app.command("console")
+def feedback_console_cmd(
+    run_id: str = typer.Argument("latest"),
+    out: Path = typer.Option(..., "--out", help="HTML file to write."),
+    targets: Path = typer.Option(
+        None, "--targets", help="Read this manifest instead of building one from the run."
+    ),
+    endpoint: str = typer.Option("", "--endpoint", help="Loopback submission URL, if any."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Build a standalone review console from a feedback-targets document.
+
+    This is the second consumer of the manifest, and it shares no code with
+    report.html. It exists so the contract is provably GUI-agnostic: if this
+    keeps working when the report GUI is replaced, the seam is real.
+    """
+    from adlc.stages.feedback_console import write_console
+
+    if targets is not None:
+        doc = _read_json_arg(targets, "targets")
+    else:
+        from adlc.stages.feedback_targets import compute_targets
+
+        cfg = _cfg()
+        doc = compute_targets(cfg, _rd(cfg, run_id), endpoint=endpoint or None)
+
+    written = write_console(doc, out)
+    _emit(
+        {"path": str(written), "bytes": written.stat().st_size},
+        as_json,
+        f"{written}: {written.stat().st_size} bytes, self-contained; open it with file://",
+    )
 
 
 @app.command()
@@ -517,16 +808,45 @@ def adr_set_status(
 def review_apply(
     run_id: str = typer.Argument("latest"),
     event: Path = typer.Option(..., "--event", help="pull_request_review webhook payload."),
+    feedback_pack: Path = typer.Option(
+        None, "--feedback-pack",
+        help="Apply a human-feedback pack under this review's authority.",
+    ),
+    retrigger: bool = typer.Option(
+        True, "--retrigger/--no-retrigger",
+        help="Re-run the design loop on the successor run (--feedback-pack only).",
+    ),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Apply a native GitHub PR review as the human decision."""
+    """Apply a native GitHub PR review as the human decision.
+
+    With ``--feedback-pack`` the structured pack is applied under the review's
+    permission, and both must describe the same commit.
+    """
     from adlc.stages.review import apply_review
 
     cfg = _cfg()
     rd = _rd(cfg, run_id)
-    result = apply_review(cfg, rd, json.loads(event.read_text(encoding="utf-8")))
+    payload = _read_json_arg(event, "event")
+
+    if feedback_pack is None:
+        result = apply_review(cfg, rd, payload)
+        reduce_run(cfg, rd)
+        _emit(result, as_json, f"review: {(rd.latest_stage('review') or {}).get('message', '')}")
+        if not result.get("applied"):
+            raise typer.Exit(1)
+        return
+
+    from adlc.stages.feedback import apply_pack_with_review
+
+    result = apply_pack_with_review(
+        cfg, rd, payload, _read_json_arg(feedback_pack, "feedback pack"), retrigger=retrigger
+    )
     reduce_run(cfg, rd)
-    _emit(result, as_json, f"review: {(rd.latest_stage('review') or {}).get('message', '')}")
+    _emit(
+        result, as_json,
+        f"review+feedback: {(rd.latest_stage('feedback') or {}).get('message', '')}",
+    )
     if not result.get("applied"):
         raise typer.Exit(1)
 

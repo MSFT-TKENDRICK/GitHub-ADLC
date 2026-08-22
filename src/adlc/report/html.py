@@ -27,6 +27,7 @@ from typing import Any
 from adlc.config import Config
 from adlc.report.assets import CSS, JS
 from adlc.report.model import build_model, graph_mermaid, to_embedded_json
+from adlc.report.overlay import inject_overlay
 from adlc.runs import RunDir, read_json, utcnow
 
 __all__ = ["fill", "render", "run_report"]
@@ -318,6 +319,7 @@ def render(cfg: Config, rd: RunDir) -> str:
 def run_report(cfg: Config, rd: RunDir) -> dict[str, Any]:
     started = utcnow()
     html = render(cfg, rd)
+    html = inject_overlay(html, cfg, rd)
     rd.report.write_text(html, encoding="utf-8")
     rd.write_stage(
         "report",

@@ -1,0 +1,223 @@
+:root {
+  --bg: #ffffff;
+  --fg: #12151a;
+  --muted: #5b6472;
+  --line: #d5dae2;
+  --accent: #0b5fff;
+  --warn: #8a4b00;
+  --bad: #8b1a1a;
+  --good: #14532d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11141a;
+    --fg: #e8ecf3;
+    --muted: #9aa4b3;
+    --line: #2b323d;
+    --accent: #7aa2ff;
+    --warn: #f0b26b;
+    --bad: #ff8f8f;
+    --good: #8bd8a5;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 1rem 6rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  padding: 0.75rem 0;
+}
+
+h1 { font-size: 1.25rem; margin: 0; }
+h2 { font-size: 1.05rem; margin: 2rem 0 0.5rem; }
+h3 { font-size: 0.95rem; margin: 0 0 0.25rem; word-break: break-word; }
+h4 { font-size: 0.85rem; margin: 0.75rem 0 0.25rem; }
+
+/* The header is sticky and opaque at z-index 5, and nothing else reserves space
+ * for it. Tabbing scrolls each newly focused control to the top edge of the
+ * viewport -- directly underneath it -- so the focus ring, and often the field
+ * itself, is painted over. At 200% zoom the header can swallow several
+ * subsequent controls, leaving you typing into something you cannot see. */
+.card,
+button,
+input,
+select,
+textarea,
+summary,
+a {
+  scroll-margin-top: 8rem;
+}
+
+.muted { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+.skip:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+  padding: 0.5rem;
+  background: var(--bg);
+  border: 2px solid var(--accent);
+  z-index: 10;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.85rem;
+  margin: 0.75rem 0;
+}
+
+.frame {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  margin: 0.5rem 0;
+  touch-action: none;
+}
+.frame img { display: block; max-width: 100%; height: auto; }
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Severity is carried by dash pattern and stroke width as well as hue, so the
+   marks stay distinguishable without colour vision. */
+.mark { fill: none; stroke: var(--accent); stroke-width: 4; vector-effect: non-scaling-stroke; }
+.mark.sev-info    { stroke-dasharray: 2 6; }
+.mark.sev-minor   { stroke-dasharray: 8 4; }
+.mark.sev-major   { stroke-dasharray: none; stroke-width: 5; }
+.mark.sev-blocker { stroke-dasharray: none; stroke-width: 7; stroke: var(--bad); }
+
+form { display: grid; gap: 0.5rem; margin-top: 0.5rem; }
+label { display: grid; gap: 0.2rem; font-size: 0.85rem; }
+
+input[type="text"], input[type="number"], select, textarea {
+  font: inherit;
+  padding: 0.35rem 0.45rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  max-width: 100%;
+}
+textarea { resize: vertical; }
+
+.geom { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.4rem; }
+
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem 0.6rem;
+  margin: 0;
+}
+legend { font-size: 0.8rem; color: var(--muted); padding: 0 0.25rem; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-right: 0.75rem;
+  font-size: 0.85rem;
+}
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.reasoning {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-left: 3px solid var(--line);
+  padding: 0.6rem 0.75rem;
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.diff-row.regression { border-left: 4px solid var(--bad); }
+.diff-row[data-decision="accept"] { border-left: 4px solid var(--good); }
+.diff-row[data-decision="reject"] { border-left: 4px solid var(--warn); }
+
+.decide { grid-template-columns: 1fr auto auto auto; align-items: center; }
+.decision { font-size: 0.8rem; color: var(--muted); }
+
+/* The annotation list is the non-visual equivalent of the SVG overlay, so it
+ * carries severity in a left border AND in the text of every item -- colour is
+ * never the only signal. */
+ul.annotations {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+li.annotation {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+}
+
+li.annotation.sev-major   { border-left-color: var(--accent); }
+li.annotation.sev-blocker { border-left-color: var(--bad); }
+
+li.annotation .what { margin: 0; font-size: 0.85rem; font-weight: 600; }
+li.annotation .said { margin: 0.25rem 0; font-size: 0.9rem; white-space: pre-wrap; }
+li.annotation button { margin-right: 0.4rem; }
+
+/* aria-disabled leaves the control focusable so its reason can be announced;
+ * it therefore has to look unavailable without being unavailable. */
+[aria-disabled="true"] { opacity: 0.55; }
+[aria-busy="true"] { font-style: italic; }.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; }
+.pair img { max-width: 100%; height: auto; border: 1px solid var(--line); }
+figcaption { font-size: 0.8rem; color: var(--muted); }
+
+.notice {
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+#counts { display: flex; flex-wrap: wrap; gap: 1rem; font-size: 0.85rem; margin: 0.35rem 0; }
+#conflicts { color: var(--bad); font-size: 0.85rem; margin: 0.35rem 0; }
+#status { min-height: 1.4em; font-size: 0.85rem; color: var(--accent); }
+#fallback { width: 100%; min-height: 8rem; font-family: ui-monospace, monospace; font-size: 0.75rem; }
+#actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0; }
