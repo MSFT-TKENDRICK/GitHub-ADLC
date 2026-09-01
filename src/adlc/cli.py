@@ -55,13 +55,19 @@ def _rd(cfg: Config, run_id: str | None) -> RunDir:
         raise typer.Exit(2) from exc
 
 
-@app.callback(invoke_without_command=False)
+@app.callback(invoke_without_command=True)
 def _root(
-    version: bool = typer.Option(False, "--version", help="Show the version and exit."),
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False, "--version", help="Show the version and exit.", is_eager=True
+    ),
 ) -> None:
     if version:
         typer.echo(__version__)
         raise typer.Exit(0)
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +485,7 @@ def export_oes(
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
     """Export an Open Experiment Specification document (comparative runs only)."""
+    from adlc.adapters.export.oes import OesExportError
     from adlc.config import load_adapters
 
     cfg = _cfg()
@@ -490,7 +497,11 @@ def export_oes(
             fg=typer.colors.YELLOW, err=True,
         )
         raise typer.Exit(2)
-    out = exporter_cls().export(load_run(rd), rd.path / "oes.json")
+    try:
+        out = exporter_cls().export(load_run(rd), rd.path / "oes.json")
+    except OesExportError as exc:
+        typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(2) from exc
     _emit({"path": str(out)}, as_json, f"exported {out}")
 
 
