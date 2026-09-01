@@ -225,10 +225,15 @@ def normalise_patch(patch: bytes) -> bytes:
 
     * stray carriage returns introduced by line-ending translation
     * a missing final newline, which truncates the last hunk
+
+    A trailing lone ``\\r`` (no ``\\n``) is stripped rather than kept, so
+    appending the missing final newline cannot reintroduce the exact ``\\r\\n``
+    sequence this function exists to remove.
     """
     if not patch:
         return patch
     patch = patch.replace(b"\r\n", b"\n")
+    patch = patch.rstrip(b"\r")
     if not patch.endswith(b"\n"):
         patch += b"\n"
     return patch
