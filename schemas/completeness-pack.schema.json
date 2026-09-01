@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/completeness-pack.schema.json",
+  "title": "ADLC feature-completeness pack",
+  "description": "The ONLY thing the feature-completeness reviewer may see. It holds the original request, the requirements derived from it, and *summaries* of the collected evidence -- never source code, never diffs, never agent sessions or agent reasoning, never raw traces, HAR, console output or replay scripts. `additionalProperties: false` at every level is load-bearing: it is what turns 'the reviewer must not see the code' from a request in a prompt into a shape a deterministic check can enforce before the pack is ever handed over.",
+  "type": "object",
+  "required": ["runId", "brief", "requirements", "evidence", "excluded"],
+  "additionalProperties": false,
+  "properties": {
+    "runId": { "type": "string", "minLength": 1 },
+    "candidateSha": { "type": "string" },
+    "profile": { "type": "string" },
+    "generatedAt": { "type": "string" },
+    "collector": { "type": "string" },
+    "brief": {
+      "$ref": "#/$defs/brief",
+      "description": "The original ask, in the requester's words. The reviewer's fixed point of comparison."
+    },
+    "requirements": { "type": "array", "items": { "$ref": "#/$defs/requirement" } },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidenceSummary" },
+      "description": "Hash, kind, size and caption only. Deliberately impoverished."
+    },
+    "measurements": { "type": "array", "items": { "$ref": "#/$defs/measurement" } },
+    "personaFeedback": { "type": "array", "items": { "$ref": "#/$defs/personaSummary" } },
+    "decisions": { "type": "array", "items": { "$ref": "#/$defs/decision" } },
+    "gates": { "type": "array", "items": { "$ref": "#/$defs/gateSummary" } },
+    "uncovered": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Requirement ids with no evidence behind them. Stated up front so the reviewer does not have to derive it."
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer" }
+    },
+    "excluded": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/exclusion" },
+      "description": "What was deliberately withheld and why. Declared so the reviewer knows the shape of its own blindfold and can say 'I cannot answer that from this pack'."
+    }
+  },
+  "$defs": {
+    "brief": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string", "maxLength": 20000 },
+        "source": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "required": ["id", "text", "covered"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string", "maxLength": 2000 },
+        "source": { "type": "string" },
+        "tldr": { "type": "string", "maxLength": 150 },
+        "covered": { "type": "boolean" },
+        "evidenceKinds": { "type": "array", "items": { "type": "string" } },
+        "artifactSha256": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "evidenceSummary": {
+      "type": "object",
+      "required": ["artifactSha256", "kind", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "artifactSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "kind": { "type": "string" },
+        "mimeType": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "caption": { "type": "string", "maxLength": 300 },
+        "redacted": { "type": "boolean" }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "required": ["metricId"],
+      "additionalProperties": false,
+      "properties": {
+        "metricId": { "type": "string" },
+        "value": { "type": ["number", "null"] },
+        "budget": { "type": ["number", "null"] },
+        "passed": { "type": "boolean" },
+        "collector": { "type": "string" },
+        "artifactSha256": { "type": "string" }
+      }
+    },
+    "personaSummary": {
+      "type": "object",
+      "required": ["name", "role", "scenarioId", "verdict", "simulated"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "scenarioId": { "type": "string" },
+        "verdict": { "enum": ["satisfied", "partial", "confused", "blocked"] },
+        "simulated": { "type": "boolean" },
+        "tldr": { "type": "string", "maxLength": 150 },
+        "friction": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 400 }
+        },
+        "artifactSha256": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["number", "title", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "number": { "type": "string" },
+        "title": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string" },
+        "tldr": { "type": "string", "maxLength": 150 },
+        "chosen": { "type": "string", "maxLength": 300 },
+        "citationCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gateSummary": {
+      "type": "object",
+      "required": ["id", "status", "required"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "status": { "enum": ["pass", "fail", "not_run"] },
+        "required": { "type": "boolean" },
+        "tldr": { "type": "string", "maxLength": 150 }
+      }
+    },
+    "exclusion": {
+      "type": "object",
+      "required": ["what", "why"],
+      "additionalProperties": false,
+      "properties": {
+        "what": { "type": "string", "maxLength": 200 },
+        "why": { "type": "string", "maxLength": 500 }
+      }
+    }
+  }
+}

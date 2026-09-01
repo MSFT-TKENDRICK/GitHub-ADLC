@@ -30,6 +30,7 @@ from adlc.ports import (
     TaskNode,
 )
 from adlc.runs import RunDir, git, utcnow, write_json
+from adlc.summarize import node_tldr
 
 _TASK_RE = re.compile(
     r"^\s*-\s*\[[ xX]\]\s*(?P<id>T\d{3,})\s*(?P<parallel>\[P\])?\s*"
@@ -272,6 +273,11 @@ def compile_graph(cfg: Config, rd: RunDir) -> TaskGraph:
         "nodes": nodes,
     }
     validate_graph(graph)  # raises GraphError on cycles / write-set conflicts
+    # Summaries are generated after validation because `validate_graph` is what
+    # assigns levels, and a node's summary describes where it sits in the wave
+    # order. Generating before would describe a graph that does not exist yet.
+    for node in graph["nodes"]:
+        node["tldr"] = node_tldr(dict(node))
     return graph
 
 

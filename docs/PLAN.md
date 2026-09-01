@@ -127,9 +127,11 @@ flowchart TB
         BUILD --> GE[evals] & GG[governance] & GD["evidence_completeness<br/>deterministic"]
         GS & GQ & GE & GG & GD --> GA1["adversarial squad · code"]
         GA1 --> GA2["evidence squad<br/>sanitized pack only"]
-        GA2 --> AGG["ADLC / required<br/>single branch-protection check"]
+        GA2 --> GA3["feature-completeness squad<br/>code-blind · BLOCKING<br/>brief vs evidence only"]
+        GA3 --> AGG["ADLC / required<br/>single branch-protection check"]
     end
 
+    GA3 -->|"quorum: evidence does not<br/>demonstrate the request"| NEW
     AGG --> REP["report.html + artifacts → PR"]
     REP --> HR["native PR review<br/>approve · changes-requested · comments"]
     HR --> ADR["ADR · MADR v4<br/>bound to reviewSha"]
@@ -141,6 +143,13 @@ flowchart TB
 
 **Loops are bounded and immutable:** a revision never mutates a prior run; it creates a
 new run with `referencesRun`. `maxInnerIterations` = 2, `maxOuterIterations` = 1.
+
+**Why feature-completeness routes *outward*.** Every other gate failure is a
+defect in the change, so the inner loop repairs it. This one is a defect in what
+we set out to prove — the brief was misread, the design does not deliver it, or
+nobody planned to capture proof of it. Patching the code against that verdict is
+guessing, so the run re-enters at `spec`/`enrich`, not at the executor.
+
 
 ---
 
@@ -167,7 +176,9 @@ new run with `referencesRun`. `maxInnerIterations` = 2, `maxOuterIterations` = 1
     ├── evidence/<variant>/            # trace.zip video.webm network.har console.jsonl
     │                                  #   screenshots/ otel.jsonl lighthouse.json
     │                                  #   k6.json axe.json replay.spec.ts
+    ├── evidence/personas/*.json       # persona-feedback/v1 — hashed as artifacts (§4.6b)
     ├── evidence-review-pack.json      # sanitized, allowlisted (§4.6)
+    ├── completeness-pack.json         # code-blind reviewer input (§4.6c)
     ├── evals/            gates/<gate>.json      reviews/*.md
     ├── report.html       oes.json     # exported, conditional
 docs/decisions/NNNN-*.md               # ADRs — permanent, git-tracked
@@ -315,6 +326,70 @@ The **blocking** part is deterministic: every requirement must have ≥ 1 hash-v
 artifact produced by the declared collector at the declared SHA. The LLM squad verdict is
 **advisory** and must cite `artifactSha256` values; an uncited verdict is discarded.
 
+### 4.6b `evidence/personas/*.json` — persona feedback as evidence
+
+One record per persona per scenario, written by the `persona_feedback` stage
+*under* `evidence/` so `scan_artifacts()` hashes each one as a first-class
+artifact. That placement is the design: persona feedback is evidence, so it must
+be hash-addressable, citable by a reviewer, and impossible to edit after the fact
+without the digest changing.
+
+```jsonc
+{ "personaId":"reader","name":"Goran","role":"Reader","scenarioId":"US1-AC2",
+  "tldr":"…≤150 chars…","verdict":"satisfied|partial|confused|blocked",
+  "sentiment":0.6,"simulated":true,"source":"…",
+  "steps":[{"index":0,"observation":"…","thought":"…","action":"…",
+            "outcome":"…","confidence":0.9}],
+  "friction":[{"summary":"…","severity":"medium","requirementId":"US1-AC2"}],
+  "artifactSha256":["…"] }
+```
+
+Two rules keep it from being decorative rather than honest:
+
+- **`simulated` is required and set by the producing code path**, never by a
+  caller's argument. A deterministic walkthrough derived from the spec and the
+  captured evidence is useful, but it is not a human sitting in front of the
+  product, and conflating the two would be the worst thing this record could do.
+  Real sessions are ingested by dropping a conforming file with
+  `simulated: false`; regeneration never overwrites one.
+- **Verdicts restate signals.** `blocked` = no artifact covers the requirement.
+  `partial` = a measurement tied to it missed its budget. `confused` = evidence
+  exists but nothing visual proves the user could *see* the outcome. Coverage is
+  read from the review pack's map rather than re-derived, so the persona pane can
+  never claim evidence the `evidence_completeness` gate disagrees it has.
+
+`steps[].thought` is what makes the pane worth having: the reasoning is shown, so
+a reader can disagree with it.
+
+### 4.6c `completeness-pack.json` — code-blind reviewer input
+
+The input to the `feature_completeness` squad (§4.9, `docs/squads.md` §4.3). It
+excludes everything `evidence-review-pack.json` excludes, **plus the reasoning**:
+agent sessions, transcripts, chains of thought, stage rationales, patches and
+replay scripts.
+
+An agent's reasoning is the most persuasive available account of why the work is
+sufficient, written by the party with an interest in that conclusion, and it
+explains away exactly the gaps the reviewer exists to find. It is not evidence,
+and this reviewer's whole remit is evidence.
+
+```jsonc
+{ "runId":"…","candidateSha":"…","collector":"adlc.stages.complete",
+  "brief":{"text":"…","source":"brief.md","sha256":"…"},
+  "requirements":[{"id":"US1-AC2","text":"…","covered":true,"artifactSha256":["…"]}],
+  "evidence":[{"artifactSha256":"…","kind":"video","bytes":142,"redacted":true}],
+  "personaFeedback":[{"personaId":"reader","scenarioId":"US1-AC2","verdict":"…","tldr":"…"}],
+  "counts":{"requirements":2,"covered":2,"uncovered":0,"artifacts":7,"personaRecords":3},
+  "excluded":[{"what":"Source code and diffs","why":"…"}] }
+```
+
+Built by allowlist, then re-checked against `LEAK_MARKERS` (`diff --git`, `@@ -`,
+`thinking`, `tool_call`, `system prompt`, …). On a hit the stage **refuses to
+write the pack at all** rather than writing a redacted one: a pack that had to be
+scrubbed is a pack whose construction is wrong, and the next leak might not carry
+a marker. `excluded[]` is declared *in* the pack so the reviewer knows what it
+cannot see and can honestly answer "I cannot judge this from the evidence alone".
+
 ### 4.7 Feedback = native PR review (no bespoke protocol)
 
 | Human action | Effect |
@@ -326,6 +401,20 @@ artifact produced by the declared collector at the declared SHA. The LLM squad v
 Bound to the review's commit SHA and workflow run id. Only `write`-permission users can
 trigger reruns. A review on a stale SHA is rejected. `report.html` renders deep links
 that pre-fill these native reviews. **No YAML-fence command protocol.**
+
+**Structured evidence feedback — built as leaf L11.** The channel above carries review
+prose; L11 adds an artifact-anchored pack so a reviewer can annotate visual evidence,
+critique agent-authored reasoning (squad findings, personas, rubric and ADR rationales),
+and accept/reject evidence-vs-baseline deltas without leaving `report.html`. It obeys the
+rule above — possession of a pack confers no authority, so in CI a pack is applied only
+when it arrives via a native PR review or `workflow_dispatch` (both already write-gated),
+never via an unauthenticated issue comment.
+
+- **Schemas**: `adlc-human-feedback/v1` (`schemas/human-feedback-pack.schema.json`), the exported pack; `adlc-evidence-diff/v1` (`schemas/evidence-diff.schema.json`), the run-vs-baseline delta.
+- **Stages**: `evidence_diff` writes `evidence-diff.json`; `feedback` applies a pack — an immutable feedback record plus a recorded decision, and on a `revise` verdict a successor run carrying `referencesRun` + `route` that **actually re-runs the design loop**.
+- **`route` on `adlc-run/v1`**: `outer` re-runs `qualify → spec → enrich → graph`; `inner` re-specs nothing. It is **persisted on the run**, not merely the routing label of the table above.
+- **CLI**: `adlc evidence-diff RUN`, `adlc feedback validate PACK`, `adlc feedback apply PACK [RUN]`, `adlc report-serve RUN` (loopback submission server; the downloaded pack is the contract, the server only a convenience).
+- **Tests**: `tests/l11_feedback/**`. Pack prose reaches `spec.md` via the successor brief, so ingestion strips control/bidi/zero-width characters, blockquotes prose, flattens every interpolated value and caps the brief budget. Full contract: `docs/feedback.md`.
 
 ### 4.8 Permission & trust matrix
 
@@ -349,9 +438,11 @@ adlc run new --brief FILE | --issue N
 adlc qualify|spec|enrich|graph RUN
 adlc build RUN [--max-parallel N] [--runner fake|copilot-sdk|agent-task]
 adlc evidence RUN --variant KEY
+adlc personas RUN [--variant KEY]    # persona walkthroughs → evidence/personas/*.json
 adlc eval RUN
-adlc gate RUN --ids security,code_quality,evals,… [--profile minimal|full]
+adlc gate RUN --ids security,code_quality,evals,…
 adlc reduce RUN                     # stages/*.json → run.json  (the only writer)
+adlc complete RUN [--no-iterate]    # build completeness-pack.json; route a FAIL outward
 adlc report RUN
 adlc adr new|list|set-status
 adlc review apply RUN --event FILE  # native PR review payload
@@ -362,6 +453,12 @@ adlc autoresearch | adlc hotfix --incident FILE
 
 All commands: idempotent, `--json`, non-zero exit on required-gate failure.
 
+`adlc complete` must run **after** the first `adlc reduce`, because the pack is
+built from the reduced run. It is two phases in one command on purpose: build the
+pack, then act on the verdict the gate recorded for it. On a `fail` it opens a
+successor run in the *outer* loop carrying the original brief plus the reviewers'
+cited findings — `--no-iterate` suppresses that and exits non-zero instead.
+
 ---
 
 ## 5. Repository Layout
@@ -370,25 +467,24 @@ All commands: idempotent, `--json`, non-zero exit on required-gate failure.
 GitHub-ADLC/
 ├── .github/workflows/          # ← reusable workflows MUST live here for cross-repo `uses:`
 │   ├── adlc.yml                #   the single versioned entry point consumers call
-│   ├── adlc-gates.yml  adlc-report.yml  adlc-autoresearch.yml
-│   ├── *.md + *.lock.yml       #   gh-aw sources + compiled (dogfood)
+│   ├── adlc-*.md + adlc-*.lock.yml # gh-aw sources + compiled (dogfood)
 ├── .github/agents/*.agent.md   #   squad members
-├── actions/{setup,gate,evidence,report}/action.yml
 ├── src/adlc/
 │   ├── cli.py config.py ports.py runs.py reduce.py schemas.py executor.py
 │   ├── stages/  adapters/  maf/  templates/
-├── schemas/                    # adlc-run, taskgraph, rubric, benchmarks, gate,
-│                               #   evidence-review-pack, capabilities
+├── schemas/                    # adlc-run, taskgraph, rubric, benchmarks,
+│                               #   evidence-review-pack
 ├── templates/                  # what `adlc init` vendors (thin caller + config only)
-├── examples/{demo-app,briefs,consumer-repo,azure}/
+├── examples/{briefs,azure}/
 ├── docs/  docs/decisions/
 ├── bootstrap.sh                # installs the CLI, then runs `adlc init`
 └── tests/{conformance,smoke}/
 ```
 
-`adlc init` vendors **only** `.github/workflows/adlc-caller.yml` (pinned to a tag),
-`.adlc/{config,policy,squads}.yaml`, and an `AGENTS.md` stanza. It never overwrites
-existing CI and records the installed version in `config.yaml`.
+`adlc init` vendors **only** `.github/workflows/adlc.yml` (pinned to a tag),
+`.adlc/{config,policy,squads}.yaml`, and a `.gitignore` entry for run artifacts.
+It never overwrites existing files unless `--force` is supplied and records the
+installed version in `config.yaml`.
 
 ---
 
@@ -426,6 +522,7 @@ aggregator; static `report.html`; ADR engine + `review apply`; `adlc init` +
 | L8 | gh-aw workflows & squads | `.github/workflows/*.md` + `.lock.yml`, `.github/agents/*.agent.md` | autoresearch, intake, adversarial squad, evidence squad (**sanitized pack only, no checkout, `edit-file:false`, toolsets `[issues]`**), quorum from `squads.yaml` |
 | L9 | Enrichment generators | `stages/enrich_*.py`, templates | architecture/sitemap/data-model `.mmd`, `wireframe.excalidraw`, `personas.md` |
 | L10 | Day-2 Azure | `adapters/daytwo/**`, `examples/azure/**` | `repository_dispatch` receiver for SRE Agent; ACA git-mirror sidecar manifest (**disabled example**); Foundry hosted-agent `adlc hotfix` definition; App Insights telemetry adapter |
+| L11 | Human evidence feedback | `stages/{feedback,evidence_diff}.py`, `serve.py`, `tests/l11_feedback/**` | Annotatable `report.html` → `adlc-human-feedback/v1` pack (+ `adlc-evidence-diff/v1`); `feedback`/`evidence_diff` stages; `route`-persisted, write-gated design-loop retrigger |
 
 ---
 
@@ -452,6 +549,7 @@ adlc qualify $RUN && adlc spec $RUN && adlc enrich $RUN && adlc graph $RUN
 adlc build $RUN --max-parallel 4 --runner fake
 adlc evidence $RUN --variant candidate-a && adlc eval $RUN
 adlc gate $RUN --ids tests,secrets_local,deps_local,evidence_completeness --profile minimal
+adlc reduce $RUN && adlc personas $RUN && adlc complete $RUN --no-iterate
 adlc reduce $RUN && adlc report $RUN && adlc validate $RUN
 ```
 
@@ -466,13 +564,18 @@ Green requires **all** of:
 6. A required gate returning `not_run` makes the aggregate **fail** (negative test).
 7. `evidence-review-pack.json` contains **no** raw HAR/trace/console/replay content
    (asserted by content scan).
-8. `report.html` opens standalone; renders diagrams, evidence index, ADR + review deep links.
-9. `adlc review apply` on a `changes_requested` fixture creates a **new** run with
-   `referencesRun` and leaves the prior run byte-identical.
-10. ≥ 1 MADR v4 ADR in `docs/decisions/`, bound to `reviewSha`.
-11. `examples/consumer-repo/` — a clean repo — is installed by `adlc init`, **and** by
-    `bootstrap.sh`, and runs the same flow via the pinned reusable workflow.
-12. Kill-and-resume: interrupting `adlc build` and re-running resumes from the last
+8. `completeness-pack.json` contains **no** source, diff, agent transcript, chain of
+   thought or replay script (asserted by content scan against `LEAK_MARKERS`), and
+   declares its own `excluded[]`.
+9. `report.html` opens standalone; renders the task graph with per-node ≤150-char
+   summaries, the hero recording, the before/after slideshow, the diff viewer, ADR
+   detail views with a citations pane, persona records, and review deep links.
+10. `adlc review apply` on a `changes_requested` fixture creates a **new** run with
+    `referencesRun` and leaves the prior run byte-identical.
+11. ≥ 1 MADR v4 ADR in `docs/decisions/`, bound to `reviewSha`.
+12. A clean consumer repository can be installed by `adlc init` and
+    `bootstrap.sh`, then run the same flow via the pinned reusable workflow.
+13. Kill-and-resume: interrupting `adlc build` and re-running resumes from the last
     completed level barrier.
 
 ### 8.2 Real-agent smoke — opt-in, declared cost

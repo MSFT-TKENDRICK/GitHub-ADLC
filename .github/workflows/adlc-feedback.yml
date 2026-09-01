@@ -1,0 +1,371 @@
+# ADLC human-feedback workflow.
+#
+# Applies an `adlc-human-feedback/v1` pack captured on `report.html` (see
+# docs/feedback.md). A pack is UNTRUSTED input and possession of one confers no
+# authority, so this workflow only acts when the pack arrives through a channel
+# that already proves write permission:
+#
+#   * pull_request_review  -- a native review carries a real identity and the
+#                             reviewer's author_association; or
+#   * workflow_dispatch     -- which GitHub only lets users with write access run.
+#
+# Trust model (mirrors docs/PLAN.md 4.8). There are three separate questions and
+# this workflow has to answer all of them; answering only the first is the classic
+# way to build a pwn-request:
+#
+#   1. MAY THIS PERSON drive the loop? The `authorize` job asks the permissions
+#      API directly. It does NOT trust `author_association`: `MEMBER` only means
+#      "in the owning org" and `COLLABORATOR` includes read- and triage-only
+#      collaborators, so in an org whose base permission is Read, every member
+#      would pass a naive association check without having write access. The
+#      lookup fails CLOSED -- if the API call errors we refuse, never fall back.
+#
+#   2. WHOSE CODE ARE WE ABOUT TO RUN? `pull_request_review` is a privileged
+#      trigger: it runs in the BASE repo context with secrets available, and an
+#      unpinned `actions/checkout` resolves `github.ref` to `refs/pull/N/merge`
+#      -- the FORK's tree. `pip install .` then executes the build backend
+#      declared in the fork's own `pyproject.toml` (this repo uses hatchling, so
+#      a committed `hatch_build.py` alone is arbitrary code execution) with
+#      `GITHUB_TOKEN` live in the environment. So the checkout below is pinned to
+#      the base SHA and this workflow NEVER executes tree content from a PR head.
+#      Additionally, `authorize` refuses cross-repo (fork) heads outright, the
+#      same guard every other workflow in .github/workflows already carries. A
+#      maintainer who does want to apply a pack captured on a fork PR uses the
+#      `workflow_dispatch` path, which is authoritative by construction.
+#
+#   3. CAN UNTRUSTED TEXT REACH A SHELL? The pack and the review body are only
+#      ever passed through `env:` and parsed from a file or `os.environ` inside a
+#      quoted heredoc. They are never interpolated into a `run:` block.
+#
+# The `apply` job additionally holds no write permission on the repository. It
+# records feedback and re-runs the design loop into the run directory, then
+# uploads that directory as an artifact. It never pushes to the repo.
+
+name: ADLC feedback
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The ADLC run id the pack targets (must equal the pack's runId)."
+        type: string
+        required: true
+      pack:
+        description: "The adlc-human-feedback/v1 pack JSON (may be minified)."
+        type: string
+        required: true
+  pull_request_review:
+    types: [submitted]
+
+# Least privilege by default; every job narrows or restates this explicitly.
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    name: Authorize the submitter
+    runs-on: ubuntu-latest
+    # `contents: read` is the documented minimum for the collaborator-permission
+    # endpoint used below. It grants no write of any kind.
+    permissions:
+      contents: read
+    outputs:
+      authorized: ${{ steps.gate.outputs.authorized }}
+      actor: ${{ steps.gate.outputs.actor }}
+      checkout_ref: ${{ steps.gate.outputs.checkout_ref }}
+    steps:
+      - name: Decide whether the submitter may drive the loop
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const event = context.eventName;
+            let authorized = false;
+            let actor = context.actor;
+            // Which tree may we execute? Decided here, next to who may act,
+            // because they are the same question asked twice. See guard 3.
+            let checkoutRef = context.ref;
+            if (event === 'workflow_dispatch') {
+              // GitHub only allows users with write access to trigger a
+              // workflow_dispatch, so the actor is privileged by construction,
+              // and the ref they chose is a base-repo ref by construction too.
+              authorized = true;
+            } else if (event === 'pull_request_review') {
+              const pr = context.payload.pull_request;
+              actor = context.payload.review.user.login;
+
+              // Guard 1: refuse cross-repo (fork) heads. `pull_request_review`
+              // runs privileged in the base repo, so anything downstream that
+              // touches the head -- code, artifacts, the run directory -- is
+              // attacker-influenced. Every other workflow here carries this
+              // guard; see the trust-model note at the top of the file.
+              // Optional chaining, not `&&`: a PR whose fork was deleted has a
+              // null `head.repo`, and a malformed payload may have no `head` at
+              // all. Both must refuse, not throw.
+              const sameRepo = pr?.head?.repo?.id === context.payload.repository?.id
+                && pr?.head?.repo?.id !== undefined;
+
+              // Guard 2: a real write-access check. `author_association` is NOT
+              // one -- see the trust-model note.
+              let permission = null;
+              if (sameRepo) {
+                try {
+                  const res = await github.rest.repos.getCollaboratorPermissionLevel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    username: actor,
+                  });
+                  permission = res.data.permission;
+                } catch (err) {
+                  // A 404 is an answer: the reviewer is not a collaborator (a
+                  // GitHub App reviewer lands here too). Refuse quietly.
+                  //
+                  // Anything else -- 403 because the token lacks the scope, 5xx,
+                  // a network fault -- means the gate could not be evaluated. We
+                  // still refuse, but we must NOT do it quietly: a silent refusal
+                  // is indistinguishable from a correct one, so a gate broken by
+                  // a future permissions change would present as "the feature
+                  // stopped working" with no cause, and the tempting fix is to
+                  // loosen the rule. Fail the job so the cause is the error.
+                  if (err.status === 404) {
+                    core.info(`${actor} is not a collaborator; refusing`);
+                  } else {
+                    core.setFailed(
+                      `Authorization gate could not be evaluated: the permission ` +
+                        `lookup for ${actor} failed with ${err.status}. Refusing. ` +
+                        `Fix the token's scope -- never the rule.`
+                    );
+                    return;
+                  }
+                }
+              }
+              authorized = permission === 'admin' || permission === 'write';
+
+              // Guard 3: never execute the head tree. `pull_request_review` is a
+              // privileged trigger, so GITHUB_REF points at the PR merge ref --
+              // the submitter's code -- and `pip install .` downstream would run
+              // its build backend with a live token. Pin to the base commit.
+              //
+              // Computed here rather than with an inline `A && B || C` ternary
+              // idiom in the checkout step, because that idiom degrades
+              // silently: any falsy B falls through to C, and C is exactly the
+              // merge ref we are excluding. Here an empty value can stop the
+              // run instead.
+              //
+              // (That expression is deliberately not written out in full
+              // anywhere inside this `script:` block. GitHub expands every
+              // dollar-brace-brace expression in the block before Node ever
+              // sees it, so a JavaScript comment is not a hiding place -- an
+              // illustrative one here referred to undefined variables and made
+              // GitHub reject the entire workflow file at compile time.)
+              checkoutRef = pr?.base?.sha;
+              if (authorized && !checkoutRef) {
+                core.setFailed(
+                  'Refusing to run: no base SHA on the pull request, so the only ' +
+                    'tree available to check out is the submitter\'s.'
+                );
+                return;
+              }
+
+              core.info(
+                `review by ${actor}: sameRepo=${sameRepo} permission=${permission} ` +
+                  `-> authorized=${authorized}`
+              );
+            }
+            core.setOutput('authorized', authorized ? 'true' : 'false');
+            core.setOutput('actor', actor);
+            core.setOutput('checkout_ref', checkoutRef || '');
+
+  apply:
+    name: Apply the feedback pack
+    needs: authorize
+    # The authority gate, enforced: an unauthorized submitter never reaches the
+    # apply job at all.
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read   # check out the framework and install it
+      actions: read    # download the run artifact produced by adlc.yml
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # NOTE: PACK_FILE is deliberately NOT defined here. `jobs.<id>.env` may only
+      # reference the github, needs, strategy, matrix, vars, secrets and inputs
+      # contexts; `runner` is not among them, and using it makes GitHub reject the
+      # whole workflow file at compile time -- the run is created with zero jobs
+      # and no check runs, so there is no log to read. The path is bound in the
+      # `extract` step below (where `runner` IS in scope) and exported through
+      # $GITHUB_ENV for the steps that follow.
+    steps:
+      # Written before checkout, into RUNNER_TEMP, so `actions/checkout`'s clean
+      # step cannot delete it. The pack is untrusted: it is passed through the
+      # environment and parsed by a script that reads os.environ -- it is NEVER
+      # interpolated into the shell.
+      - name: Bind the submitted pack to a file
+        id: extract
+        env:
+          # `runner` is in scope at step level, unlike at job level.
+          PACK_FILE: ${{ runner.temp }}/adlc-feedback/pack.json
+          GH_EVENT_NAME: ${{ github.event_name }}
+          PACK_INPUT: ${{ inputs.pack }}
+          DISPATCH_RUN_ID: ${{ inputs.run_id }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+        run: |
+          python3 <<'PY'
+          import json, os, re, sys
+
+          event = os.environ.get("GH_EVENT_NAME", "")
+          run_id_re = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+          out = os.environ["GITHUB_OUTPUT"]
+
+          # A GUI wraps the pack in a fenced block tagged with the fence string
+          # published as `submission.reviewFence` in feedback-targets.json, so
+          # no GUI has to read this file to learn it.
+          #
+          # Both ends of the fence are anchored to the start of a line. That is
+          # load-bearing, not tidiness: a non-anchored `(.*?)```' stops at the
+          # first backtick run *anywhere*, including one a reviewer typed inside
+          # their own comment -- which truncates the pack. A truncated pack is
+          # usually a JSON error, but a crafted one can be a valid prefix, and
+          # then CI would silently apply feedback with the findings after the
+          # injected fence removed. Every line of `json.dumps(indent=2)` output
+          # begins with a quote or a bracket (newlines inside strings are
+          # escaped), so an anchored closing fence cannot be forged from
+          # reviewer-controlled text.
+          fence_re = re.compile(
+              r"^```adlc-human-feedback[^\n]*\n(.*?)^```",
+              re.DOTALL | re.MULTILINE,
+          )
+
+          def emit(**kw):
+              with open(out, "a", encoding="utf-8") as fh:
+                  for key, value in kw.items():
+                      fh.write(f"{key}={value}\n")
+
+          def fail(msg):
+              print(f"::error::{msg}")
+              sys.exit(1)
+
+          if event == "workflow_dispatch":
+              raw = (os.environ.get("PACK_INPUT") or "").strip()
+              if not raw:
+                  fail("workflow_dispatch requires the 'pack' input")
+          else:
+              body = os.environ.get("REVIEW_BODY") or ""
+              # A review without a pack is a normal review, not an error.
+              match = fence_re.search(body)
+              if not match:
+                  emit(has_pack="false")
+                  print("no adlc-human-feedback block in this review; nothing to apply")
+                  sys.exit(0)
+              raw = match.group(1).strip()
+
+          try:
+              pack = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              fail(f"submitted pack is not valid JSON: {exc}")
+
+          run_id = str(pack.get("runId", ""))
+          if not run_id_re.match(run_id):
+              # Guards every later use of run_id in an API path and a file path.
+              fail("pack 'runId' is missing or is not a safe run id")
+
+          if event == "workflow_dispatch":
+              want = (os.environ.get("DISPATCH_RUN_ID") or "").strip()
+              if want and want != run_id:
+                  fail(f"run_id input ({want!r}) does not match the pack runId ({run_id!r})")
+
+          path = os.environ["PACK_FILE"]
+          os.makedirs(os.path.dirname(path), exist_ok=True)
+          # Write the exact bytes submitted, so a declared packDigest still verifies.
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.write(raw)
+          # Later steps need the same path. It cannot live in the job-level `env:`
+          # because that block may not reference the `runner` context, so it is
+          # exported here instead. The value is runner-derived, not actor-derived.
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"PACK_FILE={path}\n")
+          emit(has_pack="true", run_id=run_id)
+          print(f"bound pack for run {run_id}")
+          PY
+
+      # PINNED, DELIBERATELY. Without an explicit `ref:` this resolves
+      # `github.ref`, which for `pull_request_review` is `refs/pull/N/merge` --
+      # the PR head's tree. The very next step runs `pip install .`, which
+      # executes the build backend declared in the checked-out `pyproject.toml`
+      # with GH_TOKEN in scope. Checking out the base SHA means the framework we
+      # install is always the framework this repo already trusts, and no tree
+      # content from a PR head is ever executed. See the trust-model note above.
+      #
+      # The value comes from the `authorize` job (guard 3) rather than an inline
+      # `${{ A && B || C }}`, because that idiom degrades open: any falsy B falls
+      # through to C == the merge ref we are excluding. `authorize` fails the run
+      # on an empty value instead, so the failure mode is a stopped run rather
+      # than a silently unpinned checkout.
+      - name: Check out the ADLC framework
+        if: steps.extract.outputs.has_pack == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authorize.outputs.checkout_ref }}
+          fetch-depth: 1
+
+      - name: Set up Python
+        if: steps.extract.outputs.has_pack == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ADLC
+        if: steps.extract.outputs.has_pack == 'true'
+        run: pip install --disable-pip-version-check .
+
+      - name: Download the run under review
+        if: steps.extract.outputs.has_pack == 'true'
+        env:
+          RUN_ID: ${{ steps.extract.outputs.run_id }}
+        run: |
+          # RUN_ID is charset-validated in the extract step, so it is safe in an
+          # API path. adlc.yml uploads the run directory as `adlc-<run-id>`; find
+          # it by exact name and unzip it back into place.
+          art_id=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=adlc-$RUN_ID&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$art_id" ]; then
+            echo "::error::no run artifact named adlc-$RUN_ID was found to apply feedback to"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$art_id/zip" > "$RUNNER_TEMP/run.zip"
+          mkdir -p ".adlc/runs/$RUN_ID"
+          unzip -q "$RUNNER_TEMP/run.zip" -d ".adlc/runs/$RUN_ID"
+
+      # Validate before applying: an invalid pack must fail loudly here, not be
+      # discovered halfway through creating a successor run.
+      - name: Validate the pack
+        if: steps.extract.outputs.has_pack == 'true'
+        run: |
+          if ! adlc feedback validate "$PACK_FILE" --json; then
+            echo "::error::feedback pack failed schema validation; refusing to apply"
+            exit 1
+          fi
+
+      - name: Apply the pack
+        if: steps.extract.outputs.has_pack == 'true'
+        env:
+          # RUN_ID and ACTOR travel through the environment and are quoted; the
+          # pack is a file. No actor-controlled text is expanded by the shell.
+          RUN_ID: ${{ steps.extract.outputs.run_id }}
+          ACTOR: ${{ needs.authorize.outputs.actor }}
+        run: adlc feedback apply "$PACK_FILE" "$RUN_ID" --actor "$ACTOR" --json
+
+      - name: Upload the resulting run directory
+        if: always() && steps.extract.outputs.has_pack == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: adlc-feedback-${{ steps.extract.outputs.run_id }}
+          path: .adlc/runs
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Nothing to apply
+        if: steps.extract.outputs.has_pack != 'true'
+        run: echo "This review carried no adlc-human-feedback pack; nothing to do."

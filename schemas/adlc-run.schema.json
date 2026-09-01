@@ -11,6 +11,7 @@
     "runId": { "type": "string", "minLength": 1 },
     "createdAt": { "type": "string", "format": "date-time" },
     "referencesRun": { "type": ["string", "null"] },
+    "route": { "enum": ["outer", "inner", null] },
     "repo": { "type": "string" },
     "baseSha": { "type": ["string", "null"] },
     "headSha": { "type": ["string", "null"] },

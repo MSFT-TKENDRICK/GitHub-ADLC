@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/evidence-diff.schema.json",
+  "title": "adlc-evidence-diff/v1",
+  "description": "Evidence-vs-baseline delta between a run and the run named in its referencesRun. Computed deterministically and offline: measurements join on metricId, coverage joins on requirementId, and screenshots are classified by SHA-256 at a matching relative path. Deliberately NO pixel diffing here - the report renders changed pairs with a CSS difference blend so the browser does that work with no extra dependency.",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "baselineRunId", "measurements", "coverage", "screenshots"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "adlc-evidence-diff/v1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "baselineRunId": {
+      "type": ["string", "null"],
+      "description": "Null when the run has no referencesRun or the baseline is unreadable; `reason` then says which."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why the diff is empty or partial. Never silently empty - absence of a baseline is stated."
+    },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["metricId", "change"],
+        "additionalProperties": false,
+        "properties": {
+          "metricId": { "type": "string" },
+          "change": { "enum": ["added", "removed", "changed", "unchanged"] },
+          "value": { "type": ["number", "null"] },
+          "baselineValue": { "type": ["number", "null"] },
+          "delta": { "type": ["number", "null"] },
+          "budget": { "type": ["number", "null"] },
+          "passed": { "type": ["boolean", "null"] },
+          "baselinePassed": { "type": ["boolean", "null"] },
+          "budgetCrossed": {
+            "enum": ["entered_breach", "left_breach", "none"],
+            "description": "Whether this metric crossed its budget relative to the baseline."
+          },
+          "collector": { "type": "string" },
+          "artifactSha256": { "type": "string" }
+        }
+      }
+    },
+    "coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["requirementId", "change"],
+        "additionalProperties": false,
+        "properties": {
+          "requirementId": { "type": "string" },
+          "change": { "enum": ["added", "removed", "gained", "lost", "unchanged"] },
+          "present": { "type": ["boolean", "null"] },
+          "baselinePresent": { "type": ["boolean", "null"] },
+          "evidenceKinds": { "type": "array", "items": { "type": "string" } },
+          "baselineEvidenceKinds": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "screenshots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "change"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path relative to evidence/<variant>/, so a variant rename does not read as a wholesale replacement."
+          },
+          "change": { "enum": ["added", "removed", "changed", "unchanged"] },
+          "sha256": { "type": ["string", "null"] },
+          "baselineSha256": { "type": ["string", "null"] },
+          "bytes": { "type": ["integer", "null"], "minimum": 0 },
+          "baselineBytes": { "type": ["integer", "null"], "minimum": 0 }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "measurementsChanged": { "type": "integer", "minimum": 0 },
+        "budgetsEntered": { "type": "integer", "minimum": 0 },
+        "budgetsLeft": { "type": "integer", "minimum": 0 },
+        "coverageLost": { "type": "integer", "minimum": 0 },
+        "coverageGained": { "type": "integer", "minimum": 0 },
+        "screenshotsChanged": { "type": "integer", "minimum": 0 },
+        "screenshotsAdded": { "type": "integer", "minimum": 0 },
+        "screenshotsRemoved": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

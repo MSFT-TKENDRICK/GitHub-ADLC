@@ -18,18 +18,22 @@ on:
   status-comment: true
 
 # `actions: read` is needed by the deterministic pre-step that downloads the
-# pack artifact. The agent itself gets no write scope of any kind.
+# pack artifact. The agent itself gets no write scope over repository data;
+# `copilot-requests: write` is not a repository scope, it authorises Copilot
+# inference on the built-in Actions token (see docs/squads.md §8.6).
 permissions:
   contents: read
   pull-requests: read
   issues: read
   actions: read
+  copilot-requests: write
 
 network:
   allowed: [defaults]
 
 engine:
   id: copilot
+model: gpt-5
 
 # ---------------------------------------------------------------------------
 # STRUCTURAL SANDBOX.

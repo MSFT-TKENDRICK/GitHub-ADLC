@@ -353,6 +353,8 @@ collectors at.
 
 ## Artifact kinds
 
+The collectors in this document name their own kinds:
+
 | `kind` | File |
 |---|---|
 | `lighthouse` | `lighthouse.json`, `lighthouse-N.json` |
@@ -362,6 +364,35 @@ collectors at.
 | `axe` | `axe.json`, `axe-N.json` |
 | `axe_script` / `axe_config` | `axe-scan.cjs` / `axe-scan.config.json` |
 | `evidence_measurements` | `<collector>-measurements.json`, `<collector>-unmeasured.json` |
+
+`RunDir.scan_artifacts` assigns the rest from the file suffix, so anything a
+collector drops in the evidence directory is hashed and classified without the
+collector having to declare it:
+
+| `kind` | Matched by |
+|---|---|
+| `playwright_trace` | `.zip` |
+| `har` | `.har` |
+| `video` | `.webm` |
+| `screenshot` | `.png` |
+| `jsonl` | `.jsonl` |
+| `replay_script` | `.ts` |
+| `json` | `.json` |
+| `html_report` | `.html`, plus the run's own `report.html` |
+| `file` | anything else |
+
+Two kinds are decided by **location**, not suffix:
+
+| `kind` | Matched by |
+|---|---|
+| `persona_feedback` | `.json` directly under `evidence/personas/` |
+
+A persona walkthrough is evidence about the *experience* rather than another
+anonymous JSON blob, and both the report and the completeness pack need to treat
+it as its own class — the report renders it as a reasoning trace, and the pack
+counts it separately from measured evidence. Naming the kind at scan time is what
+lets them do that without re-opening every JSON file to guess what it is. See
+`docs/PLAN.md` §4.6b.
 
 Every entry carries a verified `sha256` and a `path` relative to the run
 directory, e.g. `evidence/candidate-a/lighthouse.json`. Note that
@@ -414,3 +445,49 @@ emission) lives in `lighthouse.py` and is imported by `k6.py` and `axe.py`
 rather than in a fourth file. The blast radius is contained to L6:
 `adlc.config.load_adapters` swallows `ImportError`, so a broken leaf is simply
 undiscoverable, never fatal.
+
+## Annotatable evidence and the evidence diff
+
+Everything above produces *artifacts*. The human-feedback workstream (L11 — see
+[`docs/feedback.md`](feedback.md)) turns those artifacts into things a reviewer
+can mark up, and diffs them against a baseline. Two properties of the files these
+collectors write are what make that possible, and neither needed a new field.
+
+**The `sha256` is the annotation anchor.** Every file a collector writes becomes
+an `ArtifactRef` in `run.json`'s `artifacts[]` carrying a *verified* hash — the
+same hash that makes an LLM squad's citation checkable (see the review pack in
+plan §4.6). An `adlc-human-feedback/v1` annotation anchors to exactly that hash:
+`annotations[].artifactSha256`. The binding is **citation-or-discard**, the same
+rule the adversarial-review gate uses — an annotation naming a hash absent from
+`artifacts[]` is dropped and recorded, never silently applied. Anchoring on
+content rather than a path is deliberate: a screenshot, HAR, trace or
+`*-measurements.json` file stays annotatable even if its variant directory is
+renamed, and an annotation can never drift onto a different file that happens to
+share a path.
+
+**`evidence-diff.json` is the movement between two runs.** The `evidence_diff`
+stage (`adlc evidence-diff`, schema
+[`schemas/evidence-diff.schema.json`](../schemas/evidence-diff.schema.json),
+title `adlc-evidence-diff/v1`) compares a run against the run named in its
+`referencesRun` and writes `evidence-diff.json` to the run root, next to
+`evidence-review-pack.json`. It is computed deterministically and **offline**,
+reusing the artifacts described here rather than introducing new ones:
+
+| Delta | Joins on | Source |
+|---|---|---|
+| measurements | `metricId` | each run's `<collector>-measurements.json`, as copied into `evidence-review-pack.json` |
+| coverage | `requirementId` | the review pack's `coverage[]` |
+| screenshots | SHA-256 at a path **relative to `evidence/<variant>/`** | the image files under `evidence/` (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) |
+
+A metric that passed its budget in the baseline but fails now is reported as an
+`entered_breach` (the reverse is `left_breach`), because movement *inside* budget
+is noise but crossing one is a decision. The load-bearing coverage signal is
+`lost`: a requirement present in both runs that silently stopped being evidenced.
+Screenshots are keyed on the variant-relative path so a `candidate-a` →
+`candidate-b` rename does not read as "every screenshot removed and every
+screenshot added"; there is deliberately **no** pixel diffing here, so a browser
+can render a changed pair with a CSS difference blend and no image dependency is
+added to this workstream or any other. When there is no `referencesRun`, no
+baseline directory, or an unreadable baseline pack, the document is still valid
+but carries `baselineRunId: null` and a `reason` — absence is stated, never a
+silently empty diff.

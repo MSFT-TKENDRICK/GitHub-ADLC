@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MSFT-TKENDRICK/GitHub-ADLC/schemas/feedback-targets.schema.json",
+  "title": "adlc-feedback-targets/v1",
+  "description": "Everything in a run that can receive human feedback, in one machine-readable document. This is the seam between ADLC and any review GUI: a GUI reads this file and needs no knowledge of ADLC internals, no Python, and no JSON Schema parser. It is the INPUT half of the loop whose output half is adlc-human-feedback/v1. The enums and limits are echoed here, derived from the pack schema at build time rather than hand-copied, so a GUI can populate its controls without parsing a schema and can never drift from what ingestion will accept.",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "run", "submission"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "adlc-feedback-targets/v1" },
+    "generatedAt": { "type": "string", "format": "date-time", "maxLength": 40 },
+    "run": {
+      "type": "object",
+      "description": "Identity a GUI must echo back into the pack verbatim. A GUI that derives these itself will eventually derive them wrong, and ingestion will refuse the reviewer's work.",
+      "required": ["runId", "candidateSha"],
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "candidateSha": { "type": "string", "maxLength": 64 },
+        "baselineRunId": { "type": ["string", "null"], "maxLength": 64 },
+        "reportDigest": { "type": ["string", "null"], "maxLength": 80 },
+        "profile": { "type": ["string", "null"], "maxLength": 64 },
+        "title": { "type": ["string", "null"], "maxLength": 512 },
+        "passed": { "type": ["boolean", "null"] }
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "description": "Offered so a GUI can let a reviewer link an annotation to what it is evidence about.",
+      "maxItems": 2000,
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 64 },
+          "text": { "type": "string", "maxLength": 4000 },
+          "source": { "type": "string", "maxLength": 512 }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "Evidence a reviewer can mark up. `inline` carries the bytes as a data URI so a GUI works with no file access and no server; when it is null, `inlineOmittedReason` states why in words a reviewer can read.",
+      "maxItems": 2000,
+      "items": {
+        "type": "object",
+        "required": ["id", "sha256", "annotatable"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "path": { "type": "string", "maxLength": 512 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "kind": { "type": "string", "maxLength": 64 },
+          "mediaType": { "type": ["string", "null"], "maxLength": 128 },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "width": { "type": ["integer", "null"], "minimum": 0 },
+          "height": { "type": ["integer", "null"], "minimum": 0 },
+          "annotatable": {
+            "type": "boolean",
+            "description": "False for an artifact a GUI cannot meaningfully mark up. Still listed, so a reviewer sees the whole evidence set rather than a silently filtered subset."
+          },
+          "inline": { "type": ["string", "null"], "maxLength": 20000000 },
+          "inlineOmittedReason": { "type": ["string", "null"], "maxLength": 512 }
+        }
+      }
+    },
+    "reasoning": {
+      "type": "array",
+      "description": "Agent-authored reasoning a human can push back on: squad findings, personas, rubric rationales, ADR justifications. `sourceDigest` pins the exact text shown, so a critique aimed at reasoning the agent later rewrote is detectable rather than silently misattributed.",
+      "maxItems": 2000,
+      "items": {
+        "type": "object",
+        "required": ["id", "targetKind", "targetRef", "text"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "targetKind": { "enum": ["squad_finding", "persona", "rubric_criterion", "adr"] },
+          "targetRef": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "targetTitle": { "type": "string", "maxLength": 512 },
+          "sourceDigest": { "type": ["string", "null"], "maxLength": 80 },
+          "author": { "type": "string", "maxLength": 128 },
+          "text": { "type": "string", "maxLength": 20000 },
+          "severity": { "type": ["string", "null"], "maxLength": 32 },
+          "confidence": { "type": ["string", "null"], "maxLength": 32 },
+          "citations": {
+            "type": "array",
+            "maxItems": 40,
+            "items": { "type": "string", "maxLength": 512 }
+          }
+        }
+      }
+    },
+    "diff": {
+      "type": ["object", "null"],
+      "description": "Evidence-vs-baseline deltas in decision-ready shape: every row already carries the `targetKind`/`targetId` pair a diffDecision must name, so a GUI never has to derive an identifier and get it subtly wrong.",
+      "required": ["measurements", "coverage", "screenshots"],
+      "additionalProperties": false,
+      "properties": {
+        "baselineRunId": { "type": ["string", "null"], "maxLength": 64 },
+        "measurements": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "required": ["targetKind", "targetId", "change"],
+            "additionalProperties": false,
+            "properties": {
+              "targetKind": { "const": "measurement" },
+              "targetId": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "label": { "type": "string", "maxLength": 512 },
+              "change": { "type": "string", "maxLength": 32 },
+              "value": { "type": ["number", "null"] },
+              "baselineValue": { "type": ["number", "null"] },
+              "delta": { "type": ["number", "null"] },
+              "budget": { "type": ["number", "null"] },
+              "passed": { "type": ["boolean", "null"] },
+              "baselinePassed": { "type": ["boolean", "null"] },
+              "budgetCrossed": { "type": ["string", "null"], "maxLength": 32 },
+              "collector": { "type": ["string", "null"], "maxLength": 128 },
+              "regression": {
+                "type": "boolean",
+                "description": "Pre-computed so every GUI agrees on what counts as a regression rather than each inventing its own rule."
+              }
+            }
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "required": ["targetKind", "targetId", "change"],
+            "additionalProperties": false,
+            "properties": {
+              "targetKind": { "const": "coverage" },
+              "targetId": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "label": { "type": "string", "maxLength": 4000 },
+              "change": { "type": "string", "maxLength": 32 },
+              "present": { "type": ["boolean", "null"] },
+              "baselinePresent": { "type": ["boolean", "null"] },
+              "evidenceKinds": {
+                "type": "array", "maxItems": 40,
+                "items": { "type": "string", "maxLength": 64 }
+              },
+              "baselineEvidenceKinds": {
+                "type": "array", "maxItems": 40,
+                "items": { "type": "string", "maxLength": 64 }
+              },
+              "regression": { "type": "boolean" }
+            }
+          }
+        },
+        "screenshots": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "required": ["targetKind", "targetId", "change"],
+            "additionalProperties": false,
+            "properties": {
+              "targetKind": { "const": "screenshot" },
+              "targetId": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "label": { "type": "string", "maxLength": 512 },
+              "change": { "type": "string", "maxLength": 32 },
+              "sha256": { "type": ["string", "null"], "maxLength": 64 },
+              "baselineSha256": { "type": ["string", "null"], "maxLength": 64 },
+              "bytes": { "type": ["integer", "null"], "minimum": 0 },
+              "baselineBytes": { "type": ["integer", "null"], "minimum": 0 },
+              "inline": { "type": ["string", "null"], "maxLength": 20000000 },
+              "baselineInline": { "type": ["string", "null"], "maxLength": 20000000 },
+              "inlineOmittedReason": { "type": ["string", "null"], "maxLength": 512 },
+              "regression": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "submission": {
+      "type": "object",
+      "description": "How to turn reviewer input into an accepted pack. Enums and limits are derived from human-feedback-pack.schema.json when this document is built, so a GUI can populate its controls with no schema parser and cannot offer a value ingestion would refuse.",
+      "required": ["packSchemaVersion", "reviewFence", "enums", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "packSchemaVersion": { "const": "adlc-human-feedback/v1" },
+        "reviewFence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9-]+$",
+          "description": "Fenced-code-block info string the CI review transport looks for. A GUI wraps the pack JSON in a fence tagged with this value to submit through a native PR review, and therefore never needs to read workflow YAML to learn the magic word."
+        },
+        "endpoint": {
+          "type": ["string", "null"],
+          "maxLength": 512,
+          "description": "Loopback submission URL, or null when the report was opened as a plain file. Null means download/copy is the only egress -- which is the contract path, not a degraded one."
+        },
+        "nonceHeader": { "type": ["string", "null"], "maxLength": 64 },
+        "nonce": { "type": ["string", "null"], "maxLength": 128 },
+        "maxBodyBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "idPattern": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Regex every id in the pack must match, derived from the pack schema. A GUI that mints its own ids needs this or it will mint one that ingestion refuses."
+        },
+        "enums": {
+          "type": "object",
+          "required": ["verdict", "route", "severity", "shape", "critiqueStance", "critiqueTargetKind", "diffDecision", "diffTargetKind"],
+          "additionalProperties": false,
+          "properties": {
+            "verdict": { "type": "array", "items": { "type": "string" } },
+            "route": { "type": "array", "items": { "type": "string" } },
+            "severity": { "type": "array", "items": { "type": "string" } },
+            "shape": { "type": "array", "items": { "type": "string" } },
+            "critiqueStance": { "type": "array", "items": { "type": "string" } },
+            "critiqueTargetKind": { "type": "array", "items": { "type": "string" } },
+            "diffDecision": { "type": "array", "items": { "type": "string" } },
+            "diffTargetKind": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "description": "What inlining actually cost, so a bloated document is visible rather than surprising.",
+      "additionalProperties": false,
+      "properties": {
+        "perArtifactBytes": { "type": "integer", "minimum": 0 },
+        "totalBytes": { "type": "integer", "minimum": 0 },
+        "inlinedBytes": { "type": "integer", "minimum": 0 },
+        "inlinedCount": { "type": "integer", "minimum": 0 },
+        "omittedCount": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

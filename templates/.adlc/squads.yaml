@@ -75,3 +75,38 @@ squads:
       requireShaMatch: true
       # Every cited artifactSha256 must match an artifact recorded in run.json.
       requireHashVerification: true
+
+  # ---------------------------------------------------------------------
+  # Feature completeness. The last gate, and the only one that asks whether
+  # the run proved what was ASKED FOR rather than whether the change is
+  # sound. NEVER sees the code, the diffs, the agent sessions or the raw
+  # traces -- only completeness-pack.json
+  # (schemas/completeness-pack.schema.json).
+  #
+  # Blocking, unlike evidence_review, because no deterministic check sits
+  # underneath it: whether evidence answers a brief is a judgement, and a
+  # judgement that cannot stop the run is a comment. A quorum here routes
+  # the run back to the OUTER loop -- if the evidence does not answer the
+  # brief, patching the code is guessing.
+  # ---------------------------------------------------------------------
+  feature_completeness:
+    description: >-
+      Code-blind review of the original brief against the collected evidence.
+      Judges grounding, relevance and completeness: does what we captured
+      actually demonstrate what was requested?
+    blocking: true
+    quorum: "2/3"
+    # Every claim must cite an artifactSha256 that appears in the pack.
+    citation: artifact-sha256
+    workflow: .github/workflows/adlc-feature-completeness.md
+    routesTo: outer
+    members:
+      - id: completeness-auditor
+        agent: .github/agents/completeness-auditor.agent.md
+        weight: 1
+      - id: grounding-auditor
+        agent: .github/agents/grounding-auditor.agent.md
+        weight: 1
+      - id: relevance-auditor
+        agent: .github/agents/relevance-auditor.agent.md
+        weight: 1
