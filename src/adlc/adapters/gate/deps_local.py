@@ -124,7 +124,12 @@ class DepsLocalGate:
         except json.JSONDecodeError:
             return []
         out: list[dict] = []
-        for dep in data.get("dependencies", data if isinstance(data, list) else []):
+        deps = data.get("dependencies", []) if isinstance(data, dict) else data
+        if not isinstance(deps, list):
+            return []
+        for dep in deps:
+            if not isinstance(dep, dict):
+                continue
             for vuln in dep.get("vulns", []) or []:
                 out.append({
                     "ecosystem": "pypi", "package": dep.get("name"),
