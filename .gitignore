@@ -9,8 +9,14 @@
 __pycache__/
 *.egg-info/
 .venv/
+.venv-*/
 .pytest_cache/
 
+# Test coverage artifacts
+.coverage
+.coverage.*
+coverage.json
+htmlcov/
 
 # Tooling caches
 .ruff_cache/
