@@ -142,9 +142,10 @@ def test_sanitize_label_strips_everything_that_breaks_mermaid_or_html() -> None:
 def test_diagrams_survive_the_report_html_escape_roundtrip(
     run_dir: Path, spec_text: str, cfg
 ) -> None:
-    """``report.py`` embeds Mermaid as ``escape(source)`` inside a div and hands
-    ``el.textContent`` to mermaid.js (or to a ``<pre>`` when the CDN is down).
-    Both paths HTML-unescape, so the round-trip must be lossless."""
+    """``report.py`` embeds Mermaid as ``escape(source)`` inside a div, which the
+    report shows as literal source text for the reader to copy into a renderer.
+    The browser unescapes it on display, so the round-trip must be lossless or
+    what gets copied out no longer parses."""
     for path in ed.generate(run_dir, spec_text, cfg):
         source = path.read_text(encoding="utf-8")
         round_tripped = unescape(escape(source))

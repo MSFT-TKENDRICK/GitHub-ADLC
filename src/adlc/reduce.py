@@ -35,6 +35,7 @@ _STATUS_ORDER: tuple[tuple[str, RunStatus], ...] = (
     ("gate", "gated"),
     ("report", "reported"),
     ("review", "decided"),
+    ("feedback", "decided"),
 )
 _STATUS_RANK = {status: idx for idx, (_, status) in enumerate(_STATUS_ORDER)}
 
@@ -136,6 +137,7 @@ def reduce_run(cfg: Config, rd: RunDir) -> Run:
         "runId": rd.run_id,
         "createdAt": run.get("createdAt") or utcnow(),
         "referencesRun": run.get("referencesRun"),
+        "route": run.get("route"),
         "repo": run.get("repo", ""),
         "baseSha": run.get("baseSha"),
         "headSha": run.get("headSha"),

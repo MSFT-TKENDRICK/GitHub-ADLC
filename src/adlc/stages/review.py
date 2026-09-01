@@ -43,8 +43,21 @@ def _route(event: dict[str, Any], default: str) -> str:
     return default
 
 
-def apply_review(cfg: Config, rd: RunDir, event: dict[str, Any]) -> dict[str, Any]:
-    """Apply a `pull_request_review` webhook payload to a run."""
+def apply_review(
+    cfg: Config,
+    rd: RunDir,
+    event: dict[str, Any],
+    *,
+    adopted_successor: str | None = None,
+) -> dict[str, Any]:
+    """Apply a `pull_request_review` webhook payload to a run.
+
+    ``adopted_successor`` names a successor run that some other act in the same
+    submission has already created. A review and a feedback pack applied
+    together are one human decision, so they must not each spawn a revision --
+    two runs both claiming to be *the* successor of one parent is a forked
+    lineage, which the append-only history has no way to reconcile later.
+    """
     started = utcnow()
     review = event.get("review") or {}
     pull_request = event.get("pull_request") or {}
@@ -110,8 +123,8 @@ def apply_review(cfg: Config, rd: RunDir, event: dict[str, Any]) -> dict[str, An
         "adr": adr.number,
     }
 
-    new_run: str | None = None
-    if outcome == "iterate":
+    new_run: str | None = adopted_successor
+    if outcome == "iterate" and adopted_successor is None:
         new_run = new_run_id()
         successor = RunDir(cfg, new_run)
         brief = rd.brief.read_text(encoding="utf-8") if rd.brief.is_file() else ""
@@ -127,6 +140,7 @@ def apply_review(cfg: Config, rd: RunDir, event: dict[str, Any]) -> dict[str, An
                 + (f"\n### Inline annotations\n\n{annotations}\n" if annotations else "")
             ),
             references_run=rd.run_id,
+            route=route,
         )
 
     rd.write_stage(
@@ -135,13 +149,18 @@ def apply_review(cfg: Config, rd: RunDir, event: dict[str, Any]) -> dict[str, An
         message=(
             f"@{reviewer} {state} at {review_sha[:8] or 'unknown'} -> "
             f"{outcome}; ADR {adr.number} {adr_status}"
-            + (f"; created successor run {new_run} (route={route})" if new_run else "")
+            + (
+                f"; {'adopted' if adopted_successor else 'created'} successor run "
+                f"{new_run} (route={route})"
+                if new_run else ""
+            )
         ),
         data={
             "state": state, "outcome": outcome, "route": route,
             "reviewer": reviewer, "reviewSha": review_sha,
             "adr": adr.number, "adrStatus": adr_status,
             "successorRun": new_run, "decision": decision,
+            "adoptedSuccessor": bool(adopted_successor),
         },
         started_at=started,
     )

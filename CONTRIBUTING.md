@@ -1,43 +1,56 @@
-# Contributing to ADLC — workstream rules
+# Contributing to ADLC
 
-This repo is built by **one spine + ten independent leaves** working in parallel.
-These rules are what make that safe. Read them before writing any code.
+ADLC is a Python package plus reusable GitHub workflows. Contributions should
+preserve its credential-free default path, explicit opt-in integrations, and
+append-only run history.
 
-## The golden rules
+## Before you change code
 
-1. **Stay inside your exclusive paths.** They are listed in `docs/PLAN.md` §6.
-   Do not create or edit files outside them. If you think you need to, you are
-   wrong about the contract — re-read `src/adlc/ports.py`.
+1. Read [`docs/PLAN.md`](docs/PLAN.md) for the architecture and frozen
+   contracts.
+2. Check the relevant guide in [`docs/README.md`](docs/README.md).
+3. Confirm the working tree is clean enough to distinguish your changes from
+   existing work.
 
-2. **Never edit `pyproject.toml`.** Every adapter — including yours — is
-   *already* registered there. `adlc.config.load_adapters` swallows
-   `ImportError`, so an entry point whose module does not exist yet is simply
-   undiscoverable, not fatal. Just create the module at the declared path with
-   the declared class name.
+## Development setup
 
-3. **Never edit `src/adlc/ports.py` or `schemas/*.json`.** They are frozen.
-   Code against them.
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest tests/conformance -q
+ruff check src/
+```
 
-4. **Your adapter must be a pure addition.** The spine ships a credential-free
-   default for every seam. If your adapter is unavailable, `detect()` returns
-   `(False, "<specific human-readable reason>")` and the framework carries on.
-   Your adapter failing must never fail the spine's conformance suite.
+Run the smallest relevant test directory while iterating, then run the full
+suite before submitting a change. Tests must pass without credentials or
+network-only services.
 
-5. **`detect()` must be cheap and must not raise.** No network calls, no
-   subprocess that can hang. Check for env vars, importable modules, or a binary
-   on `PATH`. Return a *specific* reason string — it is surfaced verbatim to
-   users in `capabilities.json` and in any `not_run` gate.
+## Design rules
 
-6. **Fail closed, never fail silently.** A required gate that cannot run returns
-   `status: "not_run"`, and the aggregator turns that into a build failure.
-   Never return `pass` for something you did not actually verify.
+- **Use the frozen ports.** Implement the Protocols in `src/adlc/ports.py`;
+  do not change the ports or `schemas/*.json` to fit an adapter.
+- **Keep adapters additive.** Optional integrations are registered in the
+  existing `pyproject.toml` entry-point groups. Do not add a second discovery
+  mechanism.
+- **Keep detection cheap.** `detect()` must not raise, make network calls, or
+  run a command that can hang. Return `(False, "<specific reason>")` when the
+  integration is unavailable.
+- **Fail closed.** A required unavailable gate is `not_run` and fails the
+  aggregate. Never report `pass` for work that was not verified.
+- **Respect protected paths.** Agent-authored patches cannot change
+  `.github/**`, `.adlc/**`, `schemas/**`, `docs/decisions/**`, or
+  `pyproject.toml`.
+- **Preserve immutability.** Stages create new attempt files. Only the reducer
+  writes `run.json`; revisions create a new run with `referencesRun`.
+- **Keep documentation truthful.** Commands, paths, configuration keys, and
+  integration status must match the code. Mark preview APIs and disabled
+  examples as such.
 
-## Adapter skeleton
+## Adding an adapter
+
+Use the existing entry-point group for the seam (`adlc.agents`,
+`adlc.evidence`, `adlc.gate`, and so on). A typical adapter looks like:
 
 ```python
-from __future__ import annotations
-
-import shutil
 from pathlib import Path
 
 from adlc.config import Config
@@ -50,51 +63,30 @@ class MyCollector:
 
     @staticmethod
     def detect(cfg: Config) -> tuple[bool, str]:
-        if shutil.which("my-tool") is None:
-            return False, "my-tool not on PATH"
         return True, "my-tool available"
 
     def collect(self, run: Run, variant: str, out: Path) -> list[ArtifactRef]:
         ...
 ```
 
-## Gate skeleton
+Follow the closest existing adapter for the complete Protocol and artifact
+contract. Add tests under the matching `tests/` leaf, including the
+credentialless unavailable path.
 
-```python
-class MyGate:
-    id = "my_gate"
-    name = "my-gate"
-    kind = "gate"
-    required_by_default = False
+## Documentation changes
 
-    @staticmethod
-    def detect(cfg: Config) -> tuple[bool, str]: ...
+Update the nearest focused guide and the documentation index when adding a
+public command, adapter, configuration key, schema, workflow, or example. Use
+relative links, fenced code blocks with the correct language, and headings that
+make the page scannable. Avoid duplicating the full architecture contract in
+multiple files; link to `docs/PLAN.md` instead.
 
-    def evaluate(self, run: Run, cfg: Config) -> GateResult:
-        return {
-            "id": self.id,
-            "required": cfg.is_required(self.id),
-            "status": "pass",          # pass | fail | not_run
-            "severity": "medium",
-            "observed": {...},
-            "expected": {...},
-            "message": "human-readable, specific",
-            "evidence": ["gates/my_gate.json"],
-        }
-```
+## Pull request checklist
 
-## Tests
-
-Put yours in `tests/<your-leaf>/`. They must pass with **no credentials** — that
-means your test asserts the `detect() == (False, reason)` path and, when the tool
-*is* present, the happy path. Never write a test that requires a secret to pass.
-
-## Definition of done
-
-- [ ] Module exists at the path already declared in `pyproject.toml`
-- [ ] Implements the Protocol from `adlc.ports` exactly
-- [ ] `detect()` is cheap, non-raising, and returns a specific reason
-- [ ] Unavailable path degrades to `not_run` / skip, never a crash
-- [ ] Tests pass with no credentials
-- [ ] `python -m pytest tests/` and `ruff check src/` are clean
-- [ ] Nothing outside your exclusive paths was touched
+- [ ] The change is limited to the relevant package, tests, workflow, or docs.
+- [ ] Public behavior and configuration are documented.
+- [ ] Optional integrations degrade with a specific `detect()` reason.
+- [ ] `python -m pytest tests/` passes.
+- [ ] `ruff check src/` passes.
+- [ ] New or changed schemas and contracts have focused tests.
+- [ ] No credentials, generated run artifacts, or secrets are committed.
