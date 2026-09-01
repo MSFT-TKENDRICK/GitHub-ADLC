@@ -45,6 +45,10 @@ repos:
         # Enforced by .gitattributes too; a stray CRLF corrupts generated patches.
         args: ["--fix=lf"]
       - id: detect-private-key
+        # This gate's own test fixture legitimately contains the PEM header
+        # string as sample data for the pattern it is supposed to detect --
+        # not a real key. Excluded from this hook only.
+        exclude: ^tests/l4_security/test_secrets_local\.py$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Pinned to the version used for local analysis. A drifting linter version
