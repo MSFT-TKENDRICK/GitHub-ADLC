@@ -97,6 +97,24 @@ feature_completeness = "adlc.adapters.gate.feature_completeness:FeatureCompleten
 [tool.hatch.build.targets.wheel]
 packages = ["src/adlc"]
 
+# The schemas live at the repo root because they are a published contract, not
+# an implementation detail -- consumers and GUIs read them directly. But
+# `packages` only sweeps `src/adlc`, so without this they never reached the
+# wheel, and `adlc.schemas.schema_dir()` raised FileNotFoundError in every
+# installed environment. Both CI workflows install with `pip install .`, so
+# schema validation -- which is the input-validation boundary for untrusted
+# feedback packs -- was unavailable exactly where it matters most.
+#
+# Mapped to `_schemas` rather than `schemas` on purpose: `adlc/schemas.py` is a
+# module, and shipping a sibling `adlc/schemas/` directory makes
+# `import adlc.schemas` depend on FileFinder's module-vs-namespace-package
+# precedence. Correct today, but not a thing to rest a contract on.
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "adlc/_schemas"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/adlc", "schemas", "docs", "README.md", "pyproject.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

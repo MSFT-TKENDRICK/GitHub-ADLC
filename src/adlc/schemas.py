@@ -1,7 +1,9 @@
 """JSON Schema validation for ADLC artifacts.
 
 Schemas live in ``schemas/`` at the repo root and are the acceptance oracle for
-every workstream.
+every workstream. They are a published contract -- consumers and feedback GUIs
+read them directly -- which is why they sit at the root rather than inside the
+package, and why the wheel has to go out of its way to carry a copy.
 """
 
 from __future__ import annotations
@@ -11,9 +13,17 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+#: Where to look for ``schemas/``, in order.
+#:
+#: The wheel copy is written to ``_schemas`` rather than ``schemas`` because
+#: this module is ``adlc/schemas.py``; a sibling ``adlc/schemas/`` directory
+#: would make ``import adlc.schemas`` depend on FileFinder preferring a real
+#: module over a namespace package. That is true today and is not a thing to
+#: rest a published contract on.
 SCHEMA_DIR_CANDIDATES = (
     Path(__file__).resolve().parents[2] / "schemas",   # repo checkout
-    Path(__file__).resolve().parent / "schemas",       # installed wheel
+    Path(__file__).resolve().parent / "_schemas",      # installed wheel
+    Path(__file__).resolve().parent / "schemas",       # legacy layout
 )
 
 
@@ -31,7 +41,13 @@ def schema_dir() -> Path:
     for candidate in SCHEMA_DIR_CANDIDATES:
         if candidate.is_dir():
             return candidate
-    raise FileNotFoundError("could not locate the ADLC schemas/ directory")
+    searched = "\n  - ".join(str(c) for c in SCHEMA_DIR_CANDIDATES)
+    raise FileNotFoundError(
+        "could not locate the ADLC schemas/ directory. The installed adlc "
+        "package is missing its bundled schemas, so no artifact can be "
+        "validated. Reinstall adlc, or run from a repo checkout.\nSearched:\n"
+        f"  - {searched}"
+    )
 
 
 @lru_cache(maxsize=32)
