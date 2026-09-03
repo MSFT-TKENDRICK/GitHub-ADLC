@@ -24,6 +24,10 @@ permissions:
   pull-requests: read
   issues: read
   actions: read
+  # Bills AI credits to the org via GITHUB_TOKEN instead of requiring a
+  # COPILOT_GITHUB_TOKEN PAT. Requires the org's "Allow use of Copilot CLI
+  # billed to the organization" Copilot policy to be enabled.
+  copilot-requests: write
 
 network:
   allowed: [defaults]

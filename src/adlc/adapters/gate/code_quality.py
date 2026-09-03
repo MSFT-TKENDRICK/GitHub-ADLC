@@ -149,8 +149,8 @@ def setup_failure_reason(status: int | None, detail: str = "") -> str:
 
 def summarize_findings(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Count quality findings by ``rule.severity`` and ``rule.category``."""
-    by_severity = {level: 0 for level in (*FINDING_SEVERITIES, "unknown")}
-    by_category = {cat: 0 for cat in (*FINDING_CATEGORIES, "unknown")}
+    by_severity = dict.fromkeys((*FINDING_SEVERITIES, "unknown"), 0)
+    by_category = dict.fromkeys((*FINDING_CATEGORIES, "unknown"), 0)
     rules: list[str] = []
     for finding in findings:
         if not isinstance(finding, Mapping):

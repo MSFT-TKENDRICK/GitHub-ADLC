@@ -22,10 +22,7 @@ def _enum(schema: dict[str, Any], *path: str) -> frozenset[str]:
     """Pull an ``enum`` out of the schema by walking a property path."""
     node: Any = schema
     for part in path:
-        if part == "[]":
-            node = node["items"]
-        else:
-            node = node["properties"][part]
+        node = node["items"] if part == "[]" else node["properties"][part]
     return frozenset(node["enum"])
 
 
@@ -154,7 +151,7 @@ def test_vendored_copy_is_current(oes_schema: dict[str, Any]) -> None:  # pragma
     """Opt-in: re-fetch the published schema and diff it against the vendored copy."""
     import urllib.request
 
-    with urllib.request.urlopen(oes.OES_SCHEMA_URL, timeout=30) as response:
+    with urllib.request.urlopen(oes.OES_SCHEMA_URL, timeout=30) as response:  # noqa: S310 - constant https URL, opt-in network test
         published = json.loads(response.read().decode("utf-8"))
     assert published == oes_schema, (
         "the published OES schema has changed; re-vendor it in "

@@ -79,7 +79,7 @@ def gh_config_dir() -> Path:
     """Where ``gh`` keeps ``hosts.yml``. Mirrors gh's own resolution order."""
     if override := (os.environ.get("GH_CONFIG_DIR") or "").strip():
         return Path(override)
-    if os.name == "nt" and (appdata := os.environ.get("AppData")):
+    if os.name == "nt" and (appdata := os.environ.get("APPDATA")):
         return Path(appdata) / "GitHub CLI"
     if xdg := (os.environ.get("XDG_CONFIG_HOME") or "").strip():
         return Path(xdg) / "gh"
@@ -98,7 +98,7 @@ def extension_dirs() -> list[Path]:
         candidates.append(Path(xdg) / "gh" / "extensions")
     candidates += [
         home / ".local" / "share" / "gh" / "extensions",
-        home / "AppData" / "Local" / "GitHub CLI" / "extensions",
+        home / "APPDATA" / "Local" / "GitHub CLI" / "extensions",
     ]
     return candidates
 

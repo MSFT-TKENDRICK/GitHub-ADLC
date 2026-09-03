@@ -15,6 +15,7 @@ never ships raw HAR/console content to a reviewing agent at all.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -109,13 +110,11 @@ class PlaywrightCollector:
                 browser.close()
 
         if har_path.is_file():
-            try:
+            with contextlib.suppress(json.JSONDecodeError, OSError):
                 har_path.write_text(
                     json.dumps(self.redact_har(json.loads(har_path.read_text(encoding="utf-8")))),
                     encoding="utf-8",
                 )
-            except (json.JSONDecodeError, OSError):
-                pass
             artifacts.append(har_path)
 
         console_path = out / "console.jsonl"

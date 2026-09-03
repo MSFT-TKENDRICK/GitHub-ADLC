@@ -61,6 +61,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # This job later runs agent-authored code. actions/checkout defaults
+          # to persist-credentials: true, which writes a usable token into
+          # .git/config -- so "this job has no secrets" would be false, and the
+          # agent could push with the caller's credential. The executor only
+          # needs local git (worktrees, diff, apply, commit), never the remote.
+          persist-credentials: false
 
       - name: Check out the ADLC framework
         uses: actions/checkout@v4
@@ -68,6 +74,7 @@ jobs:
           repository: MSFT-TKENDRICK/GitHub-ADLC
           path: .adlc-framework
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5

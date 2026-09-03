@@ -97,8 +97,10 @@ class SqliteTaskStore:
 
     def update(self, node_id: str, status: str, note: str = "") -> None:
         with self._connect() as conn:
+            # S608: every value is a bound parameter. The only concatenation is a
+            # fixed literal selected by a boolean, so no caller input reaches SQL.
             conn.execute(
-                "UPDATE tasks SET status = ?, note = ?, updated_at = CURRENT_TIMESTAMP"
+                "UPDATE tasks SET status = ?, note = ?, updated_at = CURRENT_TIMESTAMP"  # noqa: S608
                 " WHERE node_id = ?" + (" AND run_id = ?" if self._run_id else ""),
                 (status, note, node_id, *([self._run_id] if self._run_id else [])),
             )

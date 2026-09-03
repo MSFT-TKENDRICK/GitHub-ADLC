@@ -105,15 +105,110 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
+# An explicit select is load-bearing. Without one, ruff falls back to its
+# minimal default (E4, E7, E9, F) and reports "All checks passed" across 162
+# files while examining very little -- a lint gate that looks green because it
+# is barely looking.
+select = [
+    "F",      # pyflakes: real errors
+    "E", "W", # pycodestyle
+    "I",      # import sorting
+    "UP",     # pyupgrade
+    "B",      # bugbear: likely bugs
+    "A",      # builtin shadowing
+    "C4",     # comprehensions
+    "DTZ",    # naive datetimes -- audit records must be unambiguous
+    "T20",    # stray print()
+    "SIM",    # simplifiable constructs
+    "PTH",    # os.path -> pathlib
+    "RET",    # return-flow smells
+    "ARG",    # unused arguments
+    "PL",     # pylint subset
+    "PERF",   # obvious performance traps
+    "RUF",    # ruff-specific, incl. unused noqa
+    "S",      # bandit: security
+    "BLE",    # blind except
+    "TRY",    # exception antipatterns
+    "ANN",    # annotations
+    "PGH",    # blanket noqa / type: ignore without a code
+    "N",      # naming
+]
+
 ignore = [
+    # --- deliberate design choices ------------------------------------------
     # typer expresses CLI parameters as call-valued defaults; this is the idiom.
     "B008",
-    # Skipping a file we cannot read or parse is deliberate, not a swallowed bug.
+    # Lazy imports are load-bearing: the CLI keeps startup fast, and every
+    # optional adapter must be importable-or-not without breaking the spine.
+    # Narrowed rather than blanket-ignored would be better; tracked as follow-up.
+    "PLC0415",
+    # Skipping a file we cannot read or decode is deliberate, not a swallowed bug.
     "S112",
-    # `__enter__` returning the concrete class is intentional and useful here.
-    "PYI034",
+    # A specific message in `raise` is worth more to an operator than brevity.
+    "TRY003",
+    # Keeping the raising path inline reads better than extracting it here.
+    "TRY301",
+    # `try/except/else` is not clearer than an early return in these flows.
+    "TRY300",
+    # This tool's job is driving git, pytest and other CLIs, so subprocess use is
+    # inherent. Note S607 is about PATH resolution, not argument provenance: we
+    # accept resolving `git`/`gh`/`python` from PATH because pinning absolute
+    # paths would break every supported platform and CI image.
+    "S603", "S607",
+
+    # --- rules we deliberately do not enforce --------------------------------
+    # Em and en dashes are intentional typography in prose and in generated
+    # Markdown, and the Jinja templates use them too. Normalising them to ASCII
+    # would make Python-generated output disagree with template-generated output.
+    "RUF001", "RUF002", "RUF003",
+    # PERF401 rewrites guarded append loops into comprehensions. With a
+    # condition and a `continue`, the loop form is usually clearer, and 31
+    # mechanical rewrites is churn with a real chance of introducing a bug. This
+    # is a settled position, not a deferral.
+    "PERF401",
+    # N818 wants an `Error` suffix on exception names. `GovernanceUnavailable`
+    # and `EvalBackendUnavailable` read better as-is and the suffix adds no
+    # information. Also a settled position.
+    "N818",
+
+    # --- deferred, with the change that will remove them ---------------------
+    # ANN401 (`Any` in signatures) is the closest analogue to anti-slop's
+    # no-unknown-parameters/no-unknown-returns and is the highest-value rule
+    # here. 138 sites in src plus 157 in tests is too many to address in one
+    # reviewable change, so it is deferred to the low-evidence work that ADR
+    # 0001 describes -- which is also where a ratchet belongs, since a comment
+    # enforces nothing. Do not drop this entry silently.
+    "ANN401",
+    # Line length and complexity thresholds land with the mechanical formatting
+    # change; ruff-format does not fix these, so they need their own pass.
+    "E501",
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests assert on internals and use long, explicit fixtures.
-"tests/**" = ["S101", "SLF001", "PLR2004"]
+# Adapters implement Protocols from `adlc.ports`, and stages share a uniform
+# `(cfg, rd)` signature so the CLI can dispatch them identically. A `cfg` that a
+# particular implementation ignores is still required by the interface -- it is
+# not left over, and renaming it would break the match.
+"src/adlc/adapters/**" = ["ARG001", "ARG002", "ARG004"]
+"src/adlc/stages/**" = ["ARG001", "ARG002", "ARG004"]
+"src/adlc/maf/**" = ["ARG001", "ARG002", "ARG004"]
+# `adlc.stages.hotfix` doubles as a standalone entry point; printing is its
+# output contract, the same as any CLI main.
+"src/adlc/stages/hotfix.py" = ["T201"]
+# Tests assert on internals, use magic values, and drive subprocesses.
+"tests/**" = [
+    "S101",           # assert is the point
+    "S105", "S106",   # fixture strings named *token*/*secret* are not credentials
+    "S602", "S603", "S607",  # fixtures build repos with git
+    "SLF001",         # private access is how we test invariants
+    "PLR2004",        # magic values in assertions are clearer inline
+    "ANN",            # test signatures are self-evident
+    "ARG",            # pytest fixtures arrive as unused-looking arguments
+    "PLR0915",        # long, explicit test bodies beat clever ones
+    "E402",           # conftests bind sys.path before importing adlc, by design
+]
+# Diagnostic scripts print by design.
+"scripts/**" = ["T20", "ANN", "S603", "S607"]
+# Lint tooling prints its findings; that is its output contract.
+"tools/**" = ["T20"]

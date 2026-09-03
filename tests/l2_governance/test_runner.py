@@ -198,7 +198,7 @@ class TestPatchProductionIsTheSpinesJob:
             {"id": "T1", "writeSet": ["src/app.py"]}, repo, cfg
         )
         assert outcome["status"] == "ok"
-        staged = subprocess.run(  # noqa: ASYNC221 - a fast, bounded git read
+        staged = subprocess.run(
             ["git", "-C", str(repo), "diff", "--cached", "--name-only"],
             capture_output=True,
             text=True,

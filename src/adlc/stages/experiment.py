@@ -1,4 +1,4 @@
-"""The ADLC experiment stage — ``plan`` → ``run`` → ``analyze``.
+"""The ADLC experiment stage -- ``plan`` → ``run`` → ``analyze``.
 
 **A run is not an experiment.** Most ADLC runs are build/evaluation runs with a
 single candidate and no live traffic. This stage is the *opt-in* path that turns
@@ -8,7 +8,7 @@ data ``adlc export oes`` needs (plan section 1 idea 2).
 Three phases, each appended as a new immutable attempt:
 
 ``plan``
-    Writes the **pre-registration** — variants, metrics and design declared
+    Writes the **pre-registration** -- variants, metrics and design declared
     *before* anything is measured. The file is hashed and the digest is recorded
     in the stage result, so a later edit is detectable; because stage results are
     committed, the ordering is also timestamp-verifiable via git. This is a
@@ -27,8 +27,8 @@ Three phases, each appended as a new immutable attempt:
 Every phase returns a :class:`~adlc.ports.StageResult` written through
 ``RunDir.write_stage``, which appends ``stages/experiment.<attempt>.json`` and
 never overwrites. Its own outputs live under ``runs/<run>/experiment/``. It never
-writes ``run.json`` — only ``adlc reduce`` may do that, which is what keeps
-parallel Actions jobs race-free — and ``_write_output`` refuses that filename
+writes ``run.json`` -- only ``adlc reduce`` may do that, which is what keeps
+parallel Actions jobs race-free -- and ``_write_output`` refuses that filename
 outright rather than relying on reviewer discipline.
 """
 
@@ -160,7 +160,7 @@ def flag_evaluation_attributes(
     provider and this stage all funnel through here so the attribute names can
     never drift apart.
 
-    Shape matches ``FlagdFileProvider.span_attributes`` exactly — all seven keys
+    Shape matches ``FlagdFileProvider.span_attributes`` exactly -- all seven keys
     are always present (``OtelFileTelemetry.emit`` strips the ``None`` ones on
     write), and ``reason`` is lower-cased the same way the spine lower-cases it.
     """
@@ -176,7 +176,7 @@ def flag_evaluation_attributes(
 
 
 # ---------------------------------------------------------------------------
-# Comparison math (pure — no I/O, no config)
+# Comparison math (pure -- no I/O, no config)
 # ---------------------------------------------------------------------------
 
 
@@ -396,7 +396,9 @@ def metrics_from_enrichment(run_dir: Path) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def _add(raw: Mapping[str, Any], *, source: str, defaults: Mapping[str, Any] | None = None):
+    def _add(
+        raw: Mapping[str, Any], *, source: str, defaults: Mapping[str, Any] | None = None
+    ) -> None:
         merged = {**(defaults or {}), **raw, "source": raw.get("source", source)}
         normalized = normalize_metric(merged)
         if normalized and normalized["id"] not in seen:
@@ -460,8 +462,8 @@ def _load_structured(path: Path) -> Any:
 def _write_output(rd: RunDir, relative: str, payload: Any) -> bytes:
     """Write one of this stage's own outputs, and never ``run.json``.
 
-    ``adlc reduce`` is the only writer of ``run.json`` — that is what eliminates
-    concurrent-write races across parallel Actions jobs — so the guard is here
+    ``adlc reduce`` is the only writer of ``run.json`` -- that is what eliminates
+    concurrent-write races across parallel Actions jobs -- so the guard is here
     rather than left to reviewer discipline.
     """
     path = rd.path / relative
@@ -546,7 +548,7 @@ def _emit_flag_evaluation(telemetry: Any, attributes: Mapping[str, Any]) -> None
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — plan (pre-registration)
+# Phase 1 -- plan (pre-registration)
 # ---------------------------------------------------------------------------
 
 
@@ -563,7 +565,7 @@ def plan(
     ``experiment.yaml`` in the run directory is used, and failing that the plan
     is derived from the run's declared variants plus ``enrichment/``.
 
-    Returns a ``skipped`` result — never a failure — when the run declares fewer
+    Returns a ``skipped`` result -- never a failure -- when the run declares fewer
     than two variants, because a single-candidate build run is simply not an
     experiment.
     """
@@ -708,7 +710,7 @@ def plan(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — expose (which flags back which variant)
+# Phase 2 -- expose (which flags back which variant)
 # ---------------------------------------------------------------------------
 
 
@@ -913,7 +915,7 @@ def _evaluate_flag(
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 — analyze
+# Phase 3 -- analyze
 # ---------------------------------------------------------------------------
 
 
@@ -1127,7 +1129,7 @@ _PHASE_FUNCTIONS = {"plan": plan, "run": expose, "analyze": analyze}
 
 
 def run_experiment(cfg: Config, rd: RunDir, phase: str = "plan", **kwargs: Any) -> StageResult:
-    """Run one phase of the experiment stage — the spine-shaped entry point.
+    """Run one phase of the experiment stage -- the spine-shaped entry point.
 
     Mirrors ``run_evidence(cfg, rd, ...)`` and friends so a CLI command can call
     it without knowing which phase functions exist.

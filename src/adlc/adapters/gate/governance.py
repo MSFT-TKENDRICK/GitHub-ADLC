@@ -1,4 +1,4 @@
-"""The ``governance`` gate — Agent Governance Toolkit verification.
+"""The ``governance`` gate -- Agent Governance Toolkit verification.
 
 Runs ``agt verify --evidence <path> --strict`` (and ``agt lint-policy`` when a
 policy is present), emits the AGT evidence document into the run's ``gates/``
@@ -13,6 +13,7 @@ path here that reports ``pass`` for a check that did not execute.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -31,7 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover
 __all__ = ["GovernanceGate"]
 
 AGT_BINARY = "agt"
-AGT_INSTALL_HINT = 'agt CLI not on PATH — pip install "adlc[governance]"'
+AGT_INSTALL_HINT = 'agt CLI not on PATH -- pip install "adlc[governance]"'
 
 #: Generous but bounded. `agt verify` is a local scan; if it has not finished by
 #: now something is wrong, and hanging a CI job is worse than a `not_run`.
@@ -64,7 +65,7 @@ class GovernanceGate:
         if binary is None:
             return False, AGT_INSTALL_HINT
         if resolve_policy_path(cfg) is None:
-            return False, "agt CLI present but no policy found — expected .adlc/policy.yaml"
+            return False, "agt CLI present but no policy found -- expected .adlc/policy.yaml"
         return True, f"agt CLI at {binary}"
 
     # -- evaluation -------------------------------------------------------
@@ -177,10 +178,8 @@ class GovernanceGate:
         only ``adlc reduce`` ever writes.
         """
         if write_report:
-            try:
+            with contextlib.suppress(OSError, KeyError, TypeError, ValueError):
                 write_gate(rd, result)
-            except (OSError, KeyError, TypeError, ValueError):
-                pass
         return result
 
 

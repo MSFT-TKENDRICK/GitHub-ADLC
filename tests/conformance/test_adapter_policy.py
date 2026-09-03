@@ -49,7 +49,7 @@ def test_unknown_adapter_fails_loudly(cfg: Config) -> None:
 
 def test_side_effecting_kinds_are_declared() -> None:
     """The guard list is the contract; keep it explicit."""
-    assert EXPLICIT_ONLY_KINDS == frozenset({"agents", "taskstore"})
+    assert frozenset({"agents", "taskstore"}) == EXPLICIT_ONLY_KINDS
 
 
 def test_observational_kinds_may_auto_detect(cfg: Config) -> None:

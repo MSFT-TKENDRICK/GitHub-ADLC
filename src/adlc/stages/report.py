@@ -144,7 +144,7 @@ def _adr_cards(cfg: Config, run: dict[str, Any], repo: str, pr: int | None) -> s
     return "\n".join(cards)
 
 
-def render(cfg: Config, rd: RunDir) -> str:
+def render(cfg: Config, rd: RunDir, *, cdn_diagrams: bool = False) -> str:
     run = load_run(rd)
     gates = run.get("gates") or []
     passed, failures = aggregate_passed(gates)
@@ -202,21 +202,60 @@ def render(cfg: Config, rd: RunDir) -> str:
         graph_mermaid=escape(_graph_mermaid(graph)),
         adr_cards=_adr_cards(cfg, run, repo, pr),
         run_json=escape(json.dumps(run, indent=2)),
+        diagram_script=_MERMAID_SCRIPT if cdn_diagrams else "",
+        diagram_note=(
+            "Rendered with Mermaid from a CDN, which this report loaded over the network."
+            if cdn_diagrams
+            else "Diagram source is shown verbatim so this report stays self-contained. "
+            "Paste it into any Mermaid renderer, or a GitHub comment, to see it drawn."
+        ),
     )
 
 
-def run_report(cfg: Config, rd: RunDir) -> dict[str, Any]:
+def run_report(cfg: Config, rd: RunDir, *, cdn_diagrams: bool = False) -> dict[str, Any]:
     started = utcnow()
-    html = render(cfg, rd)
+    html = render(cfg, rd, cdn_diagrams=cdn_diagrams)
     rd.report.write_text(html, encoding="utf-8")
     rd.write_stage(
         "report",
         outputs=[rd.rel(rd.report)],
-        message=f"report.html rendered ({len(html)//1024} KB, self-contained)",
-        data={"bytes": len(html)},
+        message=(
+            f"report.html rendered ({len(html) // 1024} KB, "
+            + ("with CDN diagram rendering" if cdn_diagrams else "self-contained")
+            + ")"
+        ),
+        data={"bytes": len(html), "cdnDiagrams": cdn_diagrams},
         started_at=started,
     )
-    return {"path": str(rd.report), "bytes": len(html)}
+    return {"path": str(rd.report), "bytes": len(html), "cdnDiagrams": cdn_diagrams}
+
+
+#: Optional Mermaid enhancement.
+#:
+#: Off by default. The report is an evidence artifact that should stay readable
+#: without a third party being online and unmodified, and it renders data derived
+#: from agent-authored runs -- so executing remote script in the reader's browser
+#: is a real risk, not a theoretical one. Subresource Integrity is included so a
+#: tampered bundle refuses to execute, but note the pinned hash is for the
+#: floating `mermaid@11` tag: when upstream publishes a new 11.x the hash stops
+#: matching and diagrams silently fall back to source text. That degradation is
+#: intentional and is the safe direction.
+_MERMAID_SCRIPT = (
+    '<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" '
+    'integrity="sha384-1XxYRbOYiiyu+pmHSGPcd+f1+ISteo+dnLpgQKUB07vPr9ddelj3zjO+TAbBqFXY" '
+    'crossorigin="anonymous" referrerpolicy="no-referrer"></script>\n'
+    "<script>\n"
+    "  if (window.mermaid) {\n"
+    "    mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'strict' });\n"
+    "    document.querySelectorAll('pre.mermaid-source').forEach(function (el) {\n"
+    "      var div = document.createElement('div');\n"
+    "      div.className = 'mermaid';\n"
+    "      div.textContent = el.textContent;\n"
+    "      el.replaceWith(div);\n"
+    "    });\n"
+    "  }\n"
+    "</script>"
+)
 
 
 _TEMPLATE = """<!doctype html>
@@ -337,9 +376,9 @@ _TEMPLATE = """<!doctype html>
   {rubric}
 
   <h2>Task graph</h2>
-  <div class="mermaid">{graph_mermaid}</div>
+  <pre class="mermaid-source">{graph_mermaid}</pre>
   <p class="note">Nodes on the same level ran concurrently in isolated worktrees; each level ends at a
-    patch barrier where patches are applied in id order and tests run.</p>
+    patch barrier where patches are applied in id order and tests run. {diagram_note}</p>
 
   <h2>Evidence</h2>
   <table><thead><tr><th>Artifact</th><th>Kind</th><th>Size</th><th>SHA-256</th></tr></thead>
@@ -360,7 +399,6 @@ _TEMPLATE = """<!doctype html>
   <details><summary>run.json (adlc-run/v1)</summary><pre>{run_json}</pre></details>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
   (function () {{
     var root = document.documentElement;
@@ -374,17 +412,9 @@ _TEMPLATE = """<!doctype html>
         setTimeout(function () {{ el.textContent = old; }}, 900);
       }});
     }});
-    // Mermaid is progressive enhancement: offline the diagram source stays readable.
-    if (window.mermaid) {{
-      mermaid.initialize({{ startOnLoad: true, theme: 'dark', securityLevel: 'strict' }});
-    }} else {{
-      document.querySelectorAll('.mermaid').forEach(function (el) {{
-        var pre = document.createElement('pre'); pre.textContent = el.textContent;
-        el.replaceWith(pre);
-      }});
-    }}
   }})();
 </script>
+{diagram_script}
 </body>
 </html>
 """

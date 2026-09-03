@@ -132,17 +132,17 @@ def run_spec(cfg: Config, rd: RunDir) -> dict[str, Any]:
     detail: dict[str, Any] = {"specKit": reason}
 
     if available and _script(cfg.root, "create-new-feature"):
-        try:
-            script = _script(cfg.root, "create-new-feature")
-            assert script is not None
-            detail["createFeature"] = _run_script(
-                script, "--json", "--short-name", rd.run_id, title, cwd=cfg.root
-            )
-            if setup := _script(cfg.root, "setup-plan"):
-                detail["setupPlan"] = _run_script(setup, "--json", cwd=cfg.root)
-            used_spec_kit = True
-        except (RuntimeError, AssertionError) as exc:
-            detail["specKitError"] = str(exc)
+        script = _script(cfg.root, "create-new-feature")
+        if script is not None:
+            try:
+                detail["createFeature"] = _run_script(
+                    script, "--json", "--short-name", rd.run_id, title, cwd=cfg.root
+                )
+                if setup := _script(cfg.root, "setup-plan"):
+                    detail["setupPlan"] = _run_script(setup, "--json", cwd=cfg.root)
+                used_spec_kit = True
+            except RuntimeError as exc:
+                detail["specKitError"] = str(exc)
 
     spec_path = rd.spec_dir / "spec.md"
     tasks_path = rd.spec_dir / "tasks.md"

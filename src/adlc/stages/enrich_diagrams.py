@@ -337,7 +337,7 @@ _SERVICE_HINT = re.compile(
     r"\b([A-Z][\w.-]*(?:[ \t]+[A-Z][\w.-]*){0,3}[ \t]+"
     r"(?:Service|API|Worker|Queue|Gateway|Handler|Store|Cache|Job|Daemon|Adapter|Provider))\b"
 )
-_ENTITY_BULLET = re.compile(r"^\s*[-*]\s+\*\*([A-Za-z][\w /-]{1,40})\*\*\s*[:—-]?\s*(.*)$")
+_ENTITY_BULLET = re.compile(r"^\s*[-*]\s+\*\*([A-Za-z][\w /-]{1,40})\*\*\s*[:\u2013\u2014-]?\s*(.*)$")
 _ENTITY_HEADING = re.compile(
     r"^#{2,4}\s+(?:Entity[:\s]+)?([A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*){0,2})\s*$"
 )
@@ -413,8 +413,8 @@ def read_spec_context(run_dir: Path, spec_text: str) -> dict[str, str]:
 
 
 def feature_title(spec_text: str) -> str:
-    for line in (spec_text or "").splitlines():
-        line = line.strip()
+    for raw_line in (spec_text or "").splitlines():
+        line = raw_line.strip()
         if line.startswith("# "):
             title = line[2:].strip()
             title = re.sub(r"^(feature\s+specification|specification|spec|feature)\s*[:\-]\s*",

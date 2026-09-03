@@ -30,6 +30,7 @@ class FlagdFileProvider:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path
         self._flags: dict[str, Any] = {}
+        self._flag_set_id: str | None = None
 
     @staticmethod
     def detect(cfg: Config) -> tuple[bool, str]:
@@ -91,6 +92,7 @@ class FlagdFileProvider:
         target.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         self.path = target
         self._flags = document["flags"]
+        self._flag_set_id = document["metadata"]["flagSetId"]
         return target
 
     # -- evaluation --------------------------------------------------------
@@ -98,7 +100,9 @@ class FlagdFileProvider:
         if self._flags:
             return self._flags
         if self.path and self.path.is_file():
-            self._flags = json.loads(self.path.read_text(encoding="utf-8")).get("flags", {})
+            document = json.loads(self.path.read_text(encoding="utf-8"))
+            self._flags = document.get("flags", {})
+            self._flag_set_id = document.get("metadata", {}).get("flagSetId")
         return self._flags
 
     def evaluate(self, key: str, ctx: dict[str, Any]) -> FlagResult:
@@ -124,6 +128,7 @@ class FlagdFileProvider:
 
     def span_attributes(self, result: FlagResult, ctx: dict[str, Any]) -> dict[str, Any]:
         """OTel feature-flag semconv attributes for this evaluation."""
+        self._load()
         return {
             "feature_flag.key": result.get("key"),
             "feature_flag.provider.name": self.name,
@@ -131,5 +136,5 @@ class FlagdFileProvider:
             "feature_flag.result.value": result.get("value"),
             "feature_flag.result.reason": (result.get("reason") or "").lower(),
             "feature_flag.context.id": ctx.get("targetingKey") or ctx.get("id"),
-            "feature_flag.set.id": (self._flags and "adlc") or None,
+            "feature_flag.set.id": self._flag_set_id,
         }

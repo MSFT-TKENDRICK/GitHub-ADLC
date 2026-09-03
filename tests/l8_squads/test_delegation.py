@@ -34,7 +34,7 @@ class TestNoDuplication:
     """The deterministic check must exist in exactly one place."""
 
     def test_the_blocking_gate_is_the_spine_gate(self) -> None:
-        assert DETERMINISTIC_GATE_ID == evidence_completeness.EvidenceCompletenessGate.id
+        assert evidence_completeness.EvidenceCompletenessGate.id == DETERMINISTIC_GATE_ID
 
     def test_this_gate_does_not_reimplement_hash_verification(self) -> None:
         source = inspect.getsource(evidence_review)

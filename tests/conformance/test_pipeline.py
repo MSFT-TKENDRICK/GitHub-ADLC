@@ -175,14 +175,42 @@ def test_review_pack_covers_every_requirement(completed) -> None:
 # -- criterion 8 ------------------------------------------------------------
 
 def test_report_is_self_contained(completed) -> None:
-    """C8: report.html opens standalone and shows the substance."""
+    """C8: report.html opens standalone and shows the substance.
+
+    "Self-contained" is asserted literally: no remote script, no remote
+    stylesheet, no local asset reference. The report is an evidence artifact
+    rendered from agent-authored run data and posted to pull requests, so a
+    third-party script executing in the reader's browser is a real risk rather
+    than a theoretical one. Diagram rendering via CDN is opt-in.
+    """
     _, rd = completed
     html = rd.report.read_text(encoding="utf-8")
     assert html.startswith("<!doctype html>")
     for fragment in ("ADLC run", "Gates", "Evidence", "Decisions", "Task graph", "flowchart"):
         assert fragment in html, f"report is missing the {fragment!r} section"
+
     # No local asset references: it must survive being emailed as one file.
     assert 'src="./' not in html and 'href="./' not in html
+    # And no remote ones either, which the previous assertion did not cover.
+    assert "<script src=" not in html, "report loads a remote script by default"
+    assert 'rel="stylesheet"' not in html, "report loads a remote stylesheet"
+    assert "http://" not in html.replace("http://www.w3.org", ""), "report references plain HTTP"
+
+
+def test_cdn_diagrams_are_opt_in_and_integrity_pinned(cfg: Config, brief_file) -> None:
+    """The opt-in path must pin Subresource Integrity, not just add a script."""
+    from adlc.stages.report import render
+    from tests.conformance.driver import drive
+
+    rd = drive(cfg, brief_file)
+
+    default_html = render(cfg, rd)
+    assert "<script src=" not in default_html
+
+    cdn_html = render(cfg, rd, cdn_diagrams=True)
+    assert "cdn.jsdelivr.net" in cdn_html
+    assert "integrity=\"sha384-" in cdn_html, "remote script must carry an SRI hash"
+    assert 'crossorigin="anonymous"' in cdn_html, "SRI requires crossorigin to be enforced"
 
 
 # -- criterion 10 -----------------------------------------------------------

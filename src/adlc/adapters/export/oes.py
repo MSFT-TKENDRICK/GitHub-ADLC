@@ -3,13 +3,13 @@
 ``adlc-run/v1`` is the canonical record. OES is an export target and nothing
 more (plan section 1, idea 2). The reason is concrete, not stylistic:
 
-* OES models an **online A/B experiment** — traffic allocation, randomization
+* OES models an **online A/B experiment** -- traffic allocation, randomization
   units, sample-ratio mismatch, p-values, statistical power. An ADLC run is
   usually a build/evaluation run with no live traffic and often a single
   candidate. Forcing one into the other manufactures meaningless nulls.
 * Its ``artifacts[].type`` enum is
   ``chart|screenshot|sql|notebook|csv|dashboard|slide|image|html_report``. It
-  cannot name a Playwright trace, a HAR, or a JSONL console log — the three
+  cannot name a Playwright trace, a HAR, or a JSONL console log -- the three
   artifacts ADLC evidence capture cares most about.
 
 Therefore this exporter **refuses to emit a document unless the run is genuinely
@@ -931,10 +931,7 @@ def _canonical_hash(payload: Any) -> str:
 def _exported_at() -> str:
     """UTC timestamp, honouring ``SOURCE_DATE_EPOCH`` for reproducible exports."""
     epoch = (os.environ.get("SOURCE_DATE_EPOCH") or "").strip()
-    if epoch.isdigit():
-        moment = datetime.fromtimestamp(int(epoch), UTC)
-    else:
-        moment = datetime.now(UTC)
+    moment = datetime.fromtimestamp(int(epoch), UTC) if epoch.isdigit() else datetime.now(UTC)
     return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
@@ -946,8 +943,8 @@ def build_oes_document(
 ) -> dict[str, Any]:
     """Build the OES document for a comparative run.
 
-    Does not itself refuse non-comparative runs — :meth:`OesExporter.export` does
-    that — so callers can inspect a partial mapping when debugging.
+    Does not itself refuse non-comparative runs -- :meth:`OesExporter.export` does
+    that -- so callers can inspect a partial mapping when debugging.
     """
     record = experiment_record(run)
     variants = _variants(run, record)

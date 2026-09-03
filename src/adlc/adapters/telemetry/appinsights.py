@@ -290,7 +290,7 @@ class AppInsightsTelemetry:
                 merged.setdefault(f"adlc.span.{_snake(key)}", value)
 
         for key, value in span.items():
-            if key in _RESERVED_KEYS or value is None or value == "" or value == [] or value == {}:
+            if key in _RESERVED_KEYS or value is None or value in ("", [], {}):
                 continue
             # A dotted key is an OTel semantic-convention attribute. Never rename.
             merged.setdefault(key if "." in key else f"adlc.{key}", value)

@@ -1,0 +1,81 @@
+# Pre-commit hooks for ADLC.
+#
+# Every hook here must be able to FAIL on this repository's real content. A hook
+# that cannot demonstrate a failing case is indistinguishable from one that ran
+# and found nothing, which is the fail-open pattern this project rejects.
+#
+# Scope note: this file configures hygiene and schema checks. It does NOT yet
+# contain the low-evidence rules that were requested as a substitute for
+# anti-slop -- that decision is still `proposed` and unapproved. See
+# docs/decisions/0001-substitute-python-native-low-evidence-rules-for-anti-slop.md.
+#
+#   pip install pre-commit && pre-commit install
+#   pre-commit run --all-files
+
+default_language_version:
+  python: python3
+
+# Generated and vendored content we do not author.
+exclude: |
+  (?x)^(
+    \.github/workflows/.*\.lock\.yml
+    |\.github/aw/.*
+    |.*\.excalidraw
+    |tests/.*/fixtures/.*
+    |docs/PLAN\.md
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+        # gh-aw sources are markdown-with-frontmatter, not YAML documents.
+        exclude: ^\.github/workflows/.*\.md$
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md"]
+      - id: mixed-line-ending
+        # Enforced by .gitattributes too; a stray CRLF corrupts generated patches.
+        args: ["--fix=lf"]
+      - id: detect-private-key
+        # This gate's own test fixture legitimately contains the PEM header
+        # string as sample data for the pattern it is supposed to detect --
+        # not a real key. Excluded from this hook only.
+        exclude: ^tests/l4_security/test_secrets_local\.py$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Pinned to the version used for local analysis. A drifting linter version
+    # produces findings that appear and vanish between machines.
+    rev: v0.16.2
+    hooks:
+      - id: ruff-check
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      # NOTE: ruff-format is deliberately NOT enabled here yet. Enabling it would
+      # rewrite 106 files in whichever change first touched them, mixing a
+      # mechanical reformat into unrelated diffs. It lands in its own change.
+
+  # ---------------------------------------------------------------------------
+  # Project-local checks.
+  #
+  # The low-evidence rules (the Python substitute for anti-slop) are NOT here
+  # yet -- see docs/decisions/0001-*.md, which is `proposed`, not `accepted`.
+  # Nothing in this file should be read as delivering that capability.
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: schemas-valid
+        name: JSON Schemas pass meta-schema and policy checks
+        entry: python tools/lint/check_schemas.py
+        language: system
+        pass_filenames: false
+        # always_run matters: without it pre-commit skips this hook when no
+        # schema files changed, which includes the case where they were all
+        # deleted -- exactly when the empty-set guard needs to fire.
+        always_run: true

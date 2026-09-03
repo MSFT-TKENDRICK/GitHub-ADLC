@@ -122,7 +122,7 @@ def build_review_pack(
             "present": bool(hashes),
         })
 
-    pack = {
+    return {
         "runId": rd.run_id,
         "candidateSha": run.get("headSha") or run.get("baseSha") or "",
         "workflowRunId": None,
@@ -135,7 +135,6 @@ def build_review_pack(
             for digest in by_kind.get("screenshot", [])[:10]
         ],
     }
-    return pack
 
 
 def run_evidence(cfg: Config, rd: RunDir, variant: str = "candidate-a") -> dict[str, Any]:

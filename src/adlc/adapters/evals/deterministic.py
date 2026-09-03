@@ -86,7 +86,7 @@ class DeterministicRubricRunner:
             command = check.get("target", "")
             if not command:
                 return 0.0, "no command configured"
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S602 - runs commands.test/lint from .adlc/config.yaml, which agent patches cannot modify (PROTECTED_PATHS)
                 command, cwd=str(self.root), shell=True,
                 capture_output=True, text=True, check=False,
             )
@@ -118,6 +118,7 @@ class DeterministicRubricRunner:
         for criterion in rubric.get("criteria", []):
             weight = float(criterion.get("weight", 1.0))
             score, rationale = self._evaluate(criterion)
+            requires_judge = criterion.get("kind") == "llm-rubric"
             total_weight += weight
             weighted += score * weight
             criteria_out.append({
@@ -127,6 +128,7 @@ class DeterministicRubricRunner:
                 "passed": score >= 1.0,
                 "rationale": rationale,
                 "evidence": criterion.get("acceptanceRefs") or [],
+                "requiresJudge": requires_judge,
             })
 
         threshold = float(rubric.get("threshold", 0.7))
